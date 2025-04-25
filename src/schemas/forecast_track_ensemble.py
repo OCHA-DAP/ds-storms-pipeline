@@ -7,7 +7,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     UniqueConstraint,
-    ARRAY,
 )
 from .base import Base
 import pandas as pd
@@ -35,6 +34,7 @@ class ForecastTrackEnsemble(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     wind_speed = Column(Float, nullable=False)
+    gust_speed = Column(Float)
     pressure = Column(Float)
 
     # Ensemble-specific fields
@@ -44,10 +44,6 @@ class ForecastTrackEnsemble(Base):
     category = Column(String(20))
     nature = Column(String(20))
     provider = Column(String(20))
-
-    # Store quadrant data as arrays
-    wind_radii = Column(ARRAY(Float))
-    wind_radii_quadrants = Column(ARRAY(Float))
 
     created_at = Column(DateTime, server_default="NOW()", nullable=False)
 

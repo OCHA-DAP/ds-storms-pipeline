@@ -7,7 +7,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     UniqueConstraint,
-    ARRAY,
 )
 from .base import Base
 import pandas as pd
@@ -42,12 +41,6 @@ class ForecastTrack(Base):
     category = Column(String(20))
     nature = Column(String(20))
     provider = Column(String(20))
-
-    # Store quadrant data as arrays
-    wind_radii = Column(ARRAY(Float))  # [34kt, 50kt, 64kt]
-    wind_radii_quadrants = Column(
-        ARRAY(Float)
-    )  # [NE_34, SE_34, SW_34, NW_34, ...]
 
     created_at = Column(DateTime, server_default="NOW()", nullable=False)
 
