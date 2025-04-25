@@ -32,7 +32,7 @@ class Storm(Base):
         Index("idx_storms_season_basin", "season", "basin"),
         Index("idx_storms_name", "name"),
         UniqueConstraint("storm_id", name="uq_storm_id"),
-        {"schema": "storm"},
+        {"schema": "storms"},
     )
 
     @classmethod
@@ -52,7 +52,7 @@ class Storm(Base):
                     cls.__tablename__,
                     conn,
                     if_exists="append",
-                    schema="storm",
+                    schema="storms",
                     index=False,
                     method="multi",
                     chunksize=chunk_size,

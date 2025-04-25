@@ -22,7 +22,7 @@ class ForecastTrackEnsemble(Base):
     id = Column(Integer, primary_key=True)
     storm_id = Column(
         String(50),
-        ForeignKey("storm.storms.storm_id", ondelete="CASCADE"),
+        ForeignKey("storms.storms.storm_id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -62,7 +62,7 @@ class ForecastTrackEnsemble(Base):
             "provider",
             name="uq_ensemble_track",
         ),
-        {"schema": "storm"},
+        {"schema": "storms"},
     )
 
     @classmethod
@@ -93,7 +93,7 @@ class ForecastTrackEnsemble(Base):
                     conn,
                     if_exists="append",
                     index=False,
-                    schema="storm",
+                    schema="storms",
                     method="multi",
                     chunksize=chunk_size,
                 )

@@ -22,7 +22,7 @@ class ForecastTrack(Base):
     id = Column(Integer, primary_key=True)
     storm_id = Column(
         String(50),
-        ForeignKey("storm.storms.storm_id", ondelete="CASCADE"),
+        ForeignKey("storms.storms.storm_id", ondelete="CASCADE"),
         nullable=False,
     )
     issue_time = Column(DateTime, nullable=False)
@@ -61,7 +61,7 @@ class ForecastTrack(Base):
             "provider",
             name="uq_forecast_track",
         ),
-        {"schema": "storm"},
+        {"schema": "storms"},
     )
 
     @classmethod
@@ -98,7 +98,7 @@ class ForecastTrack(Base):
                     if_exists="append",
                     index=False,
                     method="multi",
-                    schema="storm",
+                    schema="storms",
                     chunksize=chunk_size,
                 )
 

@@ -20,7 +20,7 @@ class ObservedTrack(Base):
     id = Column(Integer, primary_key=True)
     storm_id = Column(
         String(50),
-        ForeignKey("storm.storms.storm_id", ondelete="CASCADE"),
+        ForeignKey("storms.storms.storm_id", ondelete="CASCADE"),
         nullable=False,
     )
     valid_time = Column(DateTime, nullable=False)
@@ -54,7 +54,7 @@ class ObservedTrack(Base):
         UniqueConstraint(
             "storm_id", "valid_time", "provider", name="uq_observed_track"
         ),
-        {"schema": "storm"},
+        {"schema": "storms"},
     )
 
     @classmethod
@@ -72,7 +72,7 @@ class ObservedTrack(Base):
                     conn,
                     if_exists="append",
                     index=False,
-                    schema="storm",
+                    schema="storms",
                     method="multi",
                     chunksize=chunk_size,
                 )

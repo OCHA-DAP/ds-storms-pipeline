@@ -1,10 +1,10 @@
-from sqlalchemy import create_engine
-from src.config.settings import AZURE_DB_PW_DEV, AZURE_DB_UID
 from .base import Base
-
 
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def init_db(engine) -> None:
@@ -12,7 +12,7 @@ def init_db(engine) -> None:
     try:
         with engine.connect() as conn:
             with conn.begin():
-                conn.execute(text("CREATE SCHEMA IF NOT EXISTS storm;"))
+                conn.execute(text("CREATE SCHEMA IF NOT EXISTS storms;"))
     except ProgrammingError:
         pass
 
@@ -23,11 +23,4 @@ def drop_all(engine) -> None:
     """Drop all tables and schema."""
     with engine.connect() as conn:
         with conn.begin():
-            conn.execute(text("DROP SCHEMA IF EXISTS storm CASCADE;"))
-
-
-def get_engine(mode="dev"):
-    """Get a database engine instance."""
-    return create_engine(
-        f"postgresql+psycopg2://{AZURE_DB_UID}:{AZURE_DB_PW_DEV}@chd-rasterstats-dev.postgres.database.azure.com/postgres"  # noqa: E501
-    )
+            conn.execute(text("DROP SCHEMA IF EXISTS storms CASCADE;"))
