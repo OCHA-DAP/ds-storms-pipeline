@@ -33,6 +33,7 @@ class ForecastTrack(Base):
     wind_speed = Column(Float, nullable=False)
     gust_speed = Column(Float)
     pressure = Column(Float)
+    basin = Column(String(10), nullable=False)
 
     # Forecast-specific fields
     uncertainty = Column(Float)

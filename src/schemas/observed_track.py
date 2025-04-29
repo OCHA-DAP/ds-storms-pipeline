@@ -1,6 +1,5 @@
 from sqlalchemy import (
     Column,
-    Integer,
     String,
     Float,
     DateTime,
@@ -17,10 +16,10 @@ import numpy as np
 class ObservedTrack(Base):
     __tablename__ = "observed_tracks"
 
-    id = Column(Integer, primary_key=True)
-    storm_id = Column(
+    point_id = Column(String(50), primary_key=True)
+    sid = Column(
         String(50),
-        ForeignKey("storms.storms.storm_id", ondelete="CASCADE"),
+        ForeignKey("storms.storms.sid", ondelete="CASCADE"),
         nullable=False,
     )
     valid_time = Column(DateTime, nullable=False)
@@ -28,12 +27,13 @@ class ObservedTrack(Base):
     longitude = Column(Float, nullable=False)
 
     # Measurements
-    wind_speed = Column(Float, nullable=False)
+    wind_speed = Column(Float)
     gust_speed = Column(Float)
     pressure = Column(Float)
     max_wind_radius = Column(Float)
     last_closed_isobar_radius = Column(Float)
     last_closed_isobar_pressure = Column(Float)
+    basin = Column(String(10))
 
     # Classification
     category = Column(String(20))
@@ -41,19 +41,16 @@ class ObservedTrack(Base):
     provider = Column(String(20))
 
     # Store quadrant data as arrays
-    wind_radii = Column(ARRAY(Float))  # [34kt, 50kt, 64kt]
-    wind_radii_quadrants = Column(
-        ARRAY(Float)
-    )  # [NE_34, SE_34, SW_34, NW_34, ...]
+    quadrant_radius_34 = Column(ARRAY(Float))
+    quadrant_radius_50 = Column(ARRAY(Float))
+    quadrant_radius_64 = Column(ARRAY(Float))
 
     created_at = Column(DateTime, server_default="NOW()", nullable=False)
 
     __table_args__ = (
         Index("idx_observed_tracks_time", "valid_time"),
-        Index("idx_observed_tracks_storm_time", "storm_id", "valid_time"),
-        UniqueConstraint(
-            "storm_id", "valid_time", "provider", name="uq_observed_track"
-        ),
+        Index("idx_observed_tracks_storm_time", "sid", "valid_time"),
+        UniqueConstraint("sid", "valid_time", name="uq_observed_track"),
         {"schema": "storms"},
     )
 
@@ -63,7 +60,10 @@ class ObservedTrack(Base):
     ) -> None:
         df = df.replace({np.nan: None})
         df = handle_datetime_columns(df, ["valid_time", "created_at"])
-        df = handle_array_columns(df, ["wind_radii", "wind_radii_quadrants"])
+        df = handle_array_columns(
+            df,
+            ["quadrant_radius_34", "quadrant_radius_50", "quadrant_radius_64"],
+        )
 
         with engine.connect() as conn:
             with conn.begin():
