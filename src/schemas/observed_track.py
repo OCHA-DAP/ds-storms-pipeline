@@ -33,10 +33,9 @@ class ObservedTrack(Base):
     max_wind_radius = Column(Float)
     last_closed_isobar_radius = Column(Float)
     last_closed_isobar_pressure = Column(Float)
-    basin = Column(String(10))
 
     # Classification
-    category = Column(String(20))
+    basin = Column(String(10))
     nature = Column(String(20))
     provider = Column(String(20))
 
