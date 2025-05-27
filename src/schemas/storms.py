@@ -21,6 +21,7 @@ class Storm(Base):
     season = Column(Integer, nullable=False)
     number = Column(Integer)
     name = Column(String(100))
+    genesis_basin = Column(String(20))
     provisional = Column(Boolean)
     created_at = Column(DateTime, server_default="NOW()", nullable=False)
 
