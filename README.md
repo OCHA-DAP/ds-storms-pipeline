@@ -1,6 +1,6 @@
-# Cyclone Pipeline
+# Storms Pipeline
 
-This repository contains code to download and process cyclone forecasts and observations from various sources. 
+This repository contains code to download and process storm forecasts and observations from various sources. 
 
 ## Getting started
 
