@@ -22,9 +22,9 @@ pip install -r requirements.txt
 3. Create a local `.env` file with the following:
 
 ```
-AZURE_DB_UID=<provided-on-request>
-AZURE_DB_PWD_DEV=<provided-on-request>
-AZURE_DB_PWD_PROD=<provided-on-request>
+DSCI_AZ_DB_DEV_PW_WRITE=<provided-on-request>
+DSCI_AZ_DB_DEV_UID_WRITE=<provided-on-request>
+DSCI_AZ_DB_DEV_HOST=<provided-on-request>
 ```
 
 ### Code quality 
