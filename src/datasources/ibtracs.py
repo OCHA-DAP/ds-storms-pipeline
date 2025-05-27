@@ -1,9 +1,9 @@
 import os
 import tempfile
 import urllib.request
-from pathlib import Path
-from typing import Literal, Optional, List
 import uuid
+from pathlib import Path
+from typing import List, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -33,22 +33,18 @@ def download_ibtracs(
     Path
         Path to the downloaded file
     """
-    # Ensure the directory exists
     if temp_dir is not None:
         os.makedirs(temp_dir, exist_ok=True)
 
     url = (
         "https://www.ncei.noaa.gov/data/"
         "international-best-track-archive-for-climate-stewardship-ibtracs/"
-        f"v04r00/access/netcdf/IBTrACS.{dataset}.v04r00.nc"
+        f"v04r01/access/netcdf/IBTrACS.{dataset}.v04r01.nc"
     )
 
-    filename = f"IBTrACS.{dataset}.v04r00.nc"
+    filename = f"IBTrACS.{dataset}.v04r01.nc"
     download_path = Path(temp_dir) / filename
-
-    print(f"Downloading {url} to {download_path}...")
     urllib.request.urlretrieve(url, download_path)
-    print(f"Download complete: {download_path}")
 
     return download_path
 
@@ -76,18 +72,13 @@ def load_ibtracs(
     if file_path is None:
         # Use a temporary directory that automatically cleans up
         with tempfile.TemporaryDirectory(prefix="ibtracs_data_") as temp_dir:
-            print(f"Created temporary directory: {temp_dir}")
             file_path = download_ibtracs(dataset=dataset, temp_dir=temp_dir)
 
             # Load the dataset and ensure it's fully loaded into memory
             # since temp_dir will be removed after this block
-            print(f"Loading dataset from {file_path}...")
             ds = xr.open_dataset(file_path).load()
-            print("Dataset loaded into memory")
             return ds
     else:
-        # Load from the specified file
-        print(f"Loading dataset from {file_path}...")
         return xr.open_dataset(file_path)
 
 
@@ -126,7 +117,7 @@ def get_provisional_tracks(ds: xr.Dataset) -> pd.DataFrame:
     string_cols = ["sid", "track_type", "usa_agency", "basin", "nature"]
 
     ds_ = ds[usa_cols + other_cols]
-    provisional_mask = ds.track_type == b"PROVISIONAL"  # If stored as bytes
+    provisional_mask = ds_.track_type == b"PROVISIONAL"  # If stored as bytes
     ds_ = ds_.where(provisional_mask, drop=True)
     df = ds_.to_dataframe().reset_index()
     df = _convert_string_columns(df, string_cols)
@@ -161,9 +152,9 @@ def get_provisional_tracks(ds: xr.Dataset) -> pd.DataFrame:
     return result_df
 
 
-def get_wmo_tracks(ds: xr.Dataset) -> pd.DataFrame:
+def get_best_tracks(ds: xr.Dataset) -> pd.DataFrame:
     """
-    Extract WMO-approved storm tracks from the IBTrACS dataset.
+    Extract the "best" storm tracks from the IBTrACS dataset.
 
     Extracts the main tracks that have been assigned a wmo_agency and
     are not marked as PROVISIONAL. These are the official, quality-controlled
@@ -177,7 +168,7 @@ def get_wmo_tracks(ds: xr.Dataset) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        DataFrame containing WMO-approved track data with standardized column names
+        DataFrame containing best track data with standardized column names
 
     Notes
     -----
@@ -276,7 +267,7 @@ def get_wmo_tracks(ds: xr.Dataset) -> pd.DataFrame:
             "lat": "latitude",
             "lon": "longitude",
             "wind": "wind_speed",
-            "gust": "guest_speed",
+            "gust": "gust_speed",
             "pres": "pressure",
             "rmw": "max_wind_radius",
             "roci": "last_closed_isobar_radius",
@@ -329,13 +320,9 @@ def get_storms(ds: xr.Dataset) -> pd.DataFrame:
         "season",
         "name",
         "track_type",
+        "basin",
     ]
-    str_vars = [
-        "sid",
-        "name",
-        "track_type",
-        "usa_atcf_id",
-    ]
+    str_vars = ["sid", "name", "track_type", "usa_atcf_id", "basin"]
 
     ds_subset = ds[storm_cols]
     ds_subset[str_vars] = ds_subset[str_vars].astype(str)
@@ -352,7 +339,9 @@ def get_storms(ds: xr.Dataset) -> pd.DataFrame:
     df_grouped["storm_id"] = [
         str(uuid.uuid4()) for _ in range(len(df_grouped))
     ]
-    return df_grouped.rename(columns={"usa_atcf_id": "atcf_id"})
+    return df_grouped.rename(
+        columns={"usa_atcf_id": "atcf_id", "basin": "genesis_basin"}
+    )
 
 
 def normalize_radii(df, radii_cols=None):
