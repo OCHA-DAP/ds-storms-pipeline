@@ -1,0 +1,28 @@
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0  # PostgreSQL adapter
+alembic>=1.13.0  # For database migrations
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Date handling
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# Optional but recommended
+tqdm>=4.66.0  # For progress bars
+python-dotenv>=1.0.0  # For environment variable management
+pydantic>=2.0.0  # For data validation
+
+# Development dependencies
+pytest>=7.0.0
+black>=24.1.0  # Code formatting
+isort>=5.13.0  # Import sorting
+flake8>=7.0.0  # Code linting
+python-dotenv==1.0.1
+ruff==0.7.4
+pre-commit==4.0.1
+
+ocha-stratus==0.1.3
