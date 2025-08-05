@@ -6,13 +6,14 @@ IBTrACS ETL pipeline
 import ocha_lens as lens
 import ocha_stratus as stratus
 import logging
+import coloredlogs
 
 from src.schemas.ibtracs import IBTRACS_GEO, IBTRACS_STORMS
 
 logger = logging.getLogger(__name__)
 
-# TODO change this to "ALL"
-dataset_type = "last3years"
+# TODO pick this up from parameter
+dataset_type = "ALL"
 
 
 def retrieve_ibtracs(dataset_type, stage="dev", save_to_blob=False):
@@ -51,7 +52,7 @@ def process_tracks(dataset, engine):
 
     tracks_geo.to_sql(
         "ibtracs_tracks_geo_isa",
-        conn=engine.connect(),
+        con=engine.connect(),
         schema=IBTRACS_GEO.schema,
         if_exists="append",
         index=False,
@@ -72,7 +73,7 @@ def process_storms(dataset, engine):
 
     storm_tracks.to_sql(
         "ibtracs_storms_isa",
-        engine.connect(),
+        con=engine.connect(),
         schema=IBTRACS_STORMS.schema,
         if_exists="append",
         index=False,
@@ -87,6 +88,11 @@ def main():
     """
     Main function to orchestrate the execution of pipeline functions.
     """
+
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
     logger.info("Starting IBTrACS ETL pipeline...")
     # TODO pick up mode from parameters
@@ -105,10 +111,10 @@ def main():
         )
 
         # Process tracks and add them to the database
-        process_tracks(dataset=dataset, engine=engine, stage=stage)
+        process_tracks(dataset=dataset, engine=engine)
 
         # Process storms and add them to the database
-        process_storms(dataset=dataset, engine=engine, stage=stage)
+        process_storms(dataset=dataset, engine=engine)
 
         logger.info("Pipeline successfully finished!")
 
