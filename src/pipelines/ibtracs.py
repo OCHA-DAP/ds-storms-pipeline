@@ -2,26 +2,34 @@
 """
 IBTrACS ETL pipeline
 """
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import ocha_lens as lens
 import ocha_stratus as stratus
 import logging
 import coloredlogs
 
-from src.schemas.ibtracs import IBTRACS_GEO, IBTRACS_STORMS
 
 logger = logging.getLogger(__name__)
 
-# TODO pick this up from parameter
-dataset_type = "ALL"
 
-
-def retrieve_ibtracs(dataset_type, stage="dev", save_to_blob=False):
+def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
     """
     Download IBTrACS Netcdf and upload raw to azure
     """
     logger.info(f"Retrieving {dataset_type} from IBTrACS...")
-    path = lens.ibtracs.download_ibtracs(dataset=dataset_type)
+    filename = f"IBTrACS.{dataset_type}.v04r01.nc"
+    file_path = "pipelines/storm/raw/" + filename
+
+    if os.path.exists(file_path):
+        logger.info(f"Using file downloaded in {file_path}...")
+        path = file_path
+    else:
+        path = lens.ibtracs.download_ibtracs(dataset=dataset_type)
 
     if save_to_blob:
         logger.info(f"Uploading {path} to Azure blob in {stage}...")
@@ -29,7 +37,7 @@ def retrieve_ibtracs(dataset_type, stage="dev", save_to_blob=False):
             data_to_upload = file.read()
         stratus.upload_blob_data(
             data=data_to_upload,
-            blob_name="ibtracs/v04r01/IBTrACS.ALL.v04r01.nc",
+            blob_name=f"ibtracs/v04r01/IBTrACS.{dataset_type}.v04r01.nc",
             stage=stage,
         )
         logger.info("Successfully uploaded to blob.")
@@ -43,17 +51,17 @@ def process_tracks(dataset, engine):
     """
     Retrieve 'best' and 'provisional' tracks and upload them to the database
     """
-    logger.info("Processing tracks...")
-
+    logger.info("Extracting tracks...")
     tracks_geo = lens.ibtracs.get_tracks(dataset)
 
     # TODO This might need to be changed in the df methods in lens
     tracks_geo["geometry"] = tracks_geo["geometry"].apply(lambda x: x.wkt)
 
+    logger.info("Updating tracks in database...")
     tracks_geo.to_sql(
         "ibtracs_tracks_geo_isa",
         con=engine.connect(),
-        schema=IBTRACS_GEO.schema,
+        schema="storms",
         if_exists="append",
         index=False,
         method=stratus.postgres_upsert,
@@ -74,9 +82,10 @@ def process_storms(dataset, engine):
     storm_tracks.to_sql(
         "ibtracs_storms_isa",
         con=engine.connect(),
-        schema=IBTRACS_STORMS.schema,
+        schema="storms",
         if_exists="append",
-        index=False,
+        index=True,
+        index_label="index",
         method=stratus.postgres_upsert,
     )
 
@@ -84,9 +93,16 @@ def process_storms(dataset, engine):
     return storm_tracks
 
 
-def main():
+def run_ibtracs(mode,
+                dataset_type,
+                save_to_blob=False):
     """
     Main function to orchestrate the execution of pipeline functions.
+
+    Parameters
+    ----------
+    save_to_blob flag to determine whether the netcdf file should be saved
+    mode [dev or prod]
     """
 
     coloredlogs.install(
@@ -95,16 +111,14 @@ def main():
     )
 
     logger.info("Starting IBTrACS ETL pipeline...")
-    # TODO pick up mode from parameters
-    stage = "dev"
 
     # Setting up engine
-    engine = stratus.get_engine(stage=stage, write=True)
+    engine = stratus.get_engine(stage=mode, write=True)
 
     try:
         # Retrieve data from source and upload to blob if true
         path = retrieve_ibtracs(
-            dataset_type=dataset_type, stage=stage, save_to_blob=False
+            dataset_type=dataset_type, stage=mode, save_to_blob=save_to_blob
         )
         dataset = lens.ibtracs.load_ibtracs(
             file_path=path, dataset=dataset_type
@@ -120,11 +134,3 @@ def main():
 
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
-        return 1
-
-    return 0
-
-
-if __name__ == "__main__":
-    exit_code = main()
-    exit(exit_code)

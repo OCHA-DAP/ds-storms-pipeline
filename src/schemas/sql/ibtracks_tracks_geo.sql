@@ -2,31 +2,31 @@
 
 -- DROP TABLE IF EXISTS storms.ibtracs_tracks_geo;
 
-CREATE TABLE IF NOT EXISTS storms.ibtracs_tracks_geo
-(
-    wind_speed bigint,
-    pressure bigint,
-    max_wind_radius bigint,
-    last_closed_isobar_radius bigint,
-    last_closed_isobar_pressure bigint,
-    gust_speed bigint,
-    sid text COLLATE pg_catalog."default",
-    provider text COLLATE pg_catalog."default",
-    basin text COLLATE pg_catalog."default",
-    nature text COLLATE pg_catalog."default",
-    valid_time timestamp without time zone,
-    quadrant_radius_34 text COLLATE pg_catalog."default",
-    quadrant_radius_50 text COLLATE pg_catalog."default",
-    quadrant_radius_64 text COLLATE pg_catalog."default",
-    point_id text COLLATE pg_catalog."default",
-    storm_id text COLLATE pg_catalog."default",
-    geometry geometry(Point,4326)
-)
+CREATE TABLE IF NOT EXISTS storms.ibtracs_tracks_geo(
+    wind_speed INTEGER CHECK (wind_speed BETWEEN -1 AND 300),
+    pressure INTEGER CHECK (pressure BETWEEN 800 AND 1100),
+    max_wind_radius INTEGER CHECK (max_wind_radius >= 0),
+    last_closed_isobar_radius INTEGER CHECK (last_closed_isobar_radius >= 0),
+    last_closed_isobar_pressure INTEGER CHECK (last_closed_isobar_pressure BETWEEN 800 AND 1100),
+    gust_speed INTEGER CHECK (gust_speed BETWEEN 0 AND 400),
+    sid VARCHAR NOT NULL,
+    provider VARCHAR,
+    basin VARCHAR NOT NULL,
+    nature VARCHAR,
+    valid_time TIMESTAMP NOT NULL,
+    quadrant_radius_34 TEXT NOT NULL,
+    quadrant_radius_50 TEXT NOT NULL,
+    quadrant_radius_64 TEXT,
+    point_id VARCHAR NOT NULL,
+    storm_id VARCHAR NOT NULL,
+    geometry geometry(Point,4326) NOT NULL,
+    CONSTRAINT unique_sid_storm_time UNIQUE (sid, storm_id, valid_time)
+);
 
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS storms.ibtracs_tracks_geo
-    OWNER to dbwriter;
+    OWNER to {owner};
 -- Index: idx_ibtracs_tracks_geo_geometry
 
 -- DROP INDEX IF EXISTS storms.idx_ibtracs_tracks_geo_geometry;
