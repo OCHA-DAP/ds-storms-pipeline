@@ -49,7 +49,7 @@ def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
     return path
 
 
-def process_tracks(dataset, engine):
+def process_tracks(dataset, engine, chunksize):
     """
     Retrieve 'best' and 'provisional' tracks and upload them to the database
     """
@@ -69,13 +69,14 @@ def process_tracks(dataset, engine):
         if_exists="append",
         index=False,
         method=stratus.postgres_upsert,
+        chunksize=chunksize,
     )
     logger.info("Successfully processed tracks.")
 
     return tracks_geo
 
 
-def process_storms(dataset, engine):
+def process_storms(dataset, engine, chunksize):
     """
     Retrieve 'storm' tracks and upload them to the database
     """
@@ -91,13 +92,14 @@ def process_storms(dataset, engine):
         index=True,
         index_label="index",
         method=stratus.postgres_upsert,
+        chunksize=chunksize,
     )
 
     logger.info("Successfully processed storms.")
     return storm_tracks
 
 
-def run_ibtracs(mode, dataset_type, save_to_blob=False):
+def run_ibtracs(mode, dataset_type, save_to_blob=False, chunksize=10000):
     """
     Main function to orchestrate the execution of pipeline functions.
 
@@ -127,10 +129,10 @@ def run_ibtracs(mode, dataset_type, save_to_blob=False):
         )
 
         # Process tracks and add them to the database
-        process_tracks(dataset=dataset, engine=engine)
+        process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
 
         # Process storms and add them to the database
-        process_storms(dataset=dataset, engine=engine)
+        process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
 
         logger.info("Pipeline successfully finished!")
 
