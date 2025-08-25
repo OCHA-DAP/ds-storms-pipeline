@@ -30,7 +30,6 @@ def main():
         default="last3years",
         nargs="?",
         help="Which dataset type to use",
-
     )
 
     args, remaining_args = main_parser.parse_known_args()

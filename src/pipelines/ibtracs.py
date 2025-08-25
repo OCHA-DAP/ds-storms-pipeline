@@ -2,16 +2,16 @@
 """
 IBTrACS ETL pipeline
 """
-import os
 
+import os
+import logging
+import coloredlogs
+import ocha_lens as lens
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import ocha_lens as lens
-import ocha_stratus as stratus
-import logging
-import coloredlogs
+import ocha_stratus as stratus  # noqa
 
 
 logger = logging.getLogger(__name__)
@@ -29,8 +29,9 @@ def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
         logger.info(f"Using file downloaded in {file_path}...")
         path = file_path
     else:
-        path = lens.ibtracs.download_ibtracs(dataset=dataset_type,
-                                             save_dir="/dbfs/tmp")
+        path = lens.ibtracs.download_ibtracs(
+            dataset=dataset_type, save_dir="/dbfs/tmp"
+        )
 
     if save_to_blob:
         logger.info(f"Uploading {path} to Azure blob in {stage}...")
@@ -55,12 +56,14 @@ def process_tracks(dataset, engine):
     logger.info("Extracting tracks...")
     tracks_geo = lens.ibtracs.get_tracks(dataset)
 
-    # TODO This might need to be changed in the df methods in lens
+    # In order to comply with the type of object we can apply this function to each geometry
+    # and then run the upsert or use to_postgis to a temporary table instead of to_sql and
+    # then run another query to do the upsert
     tracks_geo["geometry"] = tracks_geo["geometry"].apply(lambda x: x.wkt)
 
     logger.info("Updating tracks in database...")
     tracks_geo.to_sql(
-        "ibtracs_tracks_geo_isa",
+        "ibtracs_tracks_geo",
         con=engine.connect(),
         schema="storms",
         if_exists="append",
@@ -81,7 +84,7 @@ def process_storms(dataset, engine):
     storm_tracks = lens.ibtracs.get_storms(dataset)
 
     storm_tracks.to_sql(
-        "ibtracs_storms_isa",
+        "ibtracs_storms",
         con=engine.connect(),
         schema="storms",
         if_exists="append",
@@ -94,9 +97,7 @@ def process_storms(dataset, engine):
     return storm_tracks
 
 
-def run_ibtracs(mode,
-                dataset_type,
-                save_to_blob=False):
+def run_ibtracs(mode, dataset_type, save_to_blob=False):
     """
     Main function to orchestrate the execution of pipeline functions.
 
