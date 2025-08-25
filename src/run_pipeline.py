@@ -2,6 +2,7 @@ import argparse
 import sys
 
 from src.pipelines.ibtracs import run_ibtracs
+from src.pipelines.ecmwf import run_ecmwf
 
 
 def main():
@@ -47,8 +48,7 @@ def main():
             args.mode, args.dataset_type, args.save_to_blob, args.chunksize
         )
     elif args.pipeline == "ecmwf":
-        # TODO
-        raise NotImplementedError()
+        run_ecmwf(args.mode, args.save_to_blob, args.chunksize)
     else:
         raise ValueError(f"Unknown pipeline: {args.pipeline}")
 
