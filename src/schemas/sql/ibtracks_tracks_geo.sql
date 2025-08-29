@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS storms.ibtracs_tracks_geo(
     point_id VARCHAR NOT NULL,
     storm_id VARCHAR NOT NULL,
     geometry geometry(Point,4326) NOT NULL,
-    CONSTRAINT unique_sid_storm_time UNIQUE (sid, storm_id, valid_time)
+    CONSTRAINT ibtracs_tracks_geo_unique UNIQUE (sid, storm_id, valid_time)
 );
 
 TABLESPACE pg_default;

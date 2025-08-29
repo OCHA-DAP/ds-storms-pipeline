@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS storms.ibtracs_storms(
     genesis_basin VARCHAR NOT NULL,
     provisional BOOLEAN NOT NULL,
     storm_id VARCHAR NOT NULL,
-    CONSTRAINT unique_sid_storm_id UNIQUE (sid, storm_id)
+    CONSTRAINT ibtracs_storms_unique UNIQUE (sid, storm_id)
 );
 
 

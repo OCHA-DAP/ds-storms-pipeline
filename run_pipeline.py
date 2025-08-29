@@ -33,7 +33,6 @@ def main():
     )
     main_parser.add_argument(
         "--chunksize",
-        choices=["last3years", "ACTIVE", "ALL"],
         default=10000,
         nargs="?",
         help="Which chunksize to us in sql",

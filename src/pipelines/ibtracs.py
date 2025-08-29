@@ -38,6 +38,7 @@ def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
         with open(path, "rb") as file:
             data_to_upload = file.read()
         stratus.upload_blob_data(
+            container_name="storm",
             data=data_to_upload,
             blob_name=f"ibtracs/v04r01/IBTrACS.{dataset_type}.v04r01.nc",
             stage=stage,
@@ -62,15 +63,16 @@ def process_tracks(dataset, engine, chunksize):
     tracks_geo["geometry"] = tracks_geo["geometry"].apply(lambda x: x.wkt)
 
     logger.info("Updating tracks in database...")
-    tracks_geo.to_sql(
-        "ibtracs_tracks_geo",
-        con=engine.connect(),
-        schema="storms",
-        if_exists="append",
-        index=False,
-        method=stratus.postgres_upsert,
-        chunksize=chunksize,
-    )
+    with engine.connect() as conn:
+        tracks_geo.to_sql(
+            name="ibtracs_tracks_geo",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
     logger.info("Successfully processed tracks.")
 
     return tracks_geo
@@ -84,16 +86,17 @@ def process_storms(dataset, engine, chunksize):
 
     storm_tracks = lens.ibtracs.get_storms(dataset)
 
-    storm_tracks.to_sql(
-        "ibtracs_storms",
-        con=engine.connect(),
-        schema="storms",
-        if_exists="append",
-        index=True,
-        index_label="index",
-        method=stratus.postgres_upsert,
-        chunksize=chunksize,
-    )
+    with engine.connect() as conn:
+        storm_tracks.to_sql(
+            "ibtracs_storms",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=True,
+            index_label="index",
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
 
     logger.info("Successfully processed storms.")
     return storm_tracks
