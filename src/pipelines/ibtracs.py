@@ -60,7 +60,8 @@ def process_tracks(dataset, engine, chunksize):
     # In order to comply with the type of object we can apply this function to each geometry
     # and then run the upsert or use to_postgis to a temporary table instead of to_sql and
     # then run another query to do the upsert
-    tracks_geo["geometry"] = tracks_geo["geometry"].apply(lambda x: x.wkt)
+    logger.info("Transforming geometry...")
+    tracks_geo["geometry"] = tracks_geo["geometry"].to_wkt()
 
     logger.info("Updating tracks in database...")
     with engine.connect() as conn:
