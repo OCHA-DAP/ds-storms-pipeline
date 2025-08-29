@@ -141,3 +141,4 @@ def run_ibtracs(mode, dataset_type, save_to_blob=False, chunksize=10000):
 
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
+        raise
