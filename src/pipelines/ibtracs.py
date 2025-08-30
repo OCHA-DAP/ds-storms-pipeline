@@ -29,9 +29,7 @@ def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
         logger.info(f"Using file downloaded in {file_path}...")
         path = file_path
     else:
-        path = lens.ibtracs.download_ibtracs(
-            dataset=dataset_type, save_dir="/dbfs/tmp"
-        )
+        path = lens.ibtracs.download_ibtracs(dataset=dataset_type)
 
     if save_to_blob:
         logger.info(f"Uploading {path} to Azure blob in {stage}...")
