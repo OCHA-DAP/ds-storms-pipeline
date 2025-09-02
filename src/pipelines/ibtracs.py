@@ -26,7 +26,7 @@ def retrieve_ibtracs(
     """
     logger.info(f"Retrieving {dataset_type} from IBTrACS...")
     filename = f"IBTrACS.{dataset_type}.v04r01.nc"
-    file_path = "pipelines/storm/raw/" + filename
+    file_path = f"{save_dir}/raw/" + filename
 
     if os.path.exists(file_path):
         logger.info(f"Using file downloaded in {file_path}...")
@@ -49,7 +49,7 @@ def retrieve_ibtracs(
         )
         logger.info("Successfully uploaded to blob.")
 
-    return xr.open_dataset(path).load()
+    return xr.open_dataset(path)
 
 
 def process_tracks(dataset, engine, chunksize):
