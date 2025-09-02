@@ -32,10 +32,16 @@ def main():
         help="Which dataset type to use",
     )
     main_parser.add_argument(
+        "--save-dir",
+        default="/tmp",
+        nargs="?",
+        help="Where to save downloaded file",
+    )
+    main_parser.add_argument(
         "--chunksize",
         default=10000,
         nargs="?",
-        help="Which chunksize to us in sql",
+        help="Which chunksize to use in sql",
     )
 
     args, remaining_args = main_parser.parse_known_args()

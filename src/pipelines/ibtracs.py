@@ -8,6 +8,7 @@ import logging
 import coloredlogs
 import ocha_lens as lens
 from dotenv import load_dotenv
+import xarray as xr
 
 load_dotenv()
 
@@ -17,7 +18,9 @@ import ocha_stratus as stratus  # noqa
 logger = logging.getLogger(__name__)
 
 
-def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
+def retrieve_ibtracs(
+    dataset_type, stage="local", save_to_blob=False, save_dir=None
+):
     """
     Download IBTrACS Netcdf and upload raw to azure
     """
@@ -30,8 +33,9 @@ def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
         path = file_path
     else:
         path = lens.ibtracs.download_ibtracs(
-            dataset=dataset_type, save_dir="/tmp"
+            dataset=dataset_type, save_dir=save_dir
         )
+        logger.info(f"Successfully downloaded {dataset_type} to {path}.")
 
     if save_to_blob:
         logger.info(f"Uploading {path} to Azure blob in {stage}...")
@@ -45,9 +49,7 @@ def retrieve_ibtracs(dataset_type, stage="local", save_to_blob=False):
         )
         logger.info("Successfully uploaded to blob.")
 
-    logger.info(f"Successfully downloaded {dataset_type} to {path}.")
-
-    return path
+    return xr.open_dataset(path).load()
 
 
 def process_tracks(dataset, engine, chunksize):
@@ -103,7 +105,9 @@ def process_storms(dataset, engine, chunksize):
     return storm_tracks
 
 
-def run_ibtracs(mode, dataset_type, save_to_blob=False, chunksize=10000):
+def run_ibtracs(
+    mode, dataset_type, save_to_blob=False, save_dir="/tmp", chunksize=10000
+):
     """
     Main function to orchestrate the execution of pipeline functions.
 
@@ -125,11 +129,11 @@ def run_ibtracs(mode, dataset_type, save_to_blob=False, chunksize=10000):
 
     try:
         # Retrieve data from source and upload to blob if true
-        path = retrieve_ibtracs(
-            dataset_type=dataset_type, stage=mode, save_to_blob=save_to_blob
-        )
-        dataset = lens.ibtracs.load_ibtracs(
-            file_path=path, dataset=dataset_type
+        dataset = retrieve_ibtracs(
+            dataset_type=dataset_type,
+            stage=mode,
+            save_to_blob=save_to_blob,
+            save_dir=save_dir,
         )
 
         # Process tracks and add them to the database
