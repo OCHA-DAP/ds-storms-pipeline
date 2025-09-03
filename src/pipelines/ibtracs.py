@@ -22,11 +22,11 @@ def retrieve_ibtracs(
     dataset_type, stage="local", save_to_blob=False, save_dir=None
 ):
     """
-    Download IBTrACS Netcdf and upload raw to azure
+    Download IBTrACS Netcdf, upload raw to azure if needed and return loaded Dataset
     """
     logger.info(f"Retrieving {dataset_type} from IBTrACS...")
     filename = f"IBTrACS.{dataset_type}.v04r01.nc"
-    file_path = f"{save_dir}/raw/" + filename
+    file_path = f"{save_dir}/" + filename
 
     if os.path.exists(file_path):
         logger.info(f"Using file downloaded in {file_path}...")
@@ -44,12 +44,12 @@ def retrieve_ibtracs(
         stratus.upload_blob_data(
             container_name="storm",
             data=data_to_upload,
-            blob_name=f"ibtracs/v04r01/IBTrACS.{dataset_type}.v04r01.nc",
+            blob_name=f"ibtracs/v04r01/{filename}",
             stage=stage,
         )
         logger.info("Successfully uploaded to blob.")
 
-    return xr.open_dataset(path)
+    return xr.open_dataset(path).load()
 
 
 def process_tracks(dataset, engine, chunksize):
@@ -129,15 +129,12 @@ def run_ibtracs(
 
     try:
         # Retrieve data from source and upload to blob if true
-        """
         dataset = retrieve_ibtracs(
             dataset_type=dataset_type,
             stage=mode,
             save_to_blob=save_to_blob,
             save_dir=save_dir,
         )
-        """
-        dataset = lens.ibtracs.load_ibtracs(dataset="ALL")
 
         # Process tracks and add them to the database
         process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
