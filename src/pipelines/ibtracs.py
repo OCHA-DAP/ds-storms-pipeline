@@ -129,12 +129,15 @@ def run_ibtracs(
 
     try:
         # Retrieve data from source and upload to blob if true
+        """
         dataset = retrieve_ibtracs(
             dataset_type=dataset_type,
             stage=mode,
             save_to_blob=save_to_blob,
             save_dir=save_dir,
         )
+        """
+        dataset = lens.ibtracs.load_ibtracs(dataset="ALL")
 
         # Process tracks and add them to the database
         process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
