@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS storms.ibtracs_tracks_geo(
     last_closed_isobar_pressure INTEGER CHECK (last_closed_isobar_pressure BETWEEN 800 AND 1100),
     gust_speed INTEGER CHECK (gust_speed BETWEEN 0 AND 400),
     sid VARCHAR NOT NULL,
-    provider VARCHAR,
+    provider VARCHAR NOT NULL,
     basin VARCHAR NOT NULL,
     nature VARCHAR,
     valid_time TIMESTAMP NOT NULL,
@@ -18,11 +18,12 @@ CREATE TABLE IF NOT EXISTS storms.ibtracs_tracks_geo(
     quadrant_radius_50 TEXT NOT NULL,
     quadrant_radius_64 TEXT,
     point_id VARCHAR NOT NULL,
-    storm_id VARCHAR NOT NULL,
+    storm_id VARCHAR,
     geometry geometry(Point,4326) NOT NULL,
-    CONSTRAINT ibtracs_tracks_geo_unique UNIQUE (sid, storm_id, valid_time)
+    CONSTRAINT ibtracs_tracks_geo_unique UNIQUE (sid, storm_id, valid_time),
+	CONSTRAINT foreign_key_sid FOREIGN KEY (sid)
+	REFERENCES storms.ibtracs_storms(sid)
 );
-
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS storms.ibtracs_tracks_geo

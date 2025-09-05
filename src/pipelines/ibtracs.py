@@ -95,8 +95,7 @@ def process_storms(dataset, engine, chunksize):
             con=conn,
             schema="storms",
             if_exists="append",
-            index=True,
-            index_label="index",
+            index=False,
             method=stratus.postgres_upsert,
             chunksize=chunksize,
         )
@@ -136,11 +135,11 @@ def run_ibtracs(
             save_dir=save_dir,
         )
 
-        # Process tracks and add them to the database
-        process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
-
         # Process storms and add them to the database
         process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
+
+        # Process tracks and add them to the database
+        process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
 
         logger.info("Pipeline successfully finished!")
 
