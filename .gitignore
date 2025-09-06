@@ -135,9 +135,6 @@ dmypy.json
 # PyCharm
 .idea/
 
-# ignore .ipynb as per coding guidelines
-*.ipynb
-
 # GDrive credentials
 credentials.json
 token.json
