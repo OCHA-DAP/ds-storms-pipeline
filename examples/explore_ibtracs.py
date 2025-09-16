@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.15.0"
+__generated_with = "0.15.2"
 app = marimo.App()
 
 
@@ -92,13 +92,11 @@ def _(STAGE, df_storms, mo, most_recent_date):
 
 @app.cell
 def _(df_storms, mo, px):
-    df_basin = (
-        df_storms.groupby(["genesis_basin"])["index"].count().reset_index()
-    )
+    df_basin = df_storms.groupby(["genesis_basin"]).count().reset_index()
     fig_basin = px.bar(
         df_basin,
         x="genesis_basin",
-        y="index",
+        y="sid",
         template="simple_white",
         title="Count of storms per basin",
     )
@@ -107,11 +105,11 @@ def _(df_storms, mo, px):
         yaxis=dict(showgrid=True, gridcolor="lightgrey", title="", ticks=""),
     )
 
-    df_season = df_storms.groupby(["season"])["index"].count().reset_index()
+    df_season = df_storms.groupby(["season"]).count().reset_index()
     fig_season = px.line(
         df_season,
         x="season",
-        y="index",
+        y="sid",
         template="simple_white",
         title="Count of storms per season",
     )
