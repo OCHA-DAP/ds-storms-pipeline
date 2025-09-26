@@ -98,10 +98,12 @@ def _(df_storms, mo, px):
         x="genesis_basin",
         y="sid",
         template="simple_white",
-        title="Count of storms per basin",
+        title="Storms per basin",
     )
     fig_basin.update_layout(
         margin=dict(l=0, r=0, t=40, b=0),
+        width=300,
+        height=300,
         yaxis=dict(showgrid=True, gridcolor="lightgrey", title="", ticks=""),
     )
 
@@ -111,10 +113,12 @@ def _(df_storms, mo, px):
         x="season",
         y="sid",
         template="simple_white",
-        title="Count of storms per season",
+        title="Storms per season",
     )
     fig_season.update_layout(
         margin=dict(l=0, r=0, t=40, b=0),
+        width=300,
+        height=300,
         yaxis=dict(showgrid=True, gridcolor="lightgrey", title="", ticks=""),
     )
 

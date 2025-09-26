@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.15.0"
+__generated_with = "0.15.2"
 app = marimo.App()
 
 
@@ -91,10 +91,12 @@ def _(df_storms, mo, px):
         x="genesis_basin",
         y="index",
         template="simple_white",
-        title="Count of storms per basin",
+        title="Storms per basin",
     )
     fig_basin.update_layout(
         margin=dict(l=0, r=0, t=40, b=0),
+        width=300,
+        height=300,
         yaxis=dict(showgrid=True, gridcolor="lightgrey", title="", ticks=""),
     )
 
@@ -104,10 +106,12 @@ def _(df_storms, mo, px):
         x="season",
         y="index",
         template="simple_white",
-        title="Count of storms per season",
+        title="Storms per season",
     )
     fig_season.update_layout(
         margin=dict(l=0, r=0, t=40, b=0),
+        width=300,
+        height=300,
         yaxis=dict(showgrid=True, gridcolor="lightgrey", title="", ticks=""),
     )
 
@@ -130,7 +134,7 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(
-        r"""Use the selector to explore track-level data with wind speed and pressure forecasts. A single storm may have multiple forecast tracks. The database contains additional tracks for non-named storms (and so are missing a `storm_id`). More complex queries to the database (ie. by spatial and temporal bounding boxes) may be necessary to include forecasts for a given storm before it was given a name. Storms that cross basins may also receive separate `storm_id`s -- see `sarai_sp_2020` and `sarai_si_2020`. """
+        r"""Use the selector to explore track-level data with wind speed and pressure forecasts. A single storm may have multiple forecast tracks. The database contains additional tracks for non-named storms (and so are missing a `storm_id`). More complex queries to the database (ie. by spatial and temporal bounding boxes) may be necessary to include forecasts for a given storm before it was given a name. Storms that cross basins may also receive separate `storm_id`s -- see `sarai_sp_2020` and `sarai_si_2020`."""
     )
     return
 
