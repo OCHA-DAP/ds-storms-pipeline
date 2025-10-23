@@ -39,7 +39,7 @@ def _():
 
     import ocha_stratus as stratus
 
-    STAGE = "dev"
+    STAGE = "prod"
     return STAGE, gpd, io, np, pd, px, stratus, text
 
 
