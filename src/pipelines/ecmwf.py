@@ -38,7 +38,7 @@ def retrieve_ecmwf(
             end_date=end_date,
             stage=stage,
             temp_dir=save_dir,
-            use_cache=True
+            use_cache=False
         )
         df.to_csv(file_path, index=False, na_rep=None)
         logger.info(f"Successfully wrote ECMWF data to {file_path}.")
