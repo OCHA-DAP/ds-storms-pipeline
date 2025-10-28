@@ -71,12 +71,12 @@ def main():
         from datetime import datetime
 
         run_ecmwf(
-            args.mode,
-            datetime.strptime(args.start_date, "%Y-%m-%d"),
-            datetime.strptime(args.end_date, "%Y-%m-%d"),
-            args.save_to_blob,
-            args.save_dir,
-            args.chunksize,
+            mode=args.mode,
+            start_date=datetime.strptime(args.start_date, "%Y-%m-%d"),
+            end_date=datetime.strptime(args.end_date, "%Y-%m-%d"),
+            save_to_blob=args.save_to_blob,
+            save_dir=args.save_dir,
+            chunksize=args.chunksize,
         )
     else:
         raise ValueError(f"Unknown pipeline: {args.pipeline}")
