@@ -53,7 +53,7 @@ def retrieve_ecmwf(
         for date in date_list:
             logger.info(f"Processing for {date}...")
             raw_file = download_hindcasts(
-                date, "storm", use_cache, True, stage
+                date, "storm", use_cache, False, stage
             )
             if raw_file:
                 df = _process_cxml_to_df(raw_file, stage, save_dir)
