@@ -1,6 +1,7 @@
 import argparse
 import sys
 
+from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import run_ibtracs
 
 
@@ -32,6 +33,18 @@ def main():
         help="Which dataset type to use",
     )
     main_parser.add_argument(
+        "--start-date",
+        default="2019-12-20",
+        nargs="?",
+        help="Which date to start",
+    )
+    main_parser.add_argument(
+        "--end-date",
+        default="2019-12-25",
+        nargs="?",
+        help="Which date to end",
+    )
+    main_parser.add_argument(
         "--save-dir",
         default="/tmp",
         nargs="?",
@@ -50,14 +63,21 @@ def main():
     if args.pipeline == "ibtracs":
         run_ibtracs(
             args.mode,
-            args.dataset_type,
             args.save_to_blob,
             args.save_dir,
             args.chunksize,
         )
     elif args.pipeline == "ecmwf":
-        # TODO
-        raise NotImplementedError()
+        from datetime import datetime
+
+        run_ecmwf(
+            args.mode,
+            datetime.strptime(args.start_date, "%Y-%m-%d"),
+            datetime.strptime(args.end_date, "%Y-%m-%d"),
+            args.save_to_blob,
+            args.save_dir,
+            args.chunksize,
+        )
     else:
         raise ValueError(f"Unknown pipeline: {args.pipeline}")
 
