@@ -56,7 +56,7 @@ def retrieve_ecmwf(
                 date, "storm", use_cache, False, stage
             )
             if raw_file:
-                df = _process_cxml_to_df(raw_file, stage, save_dir)
+                df = _process_cxml_to_df(raw_file, stage, "storm")
                 if df is not None:
                     dfs.append(df)
         if len(dfs) > 0:
