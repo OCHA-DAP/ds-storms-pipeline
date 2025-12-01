@@ -188,7 +188,7 @@ def run_ecmwf(
         dataset = lens.ecmwf_storm.load_hindcasts(
             start_date=start_date,
             end_date=end_date,
-            use_cache=True,
+            use_cache=False,
             stage=mode,
             skip_if_missing=False,
             temp_dir="/tmp/storm/",
