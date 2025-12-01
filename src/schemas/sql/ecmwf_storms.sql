@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS storms.ecmwf_storms_hannah(
     genesis_basin VARCHAR NOT NULL,
     name VARCHAR NULL,
     storm_id VARCHAR,
-    CONSTRAINT ecmwf_storms_unique_hannah PRIMARY KEY (storm_id)
+    CONSTRAINT ecmwf_storms_hannah_unique PRIMARY KEY (storm_id)
 );
 
 TABLESPACE pg_default;

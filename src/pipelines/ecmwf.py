@@ -15,7 +15,15 @@ import ocha_stratus as stratus  # noqa
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
+ecmwf_logger = logging.getLogger("ocha_lens.datasources.ecmwf_storm")
+ecmwf_logger.setLevel(logging.DEBUG)
+coloredlogs.install(
+    logger=ecmwf_logger,
+    level=logging.DEBUG,
+    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 # def retrieve_ecmwf(
 #     start_date, end_date, stage="local", save_to_blob=False, save_dir=None, use_cache=True
@@ -103,7 +111,7 @@ def process_tracks(dataset, engine, chunksize):
     logger.info("Updating tracks in database...")
     with engine.connect() as conn:
         tracks_geo.to_sql(
-            name="ecmwf_tracks_geo_isa",
+            name="ecmwf_tracks_geo_hannah",
             con=conn,
             schema="storms",
             if_exists="append",
@@ -126,7 +134,7 @@ def process_storms(dataset, engine, chunksize):
 
     with engine.connect() as conn:
         storm_tracks.to_sql(
-            "ecmwf_storms_isa",
+            "ecmwf_storms_hannah",
             con=conn,
             schema="storms",
             if_exists="append",
