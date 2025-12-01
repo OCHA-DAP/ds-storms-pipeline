@@ -191,7 +191,7 @@ def run_ecmwf(
             use_cache=True,
             stage=mode,
             skip_if_missing=False,
-            temp_dir="storm/",
+            temp_dir="/tmp/storm/",
         )
 
         # Process storms and add them to the database
