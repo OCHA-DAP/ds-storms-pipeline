@@ -3,17 +3,11 @@
 ECMWF ETL pipeline
 """
 
-import os
 import logging
-from datetime import timedelta
-from pathlib import Path
 
 import coloredlogs
 import ocha_lens as lens
-import pandas as pd
 from dotenv import load_dotenv
-from dateutil import rrule
-from ocha_lens.datasources.ecmwf_storm import download_hindcasts, _process_cxml_to_df
 
 load_dotenv()
 
@@ -23,74 +17,74 @@ import ocha_stratus as stratus  # noqa
 logger = logging.getLogger(__name__)
 
 
-def retrieve_ecmwf(
-    start_date, end_date, stage="local", save_to_blob=False, save_dir=None, use_cache=True
-):
-    """
-    Download ECMWF data, upload raw to azure if needed and return loaded Dataset
-    """
+# def retrieve_ecmwf(
+#     start_date, end_date, stage="local", save_to_blob=False, save_dir=None, use_cache=True
+# ):
+#     """
+#     Download ECMWF data, upload raw to azure if needed and return loaded Dataset
+#     """
 
-    logger.info(f"Retrieving from ECMWF {start_date} to {end_date} ...")
-    filename = f"ECMWF_{start_date.date()}_{end_date.date()}.csv"
-    file_path = f"{save_dir}/" + filename
+#     logger.info(f"Retrieving from ECMWF {start_date} to {end_date} ...")
+#     filename = f"ECMWF_{start_date.date()}_{end_date.date()}.csv"
+#     file_path = f"{save_dir}/" + filename
 
-    if os.path.exists(file_path):
-        logger.info(f"Using file downloaded in {file_path}...")
-        df = pd.read_csv(file_path, parse_dates=["issued_time", "valid_time"])
-    else:
-        if stage == "local":
-            save_dir = Path(save_dir) if save_dir else Path("temp")
-            os.makedirs(save_dir, exist_ok=True)
+#     if os.path.exists(file_path):
+#         logger.info(f"Using file downloaded in {file_path}...")
+#         df = pd.read_csv(file_path, parse_dates=["issued_time", "valid_time"])
+#     else:
+#         if stage == "local":
+#             save_dir = Path(save_dir) if save_dir else Path("temp")
+#             os.makedirs(save_dir, exist_ok=True)
 
-        date_list = rrule.rrule(
-            rrule.HOURLY,
-            dtstart=start_date,
-            until=end_date + timedelta(hours=12),
-            interval=12,
-        )
+#         date_list = rrule.rrule(
+#             rrule.HOURLY,
+#             dtstart=start_date,
+#             until=end_date + timedelta(hours=12),
+#             interval=12,
+#         )
 
-        dfs = []
-        for date in date_list:
-            logger.info(f"Processing for {date}...")
-            raw_file = download_hindcasts(
-                date, "storm", use_cache, False, stage
-            )
-            if raw_file:
-                df = _process_cxml_to_df(raw_file, stage, "storm")
-                if df is not None:
-                    dfs.append(df)
-        if len(dfs) > 0:
-            df = pd.concat(dfs)
-            df.to_csv(file_path, index=False, na_rep=None)
+#         dfs = []
+#         for date in date_list:
+#             logger.info(f"Processing for {date}...")
+#             raw_file = download_hindcasts(
+#                 date, "storm", use_cache, False, stage
+#             )
+#             if raw_file:
+#                 df = _process_cxml_to_df(raw_file, stage, "storm")
+#                 if df is not None:
+#                     dfs.append(df)
+#         if len(dfs) > 0:
+#             df = pd.concat(dfs)
+#             df.to_csv(file_path, index=False, na_rep=None)
 
-            logger.info(f"Successfully wrote ECMWF data to {file_path}.")
-            return df
-        logger.error("No data available for input dates")
-        return None
-        """
-        df = lens.ecmwf_storm.load_hindcasts(
-            start_date=start_date,
-            end_date=end_date,
-            stage=stage,
-            temp_dir=save_dir,
-            use_cache=False
-        )
-        """
+#             logger.info(f"Successfully wrote ECMWF data to {file_path}.")
+#             return df
+#         logger.error("No data available for input dates")
+#         return None
+#         """
+#         df = lens.ecmwf_storm.load_hindcasts(
+#             start_date=start_date,
+#             end_date=end_date,
+#             stage=stage,
+#             temp_dir=save_dir,
+#             use_cache=False
+#         )
+#         """
 
 
-    if save_to_blob:
-        logger.info(f"Uploading {file_path} to Azure blob in {stage}...")
-        with open(file_path, "rb") as file:
-            data_to_upload = file.read()
-        stratus.upload_blob_data(
-            container_name="storm",
-            data=data_to_upload,
-            blob_name=f"ecmwf/{filename}",
-            stage=stage,
-        )
-        logger.info("Successfully uploaded to blob.")
+# if save_to_blob:
+#     logger.info(f"Uploading {file_path} to Azure blob in {stage}...")
+#     with open(file_path, "rb") as file:
+#         data_to_upload = file.read()
+#     stratus.upload_blob_data(
+#         container_name="storm",
+#         data=data_to_upload,
+#         blob_name=f"ecmwf/{filename}",
+#         stage=stage,
+#     )
+#     logger.info("Successfully uploaded to blob.")
 
-    return df
+# return df
 
 
 def process_tracks(dataset, engine, chunksize):
@@ -176,12 +170,19 @@ def run_ecmwf(
 
     try:
         # Retrieve data from source and upload to blob if true
-        dataset = retrieve_ecmwf(
+        # dataset = retrieve_ecmwf(
+        #     start_date=start_date,
+        #     end_date=end_date,
+        #     stage=mode,
+        #     save_to_blob=save_to_blob,
+        #     save_dir=save_dir,
+        # )
+        dataset = lens.ecmwf_storm.load_hindcasts(
             start_date=start_date,
             end_date=end_date,
+            use_cache=True,
             stage=mode,
-            save_to_blob=save_to_blob,
-            save_dir=save_dir,
+            skip_if_missing=False,
         )
 
         # Process storms and add them to the database

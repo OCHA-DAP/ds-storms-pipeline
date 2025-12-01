@@ -1,11 +1,11 @@
-CREATE TABLE IF NOT EXISTS storms.ecmwf_storms_isa(
+CREATE TABLE IF NOT EXISTS storms.ecmwf_storms_hannah(
     number VARCHAR NOT NULL,
     provider VARCHAR NOT NULL,
     season BIGINT CHECK (season BETWEEN 2005 AND 2050) NOT NULL,
     genesis_basin VARCHAR NOT NULL,
     name VARCHAR NULL,
     storm_id VARCHAR,
-    CONSTRAINT ecmwf_storms_unique_isa PRIMARY KEY (storm_id)
+    CONSTRAINT ecmwf_storms_unique_hannah PRIMARY KEY (storm_id)
 );
 
 TABLESPACE pg_default;
