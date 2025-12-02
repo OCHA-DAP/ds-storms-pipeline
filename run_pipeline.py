@@ -34,13 +34,13 @@ def main():
     )
     main_parser.add_argument(
         "--start-date",
-        default="2019-12-20",
+        default="2019-01-01",
         nargs="?",
         help="Which date to start",
     )
     main_parser.add_argument(
         "--end-date",
-        default="2019-12-25",
+        default="2019-12-31",
         nargs="?",
         help="Which date to end",
     )
