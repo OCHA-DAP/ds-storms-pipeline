@@ -40,7 +40,7 @@ def main():
     )
     main_parser.add_argument(
         "--end-date",
-        default="2019-12-31",
+        default="2019-03-31",
         nargs="?",
         help="Which date to end",
     )
