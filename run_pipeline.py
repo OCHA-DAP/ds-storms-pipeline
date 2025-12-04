@@ -40,7 +40,7 @@ def main():
     )
     main_parser.add_argument(
         "--end-date",
-        default="2019-03-31",
+        default="2019-12-31",
         nargs="?",
         help="Which date to end",
     )
@@ -74,8 +74,6 @@ def main():
             mode=args.mode,
             start_date=datetime.strptime(args.start_date, "%Y-%m-%d"),
             end_date=datetime.strptime(args.end_date, "%Y-%m-%d"),
-            save_to_blob=args.save_to_blob,
-            save_dir=args.save_dir,
             chunksize=args.chunksize,
         )
     else:
