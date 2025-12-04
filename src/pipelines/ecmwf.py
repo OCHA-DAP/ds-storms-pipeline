@@ -61,7 +61,6 @@ def process_storms(dataset, engine, chunksize):
     logger.info("Processing storms...")
 
     storm_tracks = lens.ecmwf_storm.get_storms(dataset)
-
     with engine.connect() as conn:
         storm_tracks.to_sql(
             "ecmwf_storms_hannah",
@@ -81,8 +80,6 @@ def run_ecmwf(
     mode,
     start_date,
     end_date,
-    save_to_blob=False,
-    save_dir="/tmp",
     chunksize=10000,
 ):
     """
@@ -107,18 +104,14 @@ def run_ecmwf(
     engine = stratus.get_engine(stage=mode, write=True)
 
     try:
-        dataset = lens.ecmwf_storm.load_hindcasts(
+        dataset = lens.ecmwf_storm.load_forecasts(
             start_date=start_date,
             end_date=end_date,
             use_cache=False,
             stage=mode,
             skip_if_missing=False,
         )
-
-        # Process storms and add them to the database
         process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
-
-        # Process tracks and add them to the database
         process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
 
         logger.info("Pipeline successfully finished!")
