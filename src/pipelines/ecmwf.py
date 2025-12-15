@@ -89,7 +89,6 @@ def run_ecmwf(
     ----------
     start_date Which date to start from
     end_date Which date to stop at
-    save_to_blob flag to determine whether the netcdf file should be saved
     mode [dev or prod]
     """
 
