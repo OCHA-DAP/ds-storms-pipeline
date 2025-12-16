@@ -20,7 +20,7 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(
-        r"""This notebook offers a basic exploration of [IBTrACS](https://www.ncei.noaa.gov/products/international-best-track-archive) best-track cyclone data from NOAA. All data is stored in an internal database, and processed from the source IBTrACS NetCDF files as is defined in the [ocha-lens](https://ocha-lens.readthedocs.io/en/latest/datasets/ibtracs.html) package. Further technical documentation can also be found [here](https://www.ncei.noaa.gov/sites/g/files/anmtlf171/files/2025-04/IBTrACS_version4r01_Technical_Details.pdf). Following IBTrACS, the data in this database is updated three times a week (on Sunday, Tuesday, and Thursday)."""
+        r"""This notebook offers a basic exploration of [IBTrACS](https://www.ncei.noaa.gov/products/international-best-track-archive) best-track cyclone data from NOAA. All data is stored in an internal database, and processed from the source IBTrACS NetCDF files as is defined in the [ocha-lens](https://ocha-lens.readthedocs.io/en/latest/datasets/ibtracs.html) package. Further technical documentation can also be found [here](https://www.ncei.noaa.gov/sites/g/files/anmtlf171/files/2025-04/IBTrACS_version4r01_Technical_Details.pdf). Updates are checked daily."""
     )
     return
 
@@ -293,7 +293,9 @@ def _(io, mo, pd, upload):
 
 
 @app.cell
-def _(df_hdx, df_storms, mo):
+def _(df_hdx, df_storms, mo, upload):
+    mo.stop(len(upload.value) == 0, "Upload CSV to see comparison")
+
     missing_db = list(set(df_hdx.SID.unique()) - set(df_storms.sid.unique()))
 
     mo.accordion(
@@ -307,7 +309,9 @@ def _(df_hdx, df_storms, mo):
 
 
 @app.cell
-def _(df_hdx, df_storms, mo):
+def _(df_hdx, df_storms, mo, upload):
+    mo.stop(len(upload.value) == 0, "Upload CSV to see comparison")
+
     missing_hdx = list(set(df_storms.sid.unique()) - set(df_hdx.SID.unique()))
 
     mo.accordion(
@@ -321,7 +325,9 @@ def _(df_hdx, df_storms, mo):
 
 
 @app.cell
-def _(df_hdx, mo, pd, sid_selector):
+def _(df_hdx, mo, pd, sid_selector, upload):
+    mo.stop(len(upload.value) == 0, "Upload CSV to see comparison")
+
     df_hdx_ = df_hdx[df_hdx.SID == sid_selector.value]
     df_hdx_["ISO_TIME"] = pd.to_datetime(df_hdx_["ISO_TIME"])
 
