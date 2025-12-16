@@ -44,8 +44,8 @@ def _():
 
 
 @app.cell
-def _(stratus):
-    engine = stratus.get_engine(stage="dev")
+def _(STAGE, stratus):
+    engine = stratus.get_engine(stage=STAGE)
     return (engine,)
 
 
