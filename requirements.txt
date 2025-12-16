@@ -28,7 +28,7 @@ ruff==0.7.4
 pre-commit==4.0.1
 coloredlogs==15.0.1
 hypothesis==6.138.2
-marimo==0.15.0
+marimo==0.16.4
 plotly
 
 
