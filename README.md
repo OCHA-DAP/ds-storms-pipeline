@@ -67,7 +67,7 @@ python run_pipeline.py ecmwf [OPTIONS]
 
 Options:
 - `--mode {dev,prod}`: Database environment (default: `dev`)
-- `--start-date YYYY-MM-DD`: Start of date range (default: `2019-01-01`)
-- `--end-date YYYY-MM-DD`: End of date range (default: `2019-12-31`)
+- `--start-date YYYY-MM-DD`: Start of date range (default: yesterday)
+- `--end-date YYYY-MM-DD`: End of date range (default: yesterday)
 - `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
 

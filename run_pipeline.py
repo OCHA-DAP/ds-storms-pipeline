@@ -1,5 +1,5 @@
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import run_ibtracs
@@ -46,18 +46,19 @@ def main():
     )
 
     # ECMWF subparser
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     ecmwf_parser = subparsers.add_parser(
         "ecmwf", parents=[common], help="Run ECMWF pipeline"
     )
     ecmwf_parser.add_argument(
         "--start-date",
-        default="2019-01-01",
-        help="Start date (YYYY-MM-DD)",
+        default=yesterday,
+        help="Start date (YYYY-MM-DD) (default: yesterday)",
     )
     ecmwf_parser.add_argument(
         "--end-date",
-        default="2019-12-31",
-        help="End date (YYYY-MM-DD)",
+        default=yesterday,
+        help="End date (YYYY-MM-DD) (default: yesterday)",
     )
 
     args = parser.parse_args()
