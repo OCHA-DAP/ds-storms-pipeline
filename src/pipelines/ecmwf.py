@@ -9,6 +9,7 @@ import coloredlogs
 import ocha_lens as lens
 import ocha_stratus as stratus
 from dotenv import load_dotenv
+import warnings
 
 load_dotenv()
 
@@ -36,12 +37,17 @@ def process_tracks(dataset, engine, chunksize):
     # and then run the upsert or use to_postgis to a temporary table instead of to_sql and
     # then run another query to do the upsert
     logger.info("Transforming geometry...")
-    tracks_geo["geometry"] = tracks_geo["geometry"].to_wkt()
+    with warnings.catch_warnings():
+        # This is the intended behaviour, suppress the specific warning
+        warnings.filterwarnings(
+            "ignore", message="Geometry column does not contain geometry"
+        )
+        tracks_geo["geometry"] = tracks_geo["geometry"].to_wkt()
 
     logger.info("Updating tracks in database...")
     with engine.connect() as conn:
         tracks_geo.to_sql(
-            name="ecmwf_tracks_geo_hannah",
+            name="ecmwf_tracks_geo",
             con=conn,
             schema="storms",
             if_exists="append",
@@ -49,7 +55,7 @@ def process_tracks(dataset, engine, chunksize):
             method=stratus.postgres_upsert,
             chunksize=chunksize,
         )
-    logger.info("Successfully processed tracks.")
+    logger.info(f"Successfully processed tracks -- {len(tracks_geo)} records.")
 
     return tracks_geo
 
@@ -63,7 +69,7 @@ def process_storms(dataset, engine, chunksize):
     storm_tracks = lens.ecmwf_storm.get_storms(dataset)
     with engine.connect() as conn:
         storm_tracks.to_sql(
-            "ecmwf_storms_hannah",
+            "ecmwf_storms",
             con=conn,
             schema="storms",
             if_exists="append",
@@ -72,7 +78,9 @@ def process_storms(dataset, engine, chunksize):
             chunksize=chunksize,
         )
 
-    logger.info("Successfully processed storms.")
+    logger.info(
+        f"Successfully processed storms -- {len(storm_tracks)} records."
+    )
     return storm_tracks
 
 
