@@ -2,6 +2,9 @@
 
 This repository contains code to download and process storm forecasts and observations from various sources. 
 
+Sample data can be explored in the following apps:
+- [Explore ECMWF](https://chd-ds-storms-explore-ecmwf-c8ctc8fzesceaqgb.eastus2-01.azurewebsites.net/)
+- [Explore IBTrACS](https://chd-ds-storms-explore-ibtracs-hvf2cycjgmfrfuca.eastus2-01.azurewebsites.net/)
 
 ## Getting started
 
