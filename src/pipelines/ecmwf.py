@@ -10,6 +10,7 @@ import ocha_lens as lens
 import ocha_stratus as stratus
 from dotenv import load_dotenv
 import warnings
+from datetime import datetime
 
 load_dotenv()
 
@@ -110,19 +111,60 @@ def run_ecmwf(
     # Setting up engine
     engine = stratus.get_engine(stage=mode, write=True)
 
-    try:
-        dataset = lens.ecmwf_storm.load_forecasts(
-            start_date=start_date,
-            end_date=end_date,
-            use_cache=False,
-            stage=mode,
-            skip_if_missing=False,
+    # Automatically chunk by year if date range is greater than 1 year
+    date_range = end_date - start_date
+    if date_range.days > 365:
+        logger.info(
+            f"Date range spans {date_range.days} days. "
+            "Processing year by year to manage memory."
         )
-        process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
-        process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
 
-        logger.info("Pipeline successfully finished!")
+        current_start = start_date
+        while current_start <= end_date:
+            year_end = datetime(current_start.year, 12, 31)
+            current_end = min(year_end, end_date)
 
-    except Exception as e:
-        logger.error(f"An error occurred: {e}", exc_info=True)
-        raise
+            logger.info(
+                f"Processing data from {current_start.date()} to {current_end.date()}"
+            )
+
+            try:
+                dataset = lens.ecmwf_storm.load_forecasts(
+                    start_date=current_start,
+                    end_date=current_end,
+                    use_cache=False,
+                    stage=mode,
+                    skip_if_missing=False,
+                )
+                process_storms(
+                    dataset=dataset, engine=engine, chunksize=chunksize
+                )
+                process_tracks(
+                    dataset=dataset, engine=engine, chunksize=chunksize
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"An error occurred processing {current_start.year}: {e}",
+                    exc_info=True,
+                )
+                raise
+
+            current_start = datetime(current_start.year + 1, 1, 1)
+    else:
+        try:
+            dataset = lens.ecmwf_storm.load_forecasts(
+                start_date=start_date,
+                end_date=end_date,
+                use_cache=False,
+                stage=mode,
+                skip_if_missing=False,
+            )
+            process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
+            process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
+
+        except Exception as e:
+            logger.error(f"An error occurred: {e}", exc_info=True)
+            raise
+
+    logger.info("Pipeline successfully finished!")
