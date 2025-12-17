@@ -16,13 +16,13 @@ load_dotenv()
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 ecmwf_logger = logging.getLogger("ocha_lens.datasources.ecmwf_storm")
-ecmwf_logger.setLevel(logging.DEBUG)
+ecmwf_logger.setLevel(logging.INFO)
 coloredlogs.install(
     logger=ecmwf_logger,
-    level=logging.DEBUG,
+    level=logging.INFO,
     fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
