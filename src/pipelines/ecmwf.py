@@ -156,9 +156,11 @@ def run_ecmwf(
             dataset = lens.ecmwf_storm.load_forecasts(
                 start_date=start_date,
                 end_date=end_date,
-                use_cache=False,
+                use_cache=True,
                 stage=mode,
-                skip_if_missing=False,
+                # Set to True if we're using the cache and
+                # confident that it's as complete as possible
+                skip_if_missing=True,
             )
             process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
             process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
