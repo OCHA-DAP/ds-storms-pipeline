@@ -50,7 +50,7 @@ def transfer_blob(blob_name, source_stage="dev", target_stage="prod"):
         container_name=CONTAINER_NAME, stage=source_stage
     )
     target_client = stratus.get_container_client(
-        container_name=CONTAINER_NAME, stage=target_stage
+        container_name=CONTAINER_NAME, stage=target_stage, write=True
     )
 
     # Download from source
