@@ -20,10 +20,10 @@ SQL_FILES = [
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
-def run_sql_file(conn, sql_path: Path, stage: str):
+def run_sql_file(conn, sql_path: Path, mode: str):
     """Read and execute a SQL file, substituting any template variables."""
     sql = sql_path.read_text()
-    sql = sql.format(**CONFIG[stage])
+    sql = sql.format(**CONFIG[mode])
 
     print(f"Executing {sql_path.name}...")
     conn.execute(text(sql))
@@ -34,10 +34,10 @@ def main():
         description="Initialize storm database tables"
     )
     parser.add_argument(
-        "--stage",
+        "--mode",
         choices=["dev", "prod"],
         required=True,
-        help="Deployment stage (dev or prod)",
+        help="Deployment mode (dev or prod)",
     )
     parser.add_argument(
         "--sql-dir",
@@ -47,17 +47,17 @@ def main():
     )
     args = parser.parse_args()
 
-    engine = stratus.get_engine(args.stage, write=True)
+    engine = stratus.get_engine(args.mode, write=True)
 
     with engine.connect() as conn:
         for sql_file in SQL_FILES:
             sql_path = args.sql_dir / sql_file
             if not sql_path.exists():
                 raise FileNotFoundError(f"SQL file not found: {sql_path}")
-            run_sql_file(conn, sql_path, args.stage)
+            run_sql_file(conn, sql_path, args.mode)
 
         conn.commit()
-        print(f"Successfully initialized tables for stage: {args.stage}")
+        print(f"Successfully initialized tables for mode: {args.mode}")
 
 
 if __name__ == "__main__":
