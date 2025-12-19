@@ -3,6 +3,9 @@ from pathlib import Path
 
 from sqlalchemy import text
 import ocha_stratus as stratus
+from dotenv import load_dotenv
+
+load_dotenv()
 
 CONFIG = {
     "dev": {"owner": "dbwriter"},
@@ -44,7 +47,7 @@ def main():
     )
     args = parser.parse_args()
 
-    engine = stratus.get_engine(args.stage)
+    engine = stratus.get_engine(args.stage, write=True)
 
     with engine.connect() as conn:
         for sql_file in SQL_FILES:
