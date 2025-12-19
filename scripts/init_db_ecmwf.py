@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+import sys
 
 from sqlalchemy import text
 import ocha_stratus as stratus
@@ -17,7 +18,17 @@ SQL_FILES = [
     "ecmwf_tracks_geo.sql",
 ]
 
-PROJECT_ROOT = Path(__file__).parent.parent
+
+def get_default_sql_dir():
+    """Get default SQL directory, handling both local and Databricks environments."""
+    try:
+        project_root = Path(__file__).parent.parent
+    except NameError:
+        # Running in Databricks - derive from the script path
+        script_path = Path(sys.argv[0]).resolve()
+        project_root = script_path.parent.parent
+
+    return project_root / "src" / "schemas" / "sql"
 
 
 def run_sql_file(conn, sql_path: Path, mode: str):
@@ -42,7 +53,7 @@ def main():
     parser.add_argument(
         "--sql-dir",
         type=Path,
-        default=PROJECT_ROOT / "src" / "schemas" / "sql",
+        default=get_default_sql_dir(),
         help="Directory containing SQL files",
     )
     args = parser.parse_args()
