@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS storms.ecmwf_storms(
     name VARCHAR NULL,
     storm_id VARCHAR,
     CONSTRAINT ecmwf_storms_unique PRIMARY KEY (storm_id)
-);
+)
 
 TABLESPACE pg_default;
 
