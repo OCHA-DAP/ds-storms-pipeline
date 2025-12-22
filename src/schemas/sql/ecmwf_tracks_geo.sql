@@ -1,7 +1,5 @@
 -- Table: storms.ecmwf_tracks_geo
 
-DROP TABLE IF EXISTS storms.ecmwf_tracks_geo;
-
 CREATE TABLE IF NOT EXISTS storms.ecmwf_tracks_geo(
     issued_time timestamp without time zone,
     provider VARCHAR,
