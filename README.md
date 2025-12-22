@@ -42,3 +42,35 @@ Set up pre-commit with:
 ```
 pre-commit install
 ```
+
+## Running pipelines
+
+The `run_pipeline.py` script provides a command-line interface for running data pipelines. Each pipeline has its own subcommand with relevant options.
+
+### IBTrACS pipeline
+
+Downloads and processes historical storm track data from the IBTrACS dataset.
+```
+python run_pipeline.py ibtracs [OPTIONS]
+```
+
+Options:
+- `--mode {dev,prod}`: Database environment (default: `dev`)
+- `--dataset-type {last3years,ACTIVE,ALL}`: Which dataset to download (default: `last3years`)
+- `--save-to-blob`: Upload the downloaded netcdf file to Azure blob storage
+- `--save-dir PATH`: Directory for downloaded files (default: `/tmp`)
+- `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
+
+### ECMWF pipeline
+
+Downloads and processes ECMWF storm forecast data for a specified date range.
+```
+python run_pipeline.py ecmwf [OPTIONS]
+```
+
+Options:
+- `--mode {dev,prod}`: Database environment (default: `dev`)
+- `--start-date YYYY-MM-DD`: Start of date range (default: yesterday)
+- `--end-date YYYY-MM-DD`: End of date range (default: yesterday)
+- `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
+
