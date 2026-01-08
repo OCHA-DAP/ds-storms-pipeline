@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import run_ibtracs
+from src.pipelines.nhc import run_nhc_current, run_nhc_archive
 
 
 def main():
@@ -61,6 +62,31 @@ def main():
         help="End date (YYYY-MM-DD) (default: yesterday)",
     )
 
+    # NHC subparser
+    nhc_parser = subparsers.add_parser(
+        "nhc", parents=[common], help="Run NHC pipeline"
+    )
+    nhc_parser.add_argument(
+        "--save-to-blob",
+        action="store_true",
+        help="Save files to blob storage",
+    )
+    nhc_parser.add_argument(
+        "--save-dir",
+        default="storm",
+        help="Where to save downloaded files",
+    )
+    nhc_parser.add_argument(
+        "--start-year",
+        type=int,
+        help="Start year for archive processing (e.g., 2020). If not provided, processes current active storms.",
+    )
+    nhc_parser.add_argument(
+        "--end-year",
+        type=int,
+        help="End year for archive processing (e.g., 2024). If not provided, only processes start-year.",
+    )
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -78,6 +104,28 @@ def main():
             end_date=datetime.strptime(args.end_date, "%Y-%m-%d"),
             chunksize=args.chunksize,
         )
+    elif args.pipeline == "nhc":
+        if args.start_year is not None:
+            # Archive mode: year(s) provided
+            end_year = (
+                args.end_year if args.end_year is not None else args.start_year
+            )
+            run_nhc_archive(
+                start_year=args.start_year,
+                end_year=end_year,
+                mode=args.mode,
+                save_to_blob=args.save_to_blob,
+                save_dir=args.save_dir,
+                chunksize=args.chunksize,
+            )
+        else:
+            # Current mode: no year provided
+            run_nhc_current(
+                mode=args.mode,
+                save_to_blob=args.save_to_blob,
+                save_dir=args.save_dir,
+                chunksize=args.chunksize,
+            )
 
 
 if __name__ == "__main__":
