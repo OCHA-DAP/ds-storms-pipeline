@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS storms.nhc_storms
     number VARCHAR NOT NULL,
     season INTEGER NOT NULL CHECK (season BETWEEN 1840 AND 2050),
     genesis_basin VARCHAR NOT NULL CHECK (genesis_basin IN ('NA', 'EP')),
-    provider VARCHAR CHECK (provider IN ('NHC', 'CPHC')),
+    provider VARCHAR CHECK (provider IN ('nhc', 'cphc')),
     storm_id VARCHAR UNIQUE,
     CONSTRAINT nhc_storms_unique UNIQUE (atcf_id, storm_id)
 )
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS storms.nhc_tracks_geo
     storm_id VARCHAR,
     point_id VARCHAR NOT NULL,
     geometry geometry(Point, 4326) NOT NULL,
-    CONSTRAINT nhc_tracks_geo_unique UNIQUE (atcf_id, valid_time, leadtime, issued_time),
+    CONSTRAINT nhc_tracks_geo_unique UNIQUE (atcf_id, valid_time, leadtime, issued_time, geometry, wind_speed, pressure),
     CONSTRAINT foreign_key_atcf_id FOREIGN KEY (atcf_id)
         REFERENCES storms.nhc_storms(atcf_id)
         ON DELETE CASCADE
