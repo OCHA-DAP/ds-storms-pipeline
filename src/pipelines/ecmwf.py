@@ -110,6 +110,10 @@ def run_ecmwf(
 
     # Setting up engine
     engine = stratus.get_engine(stage=mode, write=True)
+    # Helpful for a backfill to avoid re-downloading data
+    use_cache = True
+    # Set to true if we're pretty confident our cache is complete
+    skip_if_missing = True
 
     # Automatically chunk by year if date range is greater than 1 year
     date_range = end_date - start_date
@@ -132,9 +136,9 @@ def run_ecmwf(
                 dataset = lens.ecmwf_storm.load_forecasts(
                     start_date=current_start,
                     end_date=current_end,
-                    use_cache=True,
+                    use_cache=use_cache,
                     stage=mode,
-                    skip_if_missing=True,
+                    skip_if_missing=skip_if_missing,
                 )
                 process_storms(
                     dataset=dataset, engine=engine, chunksize=chunksize
@@ -156,11 +160,9 @@ def run_ecmwf(
             dataset = lens.ecmwf_storm.load_forecasts(
                 start_date=start_date,
                 end_date=end_date,
-                use_cache=True,
+                use_cache=use_cache,
                 stage=mode,
-                # Set to True if we're using the cache and
-                # confident that it's as complete as possible
-                skip_if_missing=True,
+                skip_if_missing=skip_if_missing,
             )
             process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
             process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
