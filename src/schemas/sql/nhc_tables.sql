@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS storms.nhc_storms
     season INTEGER NOT NULL CHECK (season BETWEEN 1840 AND 2050),
     genesis_basin VARCHAR NOT NULL CHECK (genesis_basin IN ('NA', 'EP')),
     provider VARCHAR CHECK (provider IN ('nhc', 'cphc')),
-    storm_id VARCHAR UNIQUE,
+    storm_id VARCHAR,
     CONSTRAINT nhc_storms_unique UNIQUE (atcf_id, storm_id)
 )
 TABLESPACE pg_default;
