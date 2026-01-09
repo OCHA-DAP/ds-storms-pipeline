@@ -73,7 +73,7 @@ def main():
     )
     nhc_parser.add_argument(
         "--save-dir",
-        default="storm",
+        default="/tmp",
         help="Where to save downloaded files",
     )
     nhc_parser.add_argument(
