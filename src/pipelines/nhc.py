@@ -349,44 +349,34 @@ def run_nhc_archive(
 
         for basin in basins:
             logger.info(f"  Processing basin: {basin}")
-            try:
-                # Retrieve archive data for this basin/year
-                df_raw = retrieve_nhc_archive(
-                    year=year,
-                    basin=basin,
-                    stage=mode,
-                    save_to_blob=save_to_blob,
-                    save_dir=save_dir,
-                )
+            # Retrieve archive data for this basin/year
+            df_raw = retrieve_nhc_archive(
+                year=year,
+                basin=basin,
+                stage=mode,
+                save_to_blob=save_to_blob,
+                save_dir=save_dir,
+            )
 
-                if df_raw is None or len(df_raw) == 0:
-                    logger.info(
-                        f"  No storms found for {year} {basin}. Skipping."
-                    )
-                    continue
-
-                # Process storms and add them to the database
-                storms = process_storms(
-                    df_raw=df_raw, engine=engine, chunksize=chunksize
-                )
-                if storms is not None:
-                    year_storms += len(storms)
-                    total_storms_processed += len(storms)
-
-                # Process tracks and add them to the database
-                tracks = process_tracks(
-                    df_raw=df_raw, engine=engine, chunksize=chunksize
-                )
-                if tracks is not None:
-                    year_tracks += len(tracks)
-                    total_tracks_processed += len(tracks)
-
-            except Exception as e:
-                logger.error(
-                    f"  Error processing {year} {basin}: {e}", exc_info=True
-                )
-                # Continue with next basin instead of failing completely
+            if df_raw is None or len(df_raw) == 0:
+                logger.info(f"  No storms found for {year} {basin}. Skipping.")
                 continue
+
+            # Process storms and add them to the database
+            storms = process_storms(
+                df_raw=df_raw, engine=engine, chunksize=chunksize
+            )
+            if storms is not None:
+                year_storms += len(storms)
+                total_storms_processed += len(storms)
+
+            # Process tracks and add them to the database
+            tracks = process_tracks(
+                df_raw=df_raw, engine=engine, chunksize=chunksize
+            )
+            if tracks is not None:
+                year_tracks += len(tracks)
+                total_tracks_processed += len(tracks)
 
         logger.info(
             f"  Year {year} complete: {year_storms} storms, {year_tracks} track points"
