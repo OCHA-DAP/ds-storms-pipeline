@@ -5,6 +5,7 @@ IBTrACS ETL pipeline
 
 import os
 import logging
+import warnings
 import coloredlogs
 import ocha_lens as lens
 from dotenv import load_dotenv
@@ -63,7 +64,12 @@ def process_tracks(dataset, engine, chunksize):
     # and then run the upsert or use to_postgis to a temporary table instead of to_sql and
     # then run another query to do the upsert
     logger.info("Transforming geometry...")
-    tracks_geo["geometry"] = tracks_geo["geometry"].to_wkt()
+    with warnings.catch_warnings():
+        # This is the intended behaviour, suppress the specific warning
+        warnings.filterwarnings(
+            "ignore", message="Geometry column does not contain geometry"
+        )
+        tracks_geo["geometry"] = tracks_geo["geometry"].to_wkt()
 
     logger.info("Updating tracks in database...")
     with engine.connect() as conn:
