@@ -111,9 +111,9 @@ def run_ecmwf(
     # Setting up engine
     engine = stratus.get_engine(stage=mode, write=True)
     # Helpful for a backfill to avoid re-downloading data
-    use_cache = False
+    use_cache = True
     # Set to true if we're pretty confident our cache is complete
-    skip_if_missing = False
+    skip_if_missing = True
 
     # Automatically chunk by year if date range is greater than 1 year
     date_range = end_date - start_date
