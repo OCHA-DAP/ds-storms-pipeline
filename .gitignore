@@ -153,3 +153,5 @@ pipelines/data/*
 pipelines/temp/*
 exploration/temp/*
 scratch/*
+
+examples/*
