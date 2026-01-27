@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS storms.nhc_tracks_geo
     issued_time TIMESTAMP NOT NULL,
     valid_time TIMESTAMP NOT NULL,
     leadtime INTEGER NOT NULL CHECK (leadtime >= 0),
-    wind_speed REAL CHECK (wind_speed BETWEEN 0 AND 300),
+    wind_speed REAL NOT NULL CHECK (wind_speed BETWEEN 0 AND 300),
     pressure REAL CHECK (pressure BETWEEN 800 AND 1100),
     max_wind_radius INTEGER CHECK (max_wind_radius >= 0),
     last_closed_isobar_radius INTEGER CHECK (last_closed_isobar_radius >= 0),
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS storms.nhc_tracks_geo
     storm_id VARCHAR,
     point_id VARCHAR NOT NULL,
     geometry geometry(Point, 4326) NOT NULL,
-    CONSTRAINT nhc_tracks_geo_unique UNIQUE (atcf_id, valid_time, leadtime, issued_time, geometry, wind_speed, pressure),
+    CONSTRAINT nhc_tracks_geo_unique UNIQUE (atcf_id, valid_time, leadtime, issued_time, geometry, wind_speed),
     CONSTRAINT foreign_key_atcf_id FOREIGN KEY (atcf_id)
         REFERENCES storms.nhc_storms(atcf_id)
         ON DELETE CASCADE
