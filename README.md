@@ -99,3 +99,30 @@ pre-commit install
 
 
 
+### NHC pipeline
+
+Downloads and processes National Hurricane Center (NHC) storm forecast data. Supports two modes: current active storms or historical archive data.
+```
+python run_pipeline.py nhc [OPTIONS]
+```
+
+Options:
+- `--mode {dev,prod}`: Database environment (default: `dev`)
+- `--save-to-blob`: Upload downloaded files to Azure blob storage
+- `--save-dir PATH`: Directory for downloaded files (default: `/tmp`)
+- `--start-year YYYY`: Start year for archive processing (e.g., 2020). If not provided, processes current active storms.
+- `--end-year YYYY`: End year for archive processing (e.g., 2024). If not provided, only processes start-year.
+- `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
+
+Examples:
+```
+# Process current active storms
+python run_pipeline.py nhc
+
+# Process archive data for a single year
+python run_pipeline.py nhc --start-year 2023
+
+# Process archive data for a range of years
+python run_pipeline.py nhc --start-year 2020 --end-year 2024
+```
+
