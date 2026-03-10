@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyclone Exposure Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Source Sans Pro', sans-serif;
+            font-size: 16px;
+            line-height: 1.3;
+            color: #333;
+            background: white;
+            padding: 16px;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .container {
+            max-width: 100%;
+            height: calc(100vh - 32px);
+            display: flex;
+            flex-direction: column;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            color: #333;
+        }
+
+        h2 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .main-content {
+            display: flex;
+            gap: 16px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .section {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .left-section {
+            flex: 1.8;
+            min-width: 0;
+        }
+
+        .right-section {
+            flex: 1;
+            min-width: 0;
+            background-color: #f6f8fa;
+            padding: 12px;
+            border-radius: 6px;
+        }
+
+        .table-container {
+            flex: 1;
+            overflow-y: auto;
+            background-color: white;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+
+        th {
+            font-weight: 600;
+            font-size: 14px;
+            color: #888888;
+            text-align: left;
+            padding: 10px 12px;
+            border-bottom: 2px solid #007CE0;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: white;
+        }
+
+        td {
+            padding: 10px 12px;
+            font-size: 14px;
+            color: #333;
+            border-bottom: 1px solid #DDDDDD;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover {
+            background-color: rgba(0, 124, 224, 0.03);
+        }
+
+        .storms-table tbody tr {
+            cursor: pointer;
+        }
+
+        .storms-table tbody tr.selected {
+            background-color: rgba(0, 124, 224, 0.08);
+        }
+
+        .indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin: 0 auto;
+        }
+
+        .indicator.adam-available {
+            background-color: #007CE0;
+        }
+
+        .indicator.gdacs-available {
+            background-color: #1EBFB3;
+        }
+
+        .indicator.unavailable {
+            background-color: #DDDDDD;
+        }
+
+        .alert-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .alert-red {
+            background-color: rgba(242, 100, 90, 0.1);
+            color: #F2645A;
+        }
+
+        .alert-orange {
+            background-color: rgba(255, 165, 0, 0.1);
+            color: #ff8c00;
+        }
+
+        .alert-green {
+            background-color: rgba(30, 191, 179, 0.1);
+            color: #1EBFB3;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px 20px;
+            color: #888888;
+            font-size: 14px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #888888;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 200px;
+        }
+
+        .number-cell {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .source-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #888888;
+            text-transform: uppercase;
+        }
+
+        .comparison-cell {
+            padding: 10px 12px;
+            text-align: center;
+        }
+
+        .stacked-values {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 13px;
+        }
+
+        .stacked-values .adam-value {
+            color: #007CE0;
+            font-weight: 600;
+        }
+
+        .stacked-values .gdacs-value {
+            color: #1EBFB3;
+            font-weight: 600;
+        }
+
+        .stacked-values .no-data {
+            color: #DDDDDD;
+        }
+
+        .source-legend {
+            display: flex;
+            gap: 16px;
+            margin-top: 4px;
+            font-size: 12px;
+        }
+
+        .source-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        .legend-color.adam {
+            background-color: #007CE0;
+        }
+
+        .legend-color.gdacs {
+            background-color: #1EBFB3;
+        }
+
+        .section-header {
+            margin-bottom: 12px;
+        }
+
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        th.sortable:hover {
+            background-color: #f0f0f0;
+        }
+
+        th.sortable::after {
+            content: ' ⇅';
+            color: #DDDDDD;
+            font-size: 10px;
+            margin-left: 4px;
+        }
+
+        th.sortable.sorted-asc::after {
+            content: ' ▲';
+            color: #007CE0;
+        }
+
+        th.sortable.sorted-desc::after {
+            content: ' ▼';
+            color: #007CE0;
+        }
+
+        td a {
+            color: #007CE0;
+            text-decoration: none;
+        }
+
+        td a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Cyclone Exposure Dashboard</h1>
+
+        <div class="main-content">
+            <div class="section left-section">
+                <div class="section-header">
+                    <h2>Historical Storms</h2>
+                </div>
+                <div id="storms-table-container" class="table-container">
+                    <div class="loading">Loading storm data...</div>
+                </div>
+            </div>
+
+            <div class="section right-section">
+                <div class="section-header">
+                    <h2>Country-Level Exposure: <span id="selected-storm-name">-</span></h2>
+                    <div class="source-legend">
+                        <div class="source-legend-item">
+                            <div class="legend-color adam"></div>
+                            <span>ADAM</span>
+                        </div>
+                        <div class="source-legend-item">
+                            <div class="legend-color gdacs"></div>
+                            <span>GDACS</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="country-table-container" class="table-container">
+                    <div class="empty-state">Select a storm to view country-level exposure estimates</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let exposureData = [];
+        let stormDataCache = {};
+        let selectedStormSid = null;
+        let currentSortColumn = 'season';
+        let currentSortDirection = 'desc';
+
+        // Load data
+        fetch('exposure_data.json')
+            .then(response => response.json())
+            .then(data => {
+                exposureData = data;
+                renderStormsTable();
+            })
+            .catch(error => {
+                console.error('Error loading data:', error);
+                document.getElementById('storms-table-container').innerHTML =
+                    '<div class="empty-state">Error loading data. Please ensure exposure_data.json is available.</div>';
+            });
+
+        function sortStorms(column) {
+            if (currentSortColumn === column) {
+                currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortColumn = column;
+                currentSortDirection = 'asc';
+            }
+            renderStormsTable();
+        }
+
+        function renderStormsTable() {
+            // Group data by storm (sid)
+            const stormMap = {};
+            exposureData.forEach(row => {
+                if (!stormMap[row.sid]) {
+                    stormMap[row.sid] = {
+                        sid: row.sid,
+                        event_id: row.event_id,
+                        episode_id: row.episode_id,
+                        source: row.source,
+                        storm_name: row.storm_name,
+                        season: row.season,
+                        name: row.name,
+                        from_date: row.from_date,
+                        alert_level: row.alert_level,
+                        hasAdam: false,
+                        hasGdacs: false,
+                        countries: []
+                    };
+                }
+
+                // Check if this row has ADAM or GDACS data
+                const hasAdamData = row.pop_120kmh != null || row.pop_60kmh != null || row.pop_90kmh != null;
+                const hasGdacsData = row.pop_34kt != null || row.pop_64kt != null;
+
+                if (hasAdamData) stormMap[row.sid].hasAdam = true;
+                if (hasGdacsData) stormMap[row.sid].hasGdacs = true;
+            });
+
+            const storms = Object.values(stormMap);
+
+            // Sort storms
+            storms.sort((a, b) => {
+                let aVal, bVal;
+
+                switch(currentSortColumn) {
+                    case 'storm_name':
+                        aVal = (a.storm_name || a.name || '').toLowerCase();
+                        bVal = (b.storm_name || b.name || '').toLowerCase();
+                        break;
+                    case 'sid':
+                        aVal = (a.sid || '').toLowerCase();
+                        bVal = (b.sid || '').toLowerCase();
+                        break;
+                    case 'event_id':
+                        aVal = a.event_id || 0;
+                        bVal = b.event_id || 0;
+                        break;
+                    case 'episode_id':
+                        aVal = a.episode_id || 0;
+                        bVal = b.episode_id || 0;
+                        break;
+                    case 'season':
+                        aVal = a.season || 0;
+                        bVal = b.season || 0;
+                        break;
+                    case 'from_date':
+                        aVal = a.from_date ? new Date(a.from_date).getTime() : 0;
+                        bVal = b.from_date ? new Date(b.from_date).getTime() : 0;
+                        break;
+                    case 'hasAdam':
+                        aVal = a.hasAdam ? 1 : 0;
+                        bVal = b.hasAdam ? 1 : 0;
+                        break;
+                    case 'hasGdacs':
+                        aVal = a.hasGdacs ? 1 : 0;
+                        bVal = b.hasGdacs ? 1 : 0;
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (typeof aVal === 'string') {
+                    return currentSortDirection === 'asc'
+                        ? aVal.localeCompare(bVal)
+                        : bVal.localeCompare(aVal);
+                } else {
+                    return currentSortDirection === 'asc'
+                        ? aVal - bVal
+                        : bVal - aVal;
+                }
+            });
+
+            const getSortClass = (column) => {
+                if (currentSortColumn === column) {
+                    return `sortable sorted-${currentSortDirection}`;
+                }
+                return 'sortable';
+            };
+
+            let html = `
+                <table class="storms-table">
+                    <thead>
+                        <tr>
+                            <th class="${getSortClass('storm_name')}" onclick="sortStorms('storm_name')">Storm Name</th>
+                            <th class="${getSortClass('sid')}" onclick="sortStorms('sid')">SID</th>
+                            <th class="${getSortClass('event_id')}" onclick="sortStorms('event_id')">GDACS ID</th>
+                            <th class="${getSortClass('episode_id')}" onclick="sortStorms('episode_id')">Episode ID</th>
+                            <th class="${getSortClass('season')}" onclick="sortStorms('season')">Season</th>
+                            <th class="${getSortClass('from_date')}" onclick="sortStorms('from_date')">Date</th>
+                            <th class="${getSortClass('hasAdam')}" onclick="sortStorms('hasAdam')" style="text-align: center;">ADAM</th>
+                            <th class="${getSortClass('hasGdacs')}" onclick="sortStorms('hasGdacs')" style="text-align: center;">GDACS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            storms.forEach(storm => {
+                // Cache storm data for lookup
+                stormDataCache[storm.sid] = storm;
+
+                const date = storm.from_date ? new Date(storm.from_date).toLocaleDateString() : '-';
+
+                html += `
+                    <tr onclick="selectStorm('${storm.sid}')" data-sid="${storm.sid}">
+                        <td>${storm.storm_name || storm.name || '-'}</td>
+                        <td style="font-size: 12px; color: #888888;">${storm.sid || '-'}</td>
+                        <td style="font-size: 12px; color: #888888;">${storm.event_id || '-'}</td>
+                        <td style="font-size: 12px; color: #888888;">${storm.episode_id || '-'}</td>
+                        <td>${storm.season || '-'}</td>
+                        <td>${date}</td>
+                        <td style="text-align: center;"><span class="indicator ${storm.hasAdam ? 'adam-available' : 'unavailable'}"></span></td>
+                        <td style="text-align: center;"><span class="indicator ${storm.hasGdacs ? 'gdacs-available' : 'unavailable'}"></span></td>
+                    </tr>
+                `;
+            });
+
+            html += `
+                    </tbody>
+                </table>
+            `;
+
+            document.getElementById('storms-table-container').innerHTML = html;
+        }
+
+        function selectStorm(sid) {
+            selectedStormSid = sid;
+
+            // Update selected row styling
+            document.querySelectorAll('.storms-table tbody tr').forEach(tr => {
+                tr.classList.remove('selected');
+            });
+            document.querySelector(`tr[data-sid="${sid}"]`).classList.add('selected');
+
+            // Get storm name from cache
+            const storm = stormDataCache[sid];
+            const stormName = storm ? (storm.storm_name || storm.name || 'Unknown') : 'Unknown';
+
+            // Update storm name in country section
+            document.getElementById('selected-storm-name').textContent = stormName;
+
+            // Render country table
+            renderCountryTable(sid);
+        }
+
+        function renderCountryTable(sid) {
+            const stormData = exposureData.filter(row => row.sid === sid);
+
+            if (stormData.length === 0) {
+                document.getElementById('country-table-container').innerHTML =
+                    '<div class="empty-state">No data available for this storm</div>';
+                return;
+            }
+
+            // Group by ISO3 to ensure one row per country
+            const countryMap = {};
+            stormData.forEach(row => {
+                if (!countryMap[row.iso3]) {
+                    countryMap[row.iso3] = {
+                        country_name: row.country_name,
+                        iso3: row.iso3,
+                        pop_120kmh: row.pop_120kmh,
+                        pop_90kmh: row.pop_90kmh,
+                        pop_60kmh: row.pop_60kmh,
+                        pop_64kt: row.pop_64kt,
+                        pop_34kt: row.pop_34kt
+                    };
+                } else {
+                    // Merge data if we have multiple rows for the same country
+                    if (row.pop_120kmh != null) countryMap[row.iso3].pop_120kmh = row.pop_120kmh;
+                    if (row.pop_90kmh != null) countryMap[row.iso3].pop_90kmh = row.pop_90kmh;
+                    if (row.pop_60kmh != null) countryMap[row.iso3].pop_60kmh = row.pop_60kmh;
+                    if (row.pop_64kt != null) countryMap[row.iso3].pop_64kt = row.pop_64kt;
+                    if (row.pop_34kt != null) countryMap[row.iso3].pop_34kt = row.pop_34kt;
+                }
+            });
+
+            const countries = Object.values(countryMap).sort((a, b) =>
+                (a.country_name || '').localeCompare(b.country_name || '')
+            );
+
+            const formatNumber = (val) => {
+                if (val == null || val === '') return '-';
+                return Math.round(val).toLocaleString();
+            };
+
+            const createStackedValues = (adamVal, gdacsVal) => {
+                const adamDisplay = adamVal != null ? formatNumber(adamVal) : '-';
+                const gdacsDisplay = gdacsVal != null ? formatNumber(gdacsVal) : '-';
+
+                const adamClass = adamVal != null ? 'adam-value' : 'no-data';
+                const gdacsClass = gdacsVal != null ? 'gdacs-value' : 'no-data';
+
+                return `
+                    <div class="stacked-values">
+                        <div class="${adamClass}">${adamDisplay}</div>
+                        <div class="${gdacsClass}">${gdacsDisplay}</div>
+                    </div>
+                `;
+            };
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Country</th>
+                            <th style="text-align: center;">High Wind (~64 kt)</th>
+                            <th style="text-align: center;">Medium Wind (~49 kt)</th>
+                            <th style="text-align: center;">Low Wind (~34 kt)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            countries.forEach(country => {
+                html += `
+                    <tr>
+                        <td>${country.country_name || '-'}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_120kmh, country.pop_64kt)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_90kmh, null)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_60kmh, country.pop_34kt)}</td>
+                    </tr>
+                `;
+            });
+
+            html += `
+                    </tbody>
+                </table>
+            `;
+
+            document.getElementById('country-table-container').innerHTML = html;
+        }
+    </script>
+</body>
+</html>
