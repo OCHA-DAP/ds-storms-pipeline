@@ -3,8 +3,8 @@
 NHC (National Hurricane Center) ETL pipeline
 
 Supports two modes:
-1. Current storms: Real-time active tropical cyclones
-2. Archive: Historical ATCF A-deck data for a specific year (all basins)
+1. Current storms: Real-time active tropical cyclones and WSP polygons
+2. Archive: Historical ATCF A-deck data and WSP shapefiles
 """
 
 import json
@@ -239,6 +239,93 @@ def process_storms(df_raw, engine, chunksize):
     return storms
 
 
+def process_wsp_polygons(gdf, engine, chunksize):
+    """
+    Upload WSP polygon data to the database.
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        WSP polygons from lens.nhc_wsp.load_nhc_wsp()
+    engine : sqlalchemy.Engine
+        Database engine
+    chunksize : int
+        Number of rows per batch insert
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Processed data, or None if no data to process
+    """
+    if gdf is None or len(gdf) == 0:
+        logger.warning("No WSP polygon data to process. Skipping.")
+        return None
+
+    logger.info(f"Processing {len(gdf)} WSP polygon rows...")
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Geometry column does not contain geometry"
+        )
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf["geometry"].apply(
+            lambda g: g.wkt if g is not None else None
+        )
+
+    with engine.connect() as conn:
+        gdf.to_sql(
+            name="nhc_wsp_polygon",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
+
+    logger.info("Successfully processed WSP polygons.")
+    return gdf
+
+
+def process_wsp_storm_link(df, engine, chunksize):
+    """
+    Upload WSP storm-issuance link data to the database.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Storm link data from lens.nhc_wsp.get_nhc_wsp_storm_link()
+    engine : sqlalchemy.Engine
+        Database engine
+    chunksize : int
+        Number of rows per batch insert
+
+    Returns
+    -------
+    pd.DataFrame
+        Processed data, or None if no data to process
+    """
+    if df is None or len(df) == 0:
+        logger.warning("No WSP storm link data to process. Skipping.")
+        return None
+
+    logger.info(f"Processing {len(df)} WSP storm link rows...")
+
+    with engine.connect() as conn:
+        df.to_sql(
+            name="nhc_wsp_storm_link",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
+
+    logger.info("Successfully processed WSP storm links.")
+    return df
+
+
 def run_nhc_current(
     mode="local", save_to_blob=False, save_dir="storm", chunksize=10000
 ):
@@ -283,6 +370,23 @@ def run_nhc_current(
 
         # Process tracks and add them to the database
         process_tracks(df_raw=df_raw, engine=engine, chunksize=chunksize)
+
+        # Process wind speed probability polygons
+        logger.info("Fetching current WSP polygons...")
+        wsp_gdf = lens.nhc_wsp.load_nhc_wsp()
+        if wsp_gdf is not None and len(wsp_gdf) > 0:
+            issuances = list(wsp_gdf["issuance"].unique())
+            storm_link = lens.nhc_wsp.get_nhc_wsp_storm_link(
+                issuances=issuances
+            )
+            process_wsp_polygons(
+                gdf=wsp_gdf, engine=engine, chunksize=chunksize
+            )
+            process_wsp_storm_link(
+                df=storm_link, engine=engine, chunksize=chunksize
+            )
+        else:
+            logger.info("No current WSP data available.")
 
         logger.info("Pipeline successfully finished!")
 
@@ -383,6 +487,26 @@ def run_nhc_archive(
         )
 
     logger.info(
-        f"Pipeline finished! Processed {total_storms_processed} storms "
+        f"Processed {total_storms_processed} storms "
         f"and {total_tracks_processed} track points across {end_year - start_year + 1} year(s)."
     )
+
+    # Process wind speed probability polygons for the full year range
+    wsp_start = f"{start_year}-01-01"
+    wsp_end = f"{end_year}-12-31"
+    logger.info(f"Fetching WSP polygons for {wsp_start} to {wsp_end}...")
+    wsp_gdf = lens.nhc_wsp.load_nhc_wsp(start=wsp_start, end=wsp_end)
+    if wsp_gdf is not None and len(wsp_gdf) > 0:
+        logger.info(
+            f"Loaded {len(wsp_gdf)} WSP rows across {wsp_gdf['issuance'].nunique()} issuances."
+        )
+        issuances = list(wsp_gdf["issuance"].unique())
+        storm_link = lens.nhc_wsp.get_nhc_wsp_storm_link(issuances=issuances)
+        process_wsp_polygons(gdf=wsp_gdf, engine=engine, chunksize=chunksize)
+        process_wsp_storm_link(
+            df=storm_link, engine=engine, chunksize=chunksize
+        )
+    else:
+        logger.info("No WSP data found for the specified date range.")
+
+    logger.info("Pipeline successfully finished!")

@@ -2,11 +2,14 @@
 -- NHC (National Hurricane Center) Database Schema
 -- ============================================================================
 -- This SQL script creates the PostgreSQL tables for storing NHC tropical
--- cyclone data, including both storm metadata and track data.
+-- cyclone data, including storm metadata, track data, and wind speed
+-- probability polygons.
 --
 -- Tables:
---   - storms.nhc_storms: Storm-level metadata (one row per storm)
---   - storms.nhc_tracks_geo: Track points with geometry (one row per forecast point)
+--   - storms.nhc_storms:        Storm-level metadata (one row per storm)
+--   - storms.nhc_tracks_geo:    Track points with geometry (one row per forecast point)
+--   - storms.nhc_wsp_polygon:   WSP probability polygons (one row per issuance/threshold/band)
+--   - storms.nhc_wsp_storm_link: Maps WSP issuances to active ATCF storm IDs
 --
 -- Compatible with ocha-lens NHC module schemas
 -- ============================================================================
@@ -176,3 +179,85 @@ CREATE INDEX IF NOT EXISTS idx_nhc_tracks_geo_basin
     ON storms.nhc_tracks_geo (basin)
     TABLESPACE pg_default;
 
+-- ============================================================================
+-- Table: storms.nhc_wsp_polygon
+-- ============================================================================
+-- One row per (issuance, wind threshold, probability band).
+-- Equivalent schema to the official NHC 5km GIS shapefiles.
+
+-- DROP TABLE IF EXISTS storms.nhc_wsp_polygon CASCADE;
+
+CREATE TABLE IF NOT EXISTS storms.nhc_wsp_polygon
+(
+    id                BIGSERIAL PRIMARY KEY,
+    issuance          TIMESTAMP   NOT NULL,
+    wind_threshold_kt SMALLINT    NOT NULL CHECK (wind_threshold_kt IN (34, 50, 64)),
+    percentage        VARCHAR(8)  NOT NULL,
+    geometry          geometry(MultiPolygon, 4326),
+    CONSTRAINT nhc_wsp_polygon_unique UNIQUE (issuance, wind_threshold_kt, percentage)
+)
+TABLESPACE pg_default;
+
+ALTER TABLE IF EXISTS storms.nhc_wsp_polygon
+    OWNER to {owner};
+
+COMMENT ON TABLE storms.nhc_wsp_polygon IS
+    'NHC basin-wide wind speed probability polygons - one row per issuance/threshold/probability band';
+COMMENT ON COLUMN storms.nhc_wsp_polygon.issuance IS
+    'Forecast issuance time (UTC)';
+COMMENT ON COLUMN storms.nhc_wsp_polygon.wind_threshold_kt IS
+    'Wind speed threshold in knots (34, 50, or 64)';
+COMMENT ON COLUMN storms.nhc_wsp_polygon.percentage IS
+    'Probability band (e.g., "<5%", "5-10%", ..., ">90%")';
+COMMENT ON COLUMN storms.nhc_wsp_polygon.geometry IS
+    'MultiPolygon covering the probability band area in WGS84 (EPSG:4326). NULL for the <5% band.';
+
+-- ============================================================================
+-- Table: storms.nhc_wsp_storm_link
+-- ============================================================================
+-- Maps issuance timestamps to ATCF storm IDs active at that time.
+-- Join key between nhc_wsp_polygon and nhc_storms/nhc_tracks_geo.
+
+-- DROP TABLE IF EXISTS storms.nhc_wsp_storm_link CASCADE;
+
+CREATE TABLE IF NOT EXISTS storms.nhc_wsp_storm_link
+(
+    issuance TIMESTAMP   NOT NULL,
+    atcf_id  VARCHAR     NOT NULL,
+    PRIMARY KEY (issuance, atcf_id)
+)
+TABLESPACE pg_default;
+
+ALTER TABLE IF EXISTS storms.nhc_wsp_storm_link
+    OWNER to {owner};
+
+COMMENT ON TABLE storms.nhc_wsp_storm_link IS
+    'Storm-issuance link: which ATCF storms were active at each WSP issuance time';
+COMMENT ON COLUMN storms.nhc_wsp_storm_link.issuance IS
+    'Forecast issuance time (UTC) - foreign key to nhc_wsp_polygon';
+COMMENT ON COLUMN storms.nhc_wsp_storm_link.atcf_id IS
+    'ATCF storm identifier (e.g., AL012023) - matches nhc_storms.atcf_id';
+
+-- ============================================================================
+-- Indexes (WSP)
+-- ============================================================================
+
+-- Spatial index for geometry column
+CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_geometry
+    ON storms.nhc_wsp_polygon USING gist (geometry)
+    TABLESPACE pg_default;
+
+-- Index on issuance for temporal queries
+CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_issuance
+    ON storms.nhc_wsp_polygon (issuance)
+    TABLESPACE pg_default;
+
+-- Index on wind_threshold_kt for filtering by threshold
+CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_threshold
+    ON storms.nhc_wsp_polygon (wind_threshold_kt)
+    TABLESPACE pg_default;
+
+-- Index on atcf_id for storm-based lookups
+CREATE INDEX IF NOT EXISTS idx_nhc_wsp_storm_link_atcf_id
+    ON storms.nhc_wsp_storm_link (atcf_id)
+    TABLESPACE pg_default;
