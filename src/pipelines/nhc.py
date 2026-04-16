@@ -246,7 +246,7 @@ def process_wsp_polygons(gdf, engine, chunksize):
     Parameters
     ----------
     gdf : gpd.GeoDataFrame
-        WSP polygons from lens.nhc_wsp.load_nhc_wsp()
+        WSP polygons from lens.nhc.load_nhc_wsp()
     engine : sqlalchemy.Engine
         Database engine
     chunksize : int
@@ -334,7 +334,7 @@ def run_nhc_current(
 
         # Process wind speed probability polygons
         logger.info("Fetching current WSP polygons...")
-        wsp_gdf = lens.nhc_wsp.load_nhc_wsp()
+        wsp_gdf = lens.nhc.load_nhc_wsp()
         if wsp_gdf is not None and len(wsp_gdf) > 0:
             process_wsp_polygons(
                 gdf=wsp_gdf, engine=engine, chunksize=chunksize
@@ -449,7 +449,7 @@ def run_nhc_archive(
     wsp_start = f"{start_year}-01-01"
     wsp_end = f"{end_year}-12-31"
     logger.info(f"Fetching WSP polygons for {wsp_start} to {wsp_end}...")
-    wsp_gdf = lens.nhc_wsp.load_nhc_wsp(start=wsp_start, end=wsp_end)
+    wsp_gdf = lens.nhc.load_nhc_wsp(start=wsp_start, end=wsp_end)
     if wsp_gdf is not None and len(wsp_gdf) > 0:
         logger.info(
             f"Loaded {len(wsp_gdf)} WSP rows across {wsp_gdf['issuance'].nunique()} issuances."
