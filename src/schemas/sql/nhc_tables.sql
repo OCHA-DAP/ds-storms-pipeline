@@ -9,7 +9,6 @@
 --   - storms.nhc_storms:        Storm-level metadata (one row per storm)
 --   - storms.nhc_tracks_geo:    Track points with geometry (one row per forecast point)
 --   - storms.nhc_wsp_polygon:   WSP probability polygons (one row per issuance/threshold/band)
---   - storms.nhc_wsp_storm_link: Maps WSP issuances to active ATCF storm IDs
 --
 -- Compatible with ocha-lens NHC module schemas
 -- ============================================================================
@@ -213,32 +212,6 @@ COMMENT ON COLUMN storms.nhc_wsp_polygon.geometry IS
     'MultiPolygon covering the probability band area in WGS84 (EPSG:4326). NULL for the <5% band.';
 
 -- ============================================================================
--- Table: storms.nhc_wsp_storm_link
--- ============================================================================
--- Maps issuance timestamps to ATCF storm IDs active at that time.
--- Join key between nhc_wsp_polygon and nhc_storms/nhc_tracks_geo.
-
--- DROP TABLE IF EXISTS storms.nhc_wsp_storm_link CASCADE;
-
-CREATE TABLE IF NOT EXISTS storms.nhc_wsp_storm_link
-(
-    issuance TIMESTAMP   NOT NULL,
-    atcf_id  VARCHAR     NOT NULL,
-    PRIMARY KEY (issuance, atcf_id)
-)
-TABLESPACE pg_default;
-
-ALTER TABLE IF EXISTS storms.nhc_wsp_storm_link
-    OWNER to {owner};
-
-COMMENT ON TABLE storms.nhc_wsp_storm_link IS
-    'Storm-issuance link: which ATCF storms were active at each WSP issuance time';
-COMMENT ON COLUMN storms.nhc_wsp_storm_link.issuance IS
-    'Forecast issuance time (UTC) - foreign key to nhc_wsp_polygon';
-COMMENT ON COLUMN storms.nhc_wsp_storm_link.atcf_id IS
-    'ATCF storm identifier (e.g., AL012023) - matches nhc_storms.atcf_id';
-
--- ============================================================================
 -- Indexes (WSP)
 -- ============================================================================
 
@@ -257,7 +230,3 @@ CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_threshold
     ON storms.nhc_wsp_polygon (wind_threshold_kt)
     TABLESPACE pg_default;
 
--- Index on atcf_id for storm-based lookups
-CREATE INDEX IF NOT EXISTS idx_nhc_wsp_storm_link_atcf_id
-    ON storms.nhc_wsp_storm_link (atcf_id)
-    TABLESPACE pg_default;
