@@ -181,7 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_nhc_tracks_geo_basin
 -- ============================================================================
 -- Table: storms.nhc_wsp_polygon
 -- ============================================================================
--- One row per (issuance, wind threshold, probability band).
+-- One row per (issued_time, wind threshold, probability band).
 -- Equivalent schema to the official NHC 5km GIS shapefiles.
 
 -- DROP TABLE IF EXISTS storms.nhc_wsp_polygon CASCADE;
@@ -201,9 +201,9 @@ ALTER TABLE IF EXISTS storms.nhc_wsp_polygon
     OWNER to {owner};
 
 COMMENT ON TABLE storms.nhc_wsp_polygon IS
-    'NHC basin-wide wind speed probability polygons - one row per issuance/threshold/probability band';
+    'NHC basin-wide wind speed probability polygons - one row per issued_time/threshold/probability band';
 COMMENT ON COLUMN storms.nhc_wsp_polygon.issued_time IS
-    'Forecast issuance time (UTC)';
+    'Forecast issued time (UTC)';
 COMMENT ON COLUMN storms.nhc_wsp_polygon.wind_threshold_kt IS
     'Wind speed threshold in knots (34, 50, or 64)';
 COMMENT ON COLUMN storms.nhc_wsp_polygon.percentage IS
@@ -220,9 +220,9 @@ CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_geometry
     ON storms.nhc_wsp_polygon USING gist (geometry)
     TABLESPACE pg_default;
 
--- Index on issuance for temporal queries
-CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_issuance
-    ON storms.nhc_wsp_polygon (issuance)
+-- Index on issued_time for temporal queries
+CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_issued_time
+    ON storms.nhc_wsp_polygon (issued_time)
     TABLESPACE pg_default;
 
 -- Index on wind_threshold_kt for filtering by threshold
