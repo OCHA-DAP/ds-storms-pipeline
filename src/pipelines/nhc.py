@@ -452,7 +452,7 @@ def run_nhc_archive(
     wsp_gdf = lens.nhc.load_nhc_wsp(start=wsp_start, end=wsp_end)
     if wsp_gdf is not None and len(wsp_gdf) > 0:
         logger.info(
-            f"Loaded {len(wsp_gdf)} WSP rows across {wsp_gdf['issuance'].nunique()} issuances."
+            f"Loaded {len(wsp_gdf)} WSP rows across {wsp_gdf['issued_time'].nunique()} issuances."
         )
         process_wsp_polygons(gdf=wsp_gdf, engine=engine, chunksize=chunksize)
     else:

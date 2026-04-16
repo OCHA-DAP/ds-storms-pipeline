@@ -189,11 +189,11 @@ CREATE INDEX IF NOT EXISTS idx_nhc_tracks_geo_basin
 CREATE TABLE IF NOT EXISTS storms.nhc_wsp_polygon
 (
     id                BIGSERIAL PRIMARY KEY,
-    issuance          TIMESTAMP   NOT NULL,
+    issued_time       TIMESTAMP   NOT NULL,
     wind_threshold_kt SMALLINT    NOT NULL CHECK (wind_threshold_kt IN (34, 50, 64)),
-    percentage        VARCHAR(8)  NOT NULL,
+    percentage        SMALLINT    NOT NULL,
     geometry          geometry(MultiPolygon, 4326),
-    CONSTRAINT nhc_wsp_polygon_unique UNIQUE (issuance, wind_threshold_kt, percentage)
+    CONSTRAINT nhc_wsp_polygon_unique UNIQUE (issued_time, wind_threshold_kt, percentage)
 )
 TABLESPACE pg_default;
 
@@ -202,12 +202,12 @@ ALTER TABLE IF EXISTS storms.nhc_wsp_polygon
 
 COMMENT ON TABLE storms.nhc_wsp_polygon IS
     'NHC basin-wide wind speed probability polygons - one row per issuance/threshold/probability band';
-COMMENT ON COLUMN storms.nhc_wsp_polygon.issuance IS
+COMMENT ON COLUMN storms.nhc_wsp_polygon.issued_time IS
     'Forecast issuance time (UTC)';
 COMMENT ON COLUMN storms.nhc_wsp_polygon.wind_threshold_kt IS
     'Wind speed threshold in knots (34, 50, or 64)';
 COMMENT ON COLUMN storms.nhc_wsp_polygon.percentage IS
-    'Probability band (e.g., "<5%", "5-10%", ..., ">90%")';
+    'Lower bound of probability band in percent (0, 5, 10, ..., 90). 0 means <5%, 90 means >90%.';
 COMMENT ON COLUMN storms.nhc_wsp_polygon.geometry IS
     'MultiPolygon covering the probability band area in WGS84 (EPSG:4326). NULL for the <5% band.';
 
