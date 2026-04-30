@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import run_ibtracs
 from src.pipelines.nhc import run_nhc_current, run_nhc_archive
+from src.pipelines.wind_buffers import run_wind_buffers
 
 
 def main():
@@ -87,6 +88,22 @@ def main():
         help="End year for archive processing (e.g., 2024). If not provided, only processes start-year.",
     )
 
+    # Wind buffers subparser
+    wind_buffers_parser = subparsers.add_parser(
+        "wind-buffers",
+        parents=[common],
+        help="Run IBTrACS wind buffers pipeline (reads PROD tracks, writes DEV buffers)",
+    )
+    wind_buffers_parser.add_argument(
+        "--basin",
+        help="Filter to a single basin (e.g. NA, WP, EP)",
+    )
+    wind_buffers_parser.add_argument(
+        "--start-year",
+        type=int,
+        help="Only process storms with track points from this year onwards",
+    )
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -126,6 +143,13 @@ def main():
                 save_dir=args.save_dir,
                 chunksize=args.chunksize,
             )
+    elif args.pipeline == "wind-buffers":
+        run_wind_buffers(
+            write_mode=args.mode,
+            chunksize=args.chunksize,
+            basin=args.basin,
+            start_year=args.start_year,
+        )
 
 
 if __name__ == "__main__":
