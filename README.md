@@ -58,6 +58,36 @@ Run the ECMWF pipeline for a specific date range:
 python run_pipeline.py ecmwf --start-date 2024-01-01 --end-date 2024-01-07
 ```
 
+### Wind buffers pipeline
+
+Computes per-storm wind buffer polygons from IBTrACS USA quadrant wind radii (34/50/64 kt) and stores them in the database. Reads track data from the PROD database and writes buffers to the target environment (default: `dev`).
+
+Requires the `usa-wind-buffers` branch of `ocha-lens` to be installed (provides `calculate_wind_buffers_gdf` and `expand_quad_col`). Run the IBTrACS pipeline first to populate `storms.ibtracs_tracks_geo`.
+
+Also requires `PGSSLMODE=require` to be set (Azure PostgreSQL requires SSL):
+```
+export PGSSLMODE=require
+```
+
+```
+python run_pipeline.py wind-buffers [OPTIONS]
+```
+
+Options:
+- `--mode {dev,prod}`: Target database environment for writing buffers (default: `dev`). Always reads from PROD.
+- `--basin CODE`: Filter to a single basin (e.g. `NA`, `WP`, `EP`, `SI`, `SP`, `NI`, `SA`)
+- `--start-year YYYY`: Only process storms with track points from this year onwards
+- `--chunksize N`: Number of records per SQL insert batch (default: `1000`)
+
+Examples:
+```
+# Full historical backfill
+python run_pipeline.py wind-buffers --mode dev
+
+# Subset for testing
+python run_pipeline.py wind-buffers --mode dev --basin NA --start-year 2020
+```
+
 ### Note on backfilling
 
 These pipelines do not support automated backfilling. Unlike datasets with regular update schedules, cyclone data is published based on storm activity rather than a fixed cadence. When historical data needs to be reprocessed, it should be done manually using the appropriate date ranges or dataset types.
@@ -126,3 +156,52 @@ python run_pipeline.py nhc --start-year 2023
 python run_pipeline.py nhc --start-year 2020 --end-year 2024
 ```
 
+## Database schema
+
+All tables live in the `storms` schema. The pipeline reads from PROD and writes to DEV by default.
+
+### `storms.ibtracs_storms`
+One row per storm. Primary key: `sid` (IBTrACS serial ID).
+
+| Column | Type | Description |
+|---|---|---|
+| `sid` | VARCHAR | IBTrACS serial identifier (e.g. `2023249N12323`) |
+| `atcf_id` | VARCHAR | ATCF identifier (e.g. `AL092023`) |
+| `name` | VARCHAR | Storm name (uppercase) |
+| `season` | BIGINT | Season year |
+| `genesis_basin` | VARCHAR | Basin where storm originated (NA, WP, EP, SI, SP, NI, SA) |
+| `provisional` | BOOLEAN | Whether data is provisional (not yet finalized in IBTrACS) |
+| `storm_id` | VARCHAR | Standardized ID: `{name}_{basin}_{season}` (lowercase) |
+
+### `storms.ibtracs_tracks_geo`
+One row per observation point. Populated by the IBTrACS pipeline.
+
+| Column | Type | Description |
+|---|---|---|
+| `sid` | VARCHAR | FK → ibtracs_storms |
+| `valid_time` | TIMESTAMP | Observation time (UTC) |
+| `basin` | VARCHAR | Current basin at this point |
+| `wind_speed` | INTEGER | Max sustained wind speed (knots) |
+| `quadrant_radius_34/50/64` | TEXT | JSON array `[NE, SE, SW, NW]` — WMO best-track wind radii (nm) |
+| `usa_quadrant_radius_34/50/64` | TEXT | JSON array `[NE, SE, SW, NW]` — USA agency wind radii (nm), available ~2004+ |
+| `geometry` | geometry(Point, 4326) | Track point location |
+
+### `storms.ibtracs_wind_buffers`
+One row per (storm, wind speed threshold). Populated by the wind-buffers pipeline. Depends on `ibtracs_tracks_geo` being populated first.
+
+| Column | Type | Description |
+|---|---|---|
+| `sid` | VARCHAR | IBTrACS storm ID |
+| `wind_speed_kt` | SMALLINT | Wind speed threshold: 34, 50, or 64 knots |
+| `geometry` | geometry(Geometry, 4326) | Union of all wind buffer discs along the storm track. Polygon or MultiPolygon (antimeridian-crossing storms are split at ±180°) |
+
+The buffers use USA agency quadrant radii and basin-appropriate map projections to correctly handle storms near the antimeridian (WP, SP, EP basins).
+
+### `storms.nhc_storms`
+One row per NHC storm. Primary key: `atcf_id`.
+
+### `storms.nhc_tracks_geo`
+One row per NHC forecast point (observations at leadtime=0, forecasts at leadtime>0). Includes `quadrant_radius_34/50/64` columns (JSON arrays).
+
+### `storms.nhc_wsp_polygon` *(pending — `add-wsp-data` PR)*
+Basin-wide NHC wind speed probability polygons. One row per (issued_time, wind_threshold_kt, percentage band).
