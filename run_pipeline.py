@@ -103,6 +103,11 @@ def main():
         type=int,
         help="Only process storms with track points from this year onwards",
     )
+    wind_buffers_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recalculate buffers even for storms already in the database",
+    )
 
     args = parser.parse_args()
 
@@ -149,6 +154,7 @@ def main():
             chunksize=args.chunksize,
             basin=args.basin,
             start_year=args.start_year,
+            overwrite=args.overwrite,
         )
 
 

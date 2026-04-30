@@ -54,13 +54,39 @@ def load_tracks(
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def process_wind_buffers(read_engine, write_engine, chunksize, basin=None, start_year=None):
+def load_existing_sids(engine) -> set:
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT DISTINCT sid FROM storms.ibtracs_wind_buffers")
+        )
+        return {row[0] for row in result}
+
+
+def process_wind_buffers(
+    read_engine, write_engine, chunksize, basin=None, start_year=None, overwrite=False
+):
     logger.info("Loading IBTrACS tracks with USA wind radii from PROD...")
     gdf_tracks = load_tracks(read_engine, basin=basin, start_year=start_year)
     logger.info(
         f"Loaded {len(gdf_tracks)} track points "
         f"across {gdf_tracks['sid'].nunique()} storms."
     )
+
+    if not overwrite:
+        existing = load_existing_sids(write_engine)
+        if existing:
+            before = gdf_tracks["sid"].nunique()
+            gdf_tracks = gdf_tracks[~gdf_tracks["sid"].isin(existing)]
+            skipped = before - gdf_tracks["sid"].nunique()
+            logger.info(
+                f"Skipping {skipped} already-computed storms. "
+                f"{gdf_tracks['sid'].nunique()} remaining."
+            )
+        if gdf_tracks.empty:
+            logger.info("All storms already computed. Nothing to do.")
+            return
 
     logger.info("Expanding quadrant radius columns...")
     for speed in BUFFER_SPEEDS:
@@ -99,7 +125,7 @@ def process_wind_buffers(read_engine, write_engine, chunksize, basin=None, start
     logger.info("Successfully wrote wind buffers.")
 
 
-def run_wind_buffers(write_mode="dev", chunksize=1000, basin=None, start_year=None):
+def run_wind_buffers(write_mode="dev", chunksize=1000, basin=None, start_year=None, overwrite=False):
     coloredlogs.install(
         logger=logger,
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -114,6 +140,7 @@ def run_wind_buffers(write_mode="dev", chunksize=1000, basin=None, start_year=No
             chunksize=chunksize,
             basin=basin,
             start_year=start_year,
+            overwrite=overwrite,
         )
         logger.info("Pipeline successfully finished!")
     except Exception as e:
