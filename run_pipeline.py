@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import run_ibtracs
 from src.pipelines.nhc import run_nhc_current, run_nhc_archive
-from src.pipelines.wind_buffers import run_wind_buffers
+from src.pipelines.wind_buffers import run_nhc_wind_buffers, run_wind_buffers
 
 
 def main():
@@ -109,6 +109,27 @@ def main():
         help="Recalculate buffers even for storms already in the database",
     )
 
+    # NHC wind buffers subparser
+    nhc_wind_buffers_parser = subparsers.add_parser(
+        "nhc-wind-buffers",
+        parents=[common],
+        help="Run NHC forecast wind buffers pipeline (reads PROD tracks, writes DEV buffers)",
+    )
+    nhc_wind_buffers_parser.add_argument(
+        "--basin",
+        help="Filter to a single basin (e.g. NA, EP)",
+    )
+    nhc_wind_buffers_parser.add_argument(
+        "--start-year",
+        type=int,
+        help="Only process issuances from this year onwards",
+    )
+    nhc_wind_buffers_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recalculate buffers even for issuances already in the database",
+    )
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -150,6 +171,14 @@ def main():
             )
     elif args.pipeline == "wind-buffers":
         run_wind_buffers(
+            write_mode=args.mode,
+            chunksize=args.chunksize,
+            basin=args.basin,
+            start_year=args.start_year,
+            overwrite=args.overwrite,
+        )
+    elif args.pipeline == "nhc-wind-buffers":
+        run_nhc_wind_buffers(
             write_mode=args.mode,
             chunksize=args.chunksize,
             basin=args.basin,
