@@ -58,34 +58,60 @@ Run the ECMWF pipeline for a specific date range:
 python run_pipeline.py ecmwf --start-date 2024-01-01 --end-date 2024-01-07
 ```
 
-### Wind buffers pipeline
+### Wind buffers pipelines
 
-Computes per-storm wind buffer polygons from IBTrACS USA quadrant wind radii (34/50/64 kt) and stores them in the database. Reads track data from the PROD database and writes buffers to the target environment (default: `dev`).
+Two pipelines compute wind buffer polygons from quadrant wind radii (34/50/64 kt) and store them in the database. Both read from PROD and write to the target environment (default: `dev`), and both require `PGSSLMODE=require`:
 
-Requires the `usa-wind-buffers` branch of `ocha-lens` to be installed (provides `calculate_wind_buffers_gdf` and `expand_quad_col`). Run the IBTrACS pipeline first to populate `storms.ibtracs_tracks_geo`.
-
-Also requires `PGSSLMODE=require` to be set (Azure PostgreSQL requires SSL):
 ```
 export PGSSLMODE=require
 ```
+
+Both require the `usa-wind-buffers` branch of `ocha-lens` (provides `calculate_wind_buffers_gdf` and `expand_quad_col`). Buffers are written to the DB in batches of 50 as they are calculated, so a crash mid-run is recoverable — just rerun and it will skip already-computed entries.
+
+#### IBTrACS wind buffers (`wind-buffers`)
+
+One buffer polygon per (storm, wind speed threshold) across the full historical track. Uses USA agency quadrant radii from `storms.ibtracs_tracks_geo`. Run the IBTrACS pipeline first.
 
 ```
 python run_pipeline.py wind-buffers [OPTIONS]
 ```
 
 Options:
-- `--mode {dev,prod}`: Target database environment for writing buffers (default: `dev`). Always reads from PROD.
+- `--mode {dev,prod}`: Target database environment (default: `dev`). Always reads from PROD.
 - `--basin CODE`: Filter to a single basin (e.g. `NA`, `WP`, `EP`, `SI`, `SP`, `NI`, `SA`)
 - `--start-year YYYY`: Only process storms with track points from this year onwards
-- `--chunksize N`: Number of records per SQL insert batch (default: `1000`)
+- `--overwrite`: Recalculate even for storms already in the database
+- `--chunksize N`: Rows per SQL insert batch (default: `1000`)
 
-Examples:
-```
+```bash
 # Full historical backfill
 python run_pipeline.py wind-buffers --mode dev
 
 # Subset for testing
 python run_pipeline.py wind-buffers --mode dev --basin NA --start-year 2020
+```
+
+#### NHC forecast wind buffers (`nhc-wind-buffers`)
+
+One buffer polygon per (storm, forecast issuance, wind speed threshold) from NHC forecast tracks. Uses `storms.nhc_tracks_geo`. Run the NHC pipeline first.
+
+```
+python run_pipeline.py nhc-wind-buffers [OPTIONS]
+```
+
+Options:
+- `--mode {dev,prod}`: Target database environment (default: `dev`). Always reads from PROD.
+- `--basin {NA,EP}`: Filter to a single basin
+- `--start-year YYYY`: Only process issuances from this year onwards
+- `--overwrite`: Recalculate even for issuances already in the database
+- `--chunksize N`: Rows per SQL insert batch (default: `1000`)
+
+```bash
+# Full historical backfill
+python run_pipeline.py nhc-wind-buffers --mode dev
+
+# Subset for testing
+python run_pipeline.py nhc-wind-buffers --mode dev --basin NA --start-year 2023
 ```
 
 ### Note on backfilling
@@ -198,10 +224,31 @@ One row per (storm, wind speed threshold). Populated by the wind-buffers pipelin
 The buffers use USA agency quadrant radii and basin-appropriate map projections to correctly handle storms near the antimeridian (WP, SP, EP basins).
 
 ### `storms.nhc_storms`
-One row per NHC storm. Primary key: `atcf_id`.
+One row per NHC storm. Primary key: `atcf_id` (e.g. `AL092023`). Only covers NA and EP basins.
 
 ### `storms.nhc_tracks_geo`
-One row per NHC forecast point (observations at leadtime=0, forecasts at leadtime>0). Includes `quadrant_radius_34/50/64` columns (JSON arrays).
+One row per NHC forecast point. Populated by the NHC pipeline.
+
+| Column | Type | Description |
+|---|---|---|
+| `atcf_id` | VARCHAR | FK → nhc_storms |
+| `issued_time` | TIMESTAMP | When the forecast was issued (UTC) |
+| `valid_time` | TIMESTAMP | Forecast valid time (UTC) |
+| `leadtime` | INTEGER | Hours ahead of issuance (0 = observation) |
+| `basin` | VARCHAR | NA or EP |
+| `wind_speed` | REAL | Max sustained wind speed (knots) |
+| `quadrant_radius_34/50/64` | TEXT | JSON array `[NE, SE, SW, NW]` — wind radii (nm) |
+| `geometry` | geometry(Point, 4326) | Forecast track point location |
+
+### `storms.nhc_wind_buffers`
+One row per (storm, forecast issuance, wind speed threshold). Populated by the `nhc-wind-buffers` pipeline. Depends on `nhc_tracks_geo` being populated first.
+
+| Column | Type | Description |
+|---|---|---|
+| `atcf_id` | VARCHAR | ATCF storm identifier |
+| `issued_time` | TIMESTAMP | Forecast issuance time (UTC) |
+| `wind_speed_kt` | SMALLINT | Wind speed threshold: 34, 50, or 64 knots |
+| `geometry` | geometry(Geometry, 4326) | Union of wind buffer discs across the forecast track. Polygon or MultiPolygon. |
 
 ### `storms.nhc_wsp_polygon` *(pending — `add-wsp-data` PR)*
 Basin-wide NHC wind speed probability polygons. One row per (issued_time, wind_threshold_kt, percentage band).
