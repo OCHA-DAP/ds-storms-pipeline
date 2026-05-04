@@ -3,8 +3,8 @@
 NHC (National Hurricane Center) ETL pipeline
 
 Supports two modes:
-1. Current storms: Real-time active tropical cyclones
-2. Archive: Historical ATCF A-deck data for a specific year (all basins)
+1. Current storms: Real-time active tropical cyclones and WSP polygons
+2. Archive: Historical ATCF A-deck data and WSP shapefiles
 """
 
 import json
@@ -12,12 +12,20 @@ import logging
 import warnings
 
 import coloredlogs
+import geopandas as gpd
 import ocha_lens as lens
+import pandas as pd
 from dotenv import load_dotenv
+from ocha_lens.utils.storm import calculate_wind_buffers_gdf, expand_quad_col
+from sqlalchemy import text
+from tqdm import tqdm
 
 load_dotenv()
 
 import ocha_stratus as stratus  # noqa
+
+BUFFER_SPEEDS = [34, 50, 64]
+_WIND_BUFFER_BATCH_SIZE = 50
 
 
 logger = logging.getLogger(__name__)
@@ -239,6 +247,54 @@ def process_storms(df_raw, engine, chunksize):
     return storms
 
 
+def process_wsp_polygons(gdf, engine, chunksize):
+    """
+    Upload WSP polygon data to the database.
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        WSP polygons from lens.nhc.get_wsp()
+    engine : sqlalchemy.Engine
+        Database engine
+    chunksize : int
+        Number of rows per batch insert
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Processed data, or None if no data to process
+    """
+    if gdf is None or len(gdf) == 0:
+        logger.warning("No WSP polygon data to process. Skipping.")
+        return None
+
+    logger.info(f"Processing {len(gdf)} WSP polygon rows...")
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Geometry column does not contain geometry"
+        )
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf["geometry"].apply(
+            lambda g: g.wkt if g is not None else None
+        )
+
+    with engine.connect() as conn:
+        gdf.to_sql(
+            name="nhc_wsp_polygon",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
+
+    logger.info("Successfully processed WSP polygons.")
+    return gdf
+
+
 def run_nhc_current(
     mode="local", save_to_blob=False, save_dir="storm", chunksize=10000
 ):
@@ -283,6 +339,16 @@ def run_nhc_current(
 
         # Process tracks and add them to the database
         process_tracks(df_raw=df_raw, engine=engine, chunksize=chunksize)
+
+        # Process wind speed probability polygons
+        logger.info("Fetching current WSP polygons...")
+        wsp_gdf = lens.nhc.get_wsp()
+        if wsp_gdf is not None and len(wsp_gdf) > 0:
+            process_wsp_polygons(
+                gdf=wsp_gdf, engine=engine, chunksize=chunksize
+            )
+        else:
+            logger.info("No current WSP data available.")
 
         logger.info("Pipeline successfully finished!")
 
@@ -383,6 +449,189 @@ def run_nhc_archive(
         )
 
     logger.info(
-        f"Pipeline finished! Processed {total_storms_processed} storms "
+        f"Processed {total_storms_processed} storms "
         f"and {total_tracks_processed} track points across {end_year - start_year + 1} year(s)."
     )
+
+    # Process wind speed probability polygons for the full year range
+    wsp_start = f"{start_year}-01-01"
+    wsp_end = f"{end_year}-12-31"
+    logger.info(f"Fetching WSP polygons for {wsp_start} to {wsp_end}...")
+    wsp_gdf = lens.nhc.get_wsp(start=wsp_start, end=wsp_end)
+    if wsp_gdf is not None and len(wsp_gdf) > 0:
+        logger.info(
+            f"Loaded {len(wsp_gdf)} WSP rows across {wsp_gdf['issued_time'].nunique()} issuances."
+        )
+        process_wsp_polygons(gdf=wsp_gdf, engine=engine, chunksize=chunksize)
+    else:
+        logger.info("No WSP data found for the specified date range.")
+
+    logger.info("Pipeline successfully finished!")
+
+
+# ---------------------------------------------------------------------------
+# Wind buffer generation
+# ---------------------------------------------------------------------------
+
+
+def _load_nhc_wind_buffer_tracks(
+    engine,
+    basin: str | None = None,
+    start_year: int | None = None,
+    issued_time=None,
+) -> gpd.GeoDataFrame:
+    filters = [
+        """(quadrant_radius_34 IS NOT NULL
+            OR quadrant_radius_50 IS NOT NULL
+            OR quadrant_radius_64 IS NOT NULL)"""
+    ]
+    if basin:
+        filters.append(f"basin = '{basin}'")
+    if start_year:
+        filters.append(f"EXTRACT(YEAR FROM issued_time) >= {start_year}")
+    if issued_time is not None:
+        filters.append(f"issued_time = '{issued_time}'")
+
+    where = " AND ".join(filters)
+    query = f"""
+        SELECT atcf_id, basin, issued_time, valid_time,
+               quadrant_radius_34,
+               quadrant_radius_50,
+               quadrant_radius_64,
+               geometry
+        FROM storms.nhc_tracks_geo
+        WHERE {where}
+        ORDER BY atcf_id, issued_time, valid_time
+    """
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_existing_nhc_keys(engine) -> set:
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT DISTINCT atcf_id, issued_time FROM storms.nhc_wind_buffers")
+        )
+        return {(row[0], row[1]) for row in result}
+
+
+def _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize):
+    gdf = pd.concat(batch, ignore_index=True).rename(
+        columns={"speed": "wind_speed_kt"}
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Geometry column does not contain geometry"
+        )
+        gdf["geometry"] = gdf["geometry"].apply(
+            lambda g: g.wkt if g is not None else None
+        )
+    gdf[cols].to_sql(
+        name="nhc_wind_buffers",
+        con=conn,
+        schema="storms",
+        if_exists="append",
+        index=False,
+        method=stratus.postgres_upsert,
+        chunksize=chunksize,
+    )
+    conn.commit()
+
+
+def process_nhc_wind_buffers(
+    read_engine,
+    write_engine,
+    chunksize,
+    basin=None,
+    start_year=None,
+    overwrite=False,
+    issued_time=None,
+):
+    logger.info("Loading NHC tracks with wind radii...")
+    gdf_tracks = _load_nhc_wind_buffer_tracks(
+        read_engine, basin=basin, start_year=start_year, issued_time=issued_time
+    )
+    n_issuances = gdf_tracks.groupby(["atcf_id", "issued_time"]).ngroups
+    logger.info(
+        f"Loaded {len(gdf_tracks)} track points across "
+        f"{gdf_tracks['atcf_id'].nunique()} storms, {n_issuances} forecast issuances."
+    )
+
+    if not overwrite:
+        existing = _load_existing_nhc_keys(write_engine)
+        if existing:
+            before = gdf_tracks.groupby(["atcf_id", "issued_time"]).ngroups
+            mask = gdf_tracks.apply(
+                lambda r: (r["atcf_id"], r["issued_time"]) not in existing, axis=1
+            )
+            gdf_tracks = gdf_tracks[mask]
+            after = (
+                gdf_tracks.groupby(["atcf_id", "issued_time"]).ngroups
+                if not gdf_tracks.empty
+                else 0
+            )
+            logger.info(
+                f"Skipping {before - after} already-computed issuances. "
+                f"{after} remaining."
+            )
+        if gdf_tracks.empty:
+            logger.info("All issuances already computed. Nothing to do.")
+            return
+
+    logger.info("Expanding quadrant radius columns...")
+    for speed in BUFFER_SPEEDS:
+        gdf_tracks = expand_quad_col(gdf_tracks, f"quadrant_radius_{speed}")
+
+    logger.info("Calculating and writing NHC wind buffers per forecast issuance...")
+    cols = ["atcf_id", "issued_time", "wind_speed_kt", "geometry"]
+    batch = []
+    with write_engine.connect() as conn:
+        for (atcf_id, it), group in tqdm(
+            gdf_tracks.groupby(["atcf_id", "issued_time"])
+        ):
+            gdf_buffers = calculate_wind_buffers_gdf(
+                group, quad_cols_format="quadrant_radius_{speed}_{quad}"
+            )
+            gdf_buffers["atcf_id"] = atcf_id
+            gdf_buffers["issued_time"] = it
+            batch.append(gdf_buffers)
+
+            if len(batch) >= _WIND_BUFFER_BATCH_SIZE:
+                _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize)
+                batch = []
+
+        if batch:
+            _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize)
+
+    logger.info("Successfully wrote NHC wind buffers.")
+
+
+def run_nhc_wind_buffers(
+    write_mode="dev",
+    chunksize=1000,
+    basin=None,
+    start_year=None,
+    overwrite=False,
+    issued_time=None,
+):
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting NHC wind buffers pipeline...")
+    read_engine = stratus.get_engine(stage="prod")
+    write_engine = stratus.get_engine(stage=write_mode, write=True)
+    try:
+        process_nhc_wind_buffers(
+            read_engine=read_engine,
+            write_engine=write_engine,
+            chunksize=chunksize,
+            basin=basin,
+            start_year=start_year,
+            overwrite=overwrite,
+            issued_time=issued_time,
+        )
+        logger.info("NHC wind buffers pipeline finished.")
+    except Exception as e:
+        logger.error(f"An error occurred: {e}", exc_info=True)
+        raise

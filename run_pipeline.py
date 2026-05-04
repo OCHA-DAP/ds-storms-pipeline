@@ -2,8 +2,8 @@ import argparse
 from datetime import datetime, timedelta
 
 from src.pipelines.ecmwf import run_ecmwf
-from src.pipelines.ibtracs import run_ibtracs
-from src.pipelines.nhc import run_nhc_current, run_nhc_archive
+from src.pipelines.ibtracs import run_ibtracs, run_wind_buffers
+from src.pipelines.nhc import run_nhc_current, run_nhc_archive, run_nhc_wind_buffers
 
 
 def main():
@@ -87,6 +87,48 @@ def main():
         help="End year for archive processing (e.g., 2024). If not provided, only processes start-year.",
     )
 
+    # Wind buffers subparser
+    wind_buffers_parser = subparsers.add_parser(
+        "wind-buffers",
+        parents=[common],
+        help="Run IBTrACS wind buffers pipeline (reads PROD tracks, writes DEV buffers)",
+    )
+    wind_buffers_parser.add_argument(
+        "--basin",
+        help="Filter to a single basin (e.g. NA, WP, EP)",
+    )
+    wind_buffers_parser.add_argument(
+        "--start-year",
+        type=int,
+        help="Only process storms with track points from this year onwards",
+    )
+    wind_buffers_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recalculate buffers even for storms already in the database",
+    )
+
+    # NHC wind buffers subparser
+    nhc_wind_buffers_parser = subparsers.add_parser(
+        "nhc-wind-buffers",
+        parents=[common],
+        help="Run NHC forecast wind buffers pipeline (reads PROD tracks, writes DEV buffers)",
+    )
+    nhc_wind_buffers_parser.add_argument(
+        "--basin",
+        help="Filter to a single basin (e.g. NA, EP)",
+    )
+    nhc_wind_buffers_parser.add_argument(
+        "--start-year",
+        type=int,
+        help="Only process issuances from this year onwards",
+    )
+    nhc_wind_buffers_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recalculate buffers even for issuances already in the database",
+    )
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -126,6 +168,22 @@ def main():
                 save_dir=args.save_dir,
                 chunksize=args.chunksize,
             )
+    elif args.pipeline == "wind-buffers":
+        run_wind_buffers(
+            write_mode=args.mode,
+            chunksize=args.chunksize,
+            basin=args.basin,
+            start_year=args.start_year,
+            overwrite=args.overwrite,
+        )
+    elif args.pipeline == "nhc-wind-buffers":
+        run_nhc_wind_buffers(
+            write_mode=args.mode,
+            chunksize=args.chunksize,
+            basin=args.basin,
+            start_year=args.start_year,
+            overwrite=args.overwrite,
+        )
 
 
 if __name__ == "__main__":
