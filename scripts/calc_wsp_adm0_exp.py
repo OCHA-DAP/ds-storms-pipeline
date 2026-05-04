@@ -4,7 +4,7 @@ Calculate population exposure to NHC WSP polygons at ADM0 level.
 Reads WSP polygons from storms.nhc_wsp_polygon (dev DB), matches each to an
 ATCF storm ID using NHC track forecasts, then calculates how many people in
 each country fall within each WSP polygon using the WorldPop 2026 1km raster.
-Results are written to storms.nhc_wsp_adm0_exp.
+Results are written to storms.nhc_wsp_exposure (admin_level=0 rows).
 
 Usage:
     python scripts/calc_wsp_adm0_exp.py                        # all countries, all storms
@@ -15,7 +15,11 @@ Usage:
 """
 
 import argparse
+import sys
 import warnings
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import fsspec
 import geopandas as gpd
@@ -23,41 +27,17 @@ import ocha_stratus as stratus
 import pandas as pd
 from ocha_lens.utils.storm import match_wsp_to_tracks
 from rasterio.errors import ShapeSkipWarning
-from rioxarray.exceptions import NoDataInBounds
 from sqlalchemy import text
 
-GEO_CRS_ANTIMERIDIAN = "+proj=longlat +datum=WGS84 +lon_wrap=180"
+from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure
+
 FIELDMAPS_URL = "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
 POP_BLOB = "worldpop/pop_count/global_pop_2026_CN_1km_R2025A_UA_v1.tif"
-KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "adm0_pcode"]
+KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "admin_level", "pcode"]
+ADMIN_LEVEL = 0
 TEST_COUNTRIES = ["CUB"]
 TEST_SINCE = "2024-01-01"
 TEST_BASIN = "NA"
-
-
-def calculate_single_adm_exposure(gdf_buffers, da_wp):
-    records = []
-    for _, row in gdf_buffers.iterrows():
-        row_data = row.drop(labels="geometry").to_dict()
-        if not row.geometry or row.geometry.is_empty:
-            pop_exposed = 0
-        else:
-            if row.geometry.bounds[0] < -160 or row.geometry.bounds[2] > 160:
-                row_geometry_work = (
-                    gpd.GeoSeries([row.geometry], crs=4326)
-                    .to_crs(GEO_CRS_ANTIMERIDIAN)
-                    .iloc[0]
-                )
-            else:
-                row_geometry_work = row.geometry
-            try:
-                da_wp_clip = da_wp.rio.clip([row_geometry_work])
-                pop_exposed = int(da_wp_clip.where(da_wp_clip > 0).sum())
-            except NoDataInBounds:
-                pop_exposed = 0
-        row_data["pop_exposed"] = pop_exposed
-        records.append(row_data)
-    return pd.DataFrame(records)
 
 
 def load_wsp(engine, since=None, basin=None):
@@ -123,13 +103,14 @@ def load_pop():
 
 
 def get_done(engine) -> pd.DataFrame:
-    """Load all existing (issued_time, wind_threshold_kt, percentage, atcf_id, adm0_pcode) from DB."""
+    """Load all existing key combos from DB for incremental backfilling."""
     try:
         with engine.connect() as con:
             return pd.read_sql(
                 text(
-                    "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, adm0_pcode"
-                    " FROM storms.nhc_wsp_adm0_exp"
+                    "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
+                    " FROM storms.nhc_wsp_exposure"
+                    f" WHERE admin_level = {ADMIN_LEVEL}"
                 ),
                 con,
             )
@@ -141,7 +122,7 @@ def _filter_already_done(
     wsp: gpd.GeoDataFrame,
     done_country: pd.DataFrame,
 ) -> gpd.GeoDataFrame:
-    """Return only WSP rows not yet calculated for this country."""
+    """Return only WSP rows not yet calculated for this admin unit."""
     merge_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
     SENTINEL = "__null__"
     wsp_keys = wsp[merge_cols].assign(atcf_id=wsp["atcf_id"].fillna(SENTINEL))
@@ -173,8 +154,7 @@ def run(countries=None, since=None, basin=None, overwrite=False):
 
     done_df = get_done(engine)
     if not done_df.empty:
-        n_done_countries = done_df["adm0_pcode"].nunique()
-        print(f"  {n_done_countries} countries with existing data in DB")
+        print(f"  {done_df['pcode'].nunique()} countries with existing data in DB")
 
     total = len(country_list)
     skipped_all_done = 0
@@ -182,11 +162,12 @@ def run(countries=None, since=None, basin=None, overwrite=False):
 
     print(f"\nStarting exposure calculation for {total} countries...\n")
 
-    for i, adm0_pcode in enumerate(country_list, 1):
-        prefix = f"[{i}/{total}] {adm0_pcode}"
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{total}] {iso3}"
+        pcode = iso3  # at ADM0, pcode == iso3
 
         adm_geom = (
-            gdf_adm1[gdf_adm1["iso_3"] == adm0_pcode][["geometry"]]
+            gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]]
             .dissolve()
             .iloc[0]
             .geometry
@@ -212,7 +193,7 @@ def run(countries=None, since=None, basin=None, overwrite=False):
         wsp_no_overlap = wsp[~intersects_mask]
 
         if not overwrite and not done_df.empty:
-            done_country = done_df[done_df["adm0_pcode"] == adm0_pcode]
+            done_country = done_df[done_df["pcode"] == pcode]
             if not done_country.empty:
                 wsp_in_country = _filter_already_done(wsp_in_country, done_country)
                 wsp_no_overlap = _filter_already_done(wsp_no_overlap, done_country)
@@ -227,15 +208,19 @@ def run(countries=None, since=None, basin=None, overwrite=False):
 
         if not wsp_in_country.empty:
             da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-            df = calculate_single_adm_exposure(wsp_in_country, da_wp_country)
-            df["adm0_pcode"] = adm0_pcode
+            df = calculate_exposure(wsp_in_country, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = pcode
+            df["admin_level"] = ADMIN_LEVEL
             del da_wp_country
         else:
-            df = pd.DataFrame(columns=[c for c in KEY_COLS] + ["pop_exposed"])
+            df = pd.DataFrame(columns=KEY_COLS + ["pop_exposed"])
 
         if not wsp_no_overlap.empty:
             df_zeros = wsp_no_overlap.drop(columns=["geometry", "id"], errors="ignore").copy()
-            df_zeros["adm0_pcode"] = adm0_pcode
+            df_zeros["iso3"] = iso3
+            df_zeros["pcode"] = pcode
+            df_zeros["admin_level"] = ADMIN_LEVEL
             df_zeros["pop_exposed"] = 0
             df = pd.concat([df, df_zeros], ignore_index=True)
 
@@ -243,7 +228,7 @@ def run(countries=None, since=None, basin=None, overwrite=False):
         out = out.drop_duplicates(subset=KEY_COLS, keep="last")
         with engine.connect() as con:
             out.to_sql(
-                "nhc_wsp_adm0_exp",
+                "nhc_wsp_exposure",
                 con,
                 schema="storms",
                 if_exists="append",
@@ -265,7 +250,7 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--test", action="store_true",
                        help=f"Run for {', '.join(TEST_COUNTRIES)}, {TEST_BASIN} basin, since {TEST_SINCE}")
-    group.add_argument("--countries", nargs="+", metavar="PCODE", help="Specific country p-codes to process")
+    group.add_argument("--countries", nargs="+", metavar="PCODE", help="Specific country ISO3 codes to process")
     parser.add_argument("--since", metavar="YYYY-MM-DD", help="Only load WSP polygons issued on or after this date")
     parser.add_argument("--basin", metavar="BASIN", help="Only load WSP polygons for this basin (e.g. NA, EP)")
     parser.add_argument("--overwrite", action="store_true", help="Recalculate even if results already exist in DB")
