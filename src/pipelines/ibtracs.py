@@ -321,3 +321,221 @@ def run_wind_buffers(
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Population exposure
+# ---------------------------------------------------------------------------
+
+_EXP_KEY_COLS = ["sid", "wind_speed_kt", "admin_level", "pcode"]
+_EXP_ADMIN_LEVEL = 0
+
+
+def _load_ibtracs_exp_buffers(
+    engine,
+    since: int | None = None,
+    basin: str | None = None,
+    sids: list[str] | None = None,
+) -> gpd.GeoDataFrame:
+    filters = []
+    if since:
+        filters.append(f"s.season >= {since}")
+    if basin:
+        filters.append(f"s.genesis_basin = '{basin}'")
+    if sids:
+        sid_list = ", ".join(f"'{s}'" for s in sids)
+        filters.append(f"b.sid IN ({sid_list})")
+
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    query = (
+        f"SELECT b.sid, b.wind_speed_kt, b.geometry"
+        f" FROM storms.ibtracs_wind_buffers b"
+        f" JOIN storms.ibtracs_storms s ON b.sid = s.sid"
+        f" {where}"
+    )
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_done_ibtracs_exp(engine) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text(
+                    "SELECT sid, wind_speed_kt, admin_level, pcode"
+                    " FROM storms.ibtracs_wind_exposure"
+                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                ),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=_EXP_KEY_COLS)
+
+
+def _filter_done_ibtracs(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+    merge_cols = ["sid", "wind_speed_kt"]
+    merged = buffers[merge_cols].merge(
+        done_country[merge_cols].drop_duplicates().assign(_done=True),
+        on=merge_cols,
+        how="left",
+    )
+    return buffers[merged["_done"].isna().values].reset_index(drop=True)
+
+
+def run_ibtracs_exp(
+    countries: list[str] | None = None,
+    since: int | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    mode: str = "dev",
+    sids: list[str] | None = None,
+) -> None:
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    logger.info("Loading IBTrACS wind buffers for exposure calculation...")
+    gdf_buffers = _load_ibtracs_exp_buffers(engine, since=since, basin=basin, sids=sids)
+    if gdf_buffers.empty:
+        logger.info("No wind buffers found for the given filters. Skipping.")
+        return
+    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    logger.info(f"Processing {len(country_list)} countries...")
+
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done_df = pd.DataFrame(columns=_EXP_KEY_COLS) if overwrite else _load_done_ibtracs_exp(engine)
+    if not done_df.empty:
+        logger.info(f"{done_df['pcode'].nunique()} countries with existing data in DB")
+
+    processed = skipped = 0
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{len(country_list)}] {iso3}"
+
+        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        minx, _, maxx, _ = adm_geom.bounds
+        wrap = maxx > 160 or minx < -160
+
+        if wrap:
+            da_wp = da_wp_wrapped
+            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+            buffers = gdf_buffers_anti
+        else:
+            da_wp = da_wp_global
+            buffers = gdf_buffers
+
+        intersects_mask = buffers.intersects(adm_geom)
+        buf_in = buffers[intersects_mask]
+        buf_zero = buffers[~intersects_mask]
+
+        if not overwrite and not done_df.empty:
+            done_country = done_df[done_df["pcode"] == iso3]
+            if not done_country.empty:
+                buf_in = _filter_done_ibtracs(buf_in, done_country)
+                buf_zero = _filter_done_ibtracs(buf_zero, done_country)
+                if buf_in.empty and buf_zero.empty:
+                    skipped += 1
+                    logger.info(f"{prefix} — all done, skipping")
+                    continue
+
+        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+
+        if not buf_in.empty:
+            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+            df = calculate_exposure(buf_in, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = iso3
+            df["admin_level"] = _EXP_ADMIN_LEVEL
+            del da_wp_country
+        else:
+            df = pd.DataFrame(columns=_EXP_KEY_COLS + ["iso3", "pop_exposed"])
+
+        if not buf_zero.empty:
+            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
+            df_zeros["iso3"] = iso3
+            df_zeros["pcode"] = iso3
+            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
+            df_zeros["pop_exposed"] = 0
+            df = pd.concat([df, df_zeros], ignore_index=True)
+
+        out = df.drop_duplicates(subset=_EXP_KEY_COLS, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                "ibtracs_wind_exposure",
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        processed += 1
+
+    logger.info(f"Exposure done: {processed} written, {skipped} skipped (already done).")
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Realtime orchestration
+# ---------------------------------------------------------------------------
+
+
+def run_ibtracs_realtime(
+    mode: str = "prod",
+    dataset_type: str = "ACTIVE",
+    save_to_blob: bool = False,
+    save_dir: str = "/tmp",
+    chunksize: int = 10000,
+) -> None:
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting IBTrACS realtime pipeline...")
+
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    dataset = retrieve_ibtracs(
+        dataset_type=dataset_type,
+        stage=mode,
+        save_to_blob=save_to_blob,
+        save_dir=save_dir,
+    )
+    process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
+    process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
+
+    storm_df = lens.ibtracs.get_storms(dataset)
+    active_sids = storm_df["sid"].tolist()
+    logger.info(f"Active SIDs this run: {active_sids}")
+
+    if not active_sids:
+        logger.info("No active storms — skipping downstream steps.")
+        return
+
+    read_engine = stratus.get_engine(stage="prod")
+    write_engine = stratus.get_engine(stage=mode, write=True)
+
+    try:
+        logger.info("Running IBTrACS wind buffers...")
+        process_wind_buffers(
+            read_engine=read_engine,
+            write_engine=write_engine,
+            chunksize=chunksize,
+            sids=active_sids,
+        )
+    except Exception as e:
+        logger.error(f"Wind buffers failed: {e}", exc_info=True)
+
+    try:
+        logger.info("Running IBTrACS exposure...")
+        run_ibtracs_exp(mode=mode, sids=active_sids)
+    except Exception as e:
+        logger.error(f"Exposure failed: {e}", exc_info=True)
+
+    logger.info("IBTrACS realtime pipeline finished.")

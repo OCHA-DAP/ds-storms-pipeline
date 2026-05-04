@@ -1,10 +1,27 @@
-"""Raster exposure utilities."""
+"""Raster exposure utilities shared across all pipeline datasets."""
+import fsspec
 import geopandas as gpd
+import ocha_stratus as stratus
 import pandas as pd
 import xarray as xr
 from rioxarray.exceptions import NoDataInBounds
 
 GEO_CRS_ANTIMERIDIAN = "+proj=longlat +datum=WGS84 +lon_wrap=180"
+_FIELDMAPS_URL = "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
+_POP_BLOB = "worldpop/pop_count/global_pop_2026_CN_1km_R2025A_UA_v1.tif"
+
+
+def load_adm1(countries: list[str] | None) -> gpd.GeoDataFrame:
+    filters = [("iso_3", "in", countries)] if countries else None
+    with fsspec.open(_FIELDMAPS_URL, "rb") as f:
+        return gpd.read_parquet(f, columns=["iso_3", "geometry"], filters=filters)
+
+
+def load_pop() -> tuple[xr.DataArray, xr.DataArray]:
+    """Return (global, antimeridian-wrapped) WorldPop DataArrays."""
+    da = stratus.open_blob_cog(_POP_BLOB, container_name="raster").squeeze(drop=True)
+    da_wrapped = da.assign_coords({"x": ((da.x + 360) % 360)}).sortby("x")
+    return da, da_wrapped
 
 
 def calculate_exposure(

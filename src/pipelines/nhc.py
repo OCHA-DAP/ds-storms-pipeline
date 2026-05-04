@@ -635,3 +635,395 @@ def run_nhc_wind_buffers(
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Population exposure — NHC wind buffers
+# ---------------------------------------------------------------------------
+
+_TRACK_EXP_KEY_COLS = ["atcf_id", "issued_time", "wind_speed_kt", "admin_level", "pcode"]
+_WSP_EXP_KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "admin_level", "pcode"]
+_EXP_ADMIN_LEVEL = 0
+
+
+def _load_nhc_wind_exp_buffers(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+) -> gpd.GeoDataFrame:
+    filters = []
+    if since:
+        filters.append(f"b.issued_time >= '{since}'")
+    if basin:
+        filters.append(f"s.genesis_basin = '{basin}'")
+    if issued_time is not None:
+        filters.append(f"b.issued_time = '{issued_time}'")
+
+    if basin:
+        where = "WHERE " + " AND ".join(filters)
+        query = (
+            f"SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
+            f" FROM storms.nhc_wind_buffers b"
+            f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
+            f" {where}"
+        )
+    else:
+        where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        query = (
+            f"SELECT atcf_id, issued_time, wind_speed_kt, geometry"
+            f" FROM storms.nhc_wind_buffers {where}"
+        )
+
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_done_nhc_wind_exp(engine) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text(
+                    "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
+                    " FROM storms.nhc_wind_exposure"
+                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                ),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=_TRACK_EXP_KEY_COLS)
+
+
+def _filter_done_nhc_wind(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+    merge_cols = ["atcf_id", "issued_time", "wind_speed_kt"]
+    merged = buffers[merge_cols].merge(
+        done_country[merge_cols].drop_duplicates().assign(_done=True),
+        on=merge_cols,
+        how="left",
+    )
+    return buffers[merged["_done"].isna().values].reset_index(drop=True)
+
+
+def run_nhc_wind_exp(
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    mode: str = "dev",
+    issued_time=None,
+) -> None:
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    logger.info("Loading NHC wind buffers for exposure calculation...")
+    gdf_buffers = _load_nhc_wind_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
+    if gdf_buffers.empty:
+        logger.info("No wind buffers found for the given filters. Skipping.")
+        return
+    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    logger.info(f"Processing {len(country_list)} countries...")
+
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done_df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite else _load_done_nhc_wind_exp(engine)
+
+    processed = skipped = 0
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{len(country_list)}] {iso3}"
+
+        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        minx, _, maxx, _ = adm_geom.bounds
+        wrap = maxx > 160 or minx < -160
+
+        if wrap:
+            da_wp = da_wp_wrapped
+            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+            buffers = gdf_buffers_anti
+        else:
+            da_wp = da_wp_global
+            buffers = gdf_buffers
+
+        intersects_mask = buffers.intersects(adm_geom)
+        buf_in = buffers[intersects_mask]
+        buf_zero = buffers[~intersects_mask]
+
+        if not overwrite and not done_df.empty:
+            done_country = done_df[done_df["pcode"] == iso3]
+            if not done_country.empty:
+                buf_in = _filter_done_nhc_wind(buf_in, done_country)
+                buf_zero = _filter_done_nhc_wind(buf_zero, done_country)
+                if buf_in.empty and buf_zero.empty:
+                    skipped += 1
+                    logger.info(f"{prefix} — all done, skipping")
+                    continue
+
+        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+
+        if not buf_in.empty:
+            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+            df = calculate_exposure(buf_in, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = iso3
+            df["admin_level"] = _EXP_ADMIN_LEVEL
+            del da_wp_country
+        else:
+            df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS + ["iso3", "pop_exposed"])
+
+        if not buf_zero.empty:
+            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
+            df_zeros["iso3"] = iso3
+            df_zeros["pcode"] = iso3
+            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
+            df_zeros["pop_exposed"] = 0
+            df = pd.concat([df, df_zeros], ignore_index=True)
+
+        out = df.drop_duplicates(subset=_TRACK_EXP_KEY_COLS, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                "nhc_wind_exposure",
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        processed += 1
+
+    logger.info(f"NHC wind exposure done: {processed} written, {skipped} skipped.")
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Population exposure — NHC WSP polygons
+# ---------------------------------------------------------------------------
+
+
+def _load_wsp_for_exposure(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+) -> gpd.GeoDataFrame:
+    from ocha_lens.utils.storm import match_wsp_to_tracks
+
+    track_filters = []
+    if since:
+        track_filters.append(f"issued_time >= '{since}'")
+    if basin:
+        track_filters.append(f"basin = '{basin}'")
+    if issued_time is not None:
+        track_filters.append(f"issued_time = '{issued_time}'")
+
+    track_where = ("WHERE " + " AND ".join(track_filters)) if track_filters else ""
+    wsp_time_filter = (
+        f"WHERE issued_time IN (SELECT DISTINCT issued_time FROM storms.nhc_tracks_geo {track_where})"
+    )
+
+    with engine.connect() as conn:
+        gdf_wsp_raw = gpd.read_postgis(
+            f"SELECT id, issued_time, wind_threshold_kt, percentage, geometry"
+            f" FROM storms.nhc_wsp_polygon {wsp_time_filter}",
+            conn,
+            geom_col="geometry",
+        )
+        track_query = (
+            f"SELECT atcf_id, issued_time, geometry FROM storms.nhc_tracks_geo"
+            f" {track_where}"
+            f" AND issued_time IN (SELECT DISTINCT issued_time FROM storms.nhc_wsp_polygon {wsp_time_filter})"
+            if track_where
+            else
+            f"SELECT atcf_id, issued_time, geometry FROM storms.nhc_tracks_geo"
+            f" WHERE issued_time IN (SELECT DISTINCT issued_time FROM storms.nhc_wsp_polygon)"
+        )
+        gdf_tracks = gpd.read_postgis(track_query, conn, geom_col="geometry")
+
+    logger.info(f"  {len(gdf_wsp_raw)} WSP polygons, {len(gdf_tracks)} track points")
+    gdf_wsp = match_wsp_to_tracks(gdf_wsp_raw, gdf_tracks)
+    n_matched = gdf_wsp["atcf_id"].notna().sum()
+    logger.info(f"  {n_matched}/{len(gdf_wsp)} polygons matched to an ATCF ID")
+    return gdf_wsp
+
+
+def _load_done_nhc_wsp_exp(engine) -> list[str]:
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text("SELECT DISTINCT pcode FROM storms.nhc_wsp_adm0_exp"),
+                conn,
+            )["pcode"].tolist()
+    except Exception:
+        return []
+
+
+def run_nhc_wsp_exp(
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    mode: str = "dev",
+    issued_time=None,
+) -> None:
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    logger.info("Loading WSP polygons for exposure calculation...")
+    gdf_wsp = _load_wsp_for_exposure(engine, since=since, basin=basin, issued_time=issued_time)
+    if gdf_wsp.empty:
+        logger.info("No WSP polygons found for the given filters. Skipping.")
+        return
+    gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    logger.info(f"Processing {len(country_list)} countries...")
+
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done = [] if overwrite else _load_done_nhc_wsp_exp(engine)
+    if done:
+        logger.info(f"{len(done)} countries already in DB — skipping")
+
+    processed = skipped_done = skipped_no_overlap = 0
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{len(country_list)}] {iso3}"
+
+        if iso3 in done:
+            skipped_done += 1
+            logger.info(f"{prefix} — already done, skipping")
+            continue
+
+        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        minx, _, maxx, _ = adm_geom.bounds
+        wrap = maxx > 160 or minx < -160
+
+        if wrap:
+            da_wp = da_wp_wrapped
+            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+            wsp = gdf_wsp_anti
+        else:
+            da_wp = da_wp_global
+            wsp = gdf_wsp
+
+        wsp_in_country = wsp[wsp.intersects(adm_geom)]
+        if wsp_in_country.empty:
+            skipped_no_overlap += 1
+            logger.info(f"{prefix} — no WSP overlap, skipping")
+            continue
+
+        logger.info(f"{prefix} — {len(wsp_in_country)} WSP polygons")
+        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+        df = calculate_exposure(wsp_in_country, da_wp_country)
+        df["adm0_pcode"] = iso3
+        del da_wp_country
+
+        out = df.drop(columns=["id"], errors="ignore")
+        key_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "adm0_pcode"]
+        out = out.drop_duplicates(subset=key_cols, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                "nhc_wsp_adm0_exp",
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        processed += 1
+
+    logger.info(
+        f"WSP exposure done: {processed} written, "
+        f"{skipped_done} already done, {skipped_no_overlap} no overlap."
+    )
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Realtime orchestration
+# ---------------------------------------------------------------------------
+
+
+def run_nhc_realtime(
+    mode: str = "prod",
+    save_to_blob: bool = False,
+    save_dir: str = "/tmp",
+    chunksize: int = 10000,
+) -> None:
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting NHC realtime pipeline...")
+
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    df_raw = retrieve_nhc_current(stage=mode, save_to_blob=save_to_blob, save_dir=save_dir)
+    if df_raw is None:
+        logger.info("No active storms. Realtime pipeline finished.")
+        return
+
+    process_storms(df_raw=df_raw, engine=engine, chunksize=chunksize)
+    process_tracks(df_raw=df_raw, engine=engine, chunksize=chunksize)
+
+    logger.info("Fetching current WSP polygons...")
+    wsp_gdf = lens.nhc.get_wsp()
+    if wsp_gdf is not None and len(wsp_gdf) > 0:
+        process_wsp_polygons(gdf=wsp_gdf, engine=engine, chunksize=chunksize)
+    else:
+        logger.info("No current WSP data available.")
+        wsp_gdf = None
+
+    with engine.connect() as conn:
+        track_issued_time = pd.read_sql(
+            text("SELECT MAX(issued_time) FROM storms.nhc_tracks_geo"), conn
+        ).iloc[0, 0]
+        wsp_issued_time = (
+            pd.read_sql(text("SELECT MAX(issued_time) FROM storms.nhc_wsp_polygon"), conn).iloc[0, 0]
+            if wsp_gdf is not None
+            else None
+        )
+
+    logger.info(f"Track issued_time: {track_issued_time}, WSP issued_time: {wsp_issued_time}")
+
+    read_engine = stratus.get_engine(stage="prod")
+    write_engine = stratus.get_engine(stage=mode, write=True)
+
+    try:
+        logger.info("Running NHC wind buffers...")
+        process_nhc_wind_buffers(
+            read_engine=read_engine,
+            write_engine=write_engine,
+            chunksize=chunksize,
+            issued_time=track_issued_time,
+        )
+    except Exception as e:
+        logger.error(f"NHC wind buffers failed: {e}", exc_info=True)
+
+    try:
+        logger.info("Running NHC track exposure...")
+        run_nhc_wind_exp(mode=mode, issued_time=track_issued_time)
+    except Exception as e:
+        logger.error(f"NHC track exposure failed: {e}", exc_info=True)
+
+    if wsp_issued_time is not None:
+        try:
+            logger.info("Running NHC WSP exposure...")
+            run_nhc_wsp_exp(mode=mode, issued_time=wsp_issued_time)
+        except Exception as e:
+            logger.error(f"NHC WSP exposure failed: {e}", exc_info=True)
+    else:
+        logger.info("No WSP data — skipping WSP exposure.")
+
+    logger.info("NHC realtime pipeline finished.")
