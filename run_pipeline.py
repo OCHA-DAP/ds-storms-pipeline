@@ -1,5 +1,14 @@
 import argparse
+import logging
 from datetime import datetime, timedelta
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+for _name in ("fsspec", "asyncio", "urllib3", "azure", "uamqp", "rasterio"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import (

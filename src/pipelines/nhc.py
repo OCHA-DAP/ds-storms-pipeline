@@ -940,7 +940,7 @@ def run_nhc_wsp_exp(
                     logger.info(f"{prefix} — all done, skipping")
                     continue
 
-        logger.info(f"{prefix} — {len(wsp_in)} intersecting, {len(wsp_zero)} zeros")
+        logger.info(f"{prefix} — {len(wsp_in)} intersecting, {len(wsp_zero)} zeros, calculating...")
 
         if not wsp_in.empty:
             da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
@@ -972,6 +972,8 @@ def run_nhc_wsp_exp(
                 method=stratus.postgres_upsert,
             )
             conn.commit()
+        n_exposed = int((df["pop_exposed"] > 0).sum())
+        logger.info(f"{prefix} — done ({n_exposed} rows with pop > 0)")
         processed += 1
 
     logger.info(f"WSP exposure done: {processed} written, {skipped} already done.")
