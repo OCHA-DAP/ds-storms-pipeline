@@ -174,7 +174,9 @@ def _load_wind_buffer_tracks(
     start_year: int | None = None,
     sids: list[str] | None = None,
 ) -> gpd.GeoDataFrame:
-    filters = [
+    # Subquery: find SIDs that have at least one track point with real radii.
+    # Zero arrays {0,0,0,0} are treated as no-data (same as NULL).
+    inner_filters = [
         """(
             (usa_quadrant_radius_34 IS NOT NULL AND usa_quadrant_radius_34 != '{0,0,0,0}')
             OR (usa_quadrant_radius_50 IS NOT NULL AND usa_quadrant_radius_50 != '{0,0,0,0}')
@@ -182,14 +184,24 @@ def _load_wind_buffer_tracks(
         )"""
     ]
     if basin:
-        filters.append(f"basin = '{basin}'")
+        inner_filters.append(f"basin = '{basin}'")
     if start_year:
-        filters.append(f"EXTRACT(YEAR FROM valid_time) >= {start_year}")
+        inner_filters.append(f"EXTRACT(YEAR FROM valid_time) >= {start_year}")
+
+    inner_where = " AND ".join(inner_filters)
+
+    # Outer query: load ALL track points for qualifying SIDs so that zero rows
+    # between non-zero rows are included for correct interpolation.
+    outer_filters = [f"sid IN (SELECT DISTINCT sid FROM storms.ibtracs_tracks_geo WHERE {inner_where})"]
+    if basin:
+        outer_filters.append(f"basin = '{basin}'")
+    if start_year:
+        outer_filters.append(f"EXTRACT(YEAR FROM valid_time) >= {start_year}")
     if sids:
         sid_list = ", ".join(f"'{s}'" for s in sids)
-        filters.append(f"sid IN ({sid_list})")
+        outer_filters.append(f"sid IN ({sid_list})")
 
-    where = " AND ".join(filters)
+    outer_where = " AND ".join(outer_filters)
     query = f"""
         SELECT sid, basin, valid_time,
                usa_quadrant_radius_34,
@@ -197,7 +209,7 @@ def _load_wind_buffer_tracks(
                usa_quadrant_radius_64,
                geometry
         FROM storms.ibtracs_tracks_geo
-        WHERE {where}
+        WHERE {outer_where}
         ORDER BY sid, valid_time
     """
     with engine.connect() as conn:
