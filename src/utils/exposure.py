@@ -5,6 +5,7 @@ import ocha_stratus as stratus
 import pandas as pd
 import xarray as xr
 from rioxarray.exceptions import NoDataInBounds
+from tqdm import tqdm
 
 GEO_CRS_ANTIMERIDIAN = "+proj=longlat +datum=WGS84 +lon_wrap=180"
 _FIELDMAPS_URL = "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
@@ -38,7 +39,7 @@ def calculate_exposure(
     Returns a DataFrame with all non-geometry columns from gdf plus result_col.
     """
     records = []
-    for _, row in gdf.iterrows():
+    for _, row in tqdm(gdf.iterrows(), total=len(gdf), unit="poly", leave=False):
         row_data = row.drop(labels="geometry").to_dict()
         if not row.geometry or row.geometry.is_empty:
             value = 0
