@@ -175,9 +175,11 @@ def _load_wind_buffer_tracks(
     sids: list[str] | None = None,
 ) -> gpd.GeoDataFrame:
     filters = [
-        """(usa_quadrant_radius_34 IS NOT NULL
-            OR usa_quadrant_radius_50 IS NOT NULL
-            OR usa_quadrant_radius_64 IS NOT NULL)"""
+        """(
+            (usa_quadrant_radius_34 IS NOT NULL AND usa_quadrant_radius_34 != '{0,0,0,0}')
+            OR (usa_quadrant_radius_50 IS NOT NULL AND usa_quadrant_radius_50 != '{0,0,0,0}')
+            OR (usa_quadrant_radius_64 IS NOT NULL AND usa_quadrant_radius_64 != '{0,0,0,0}')
+        )"""
     ]
     if basin:
         filters.append(f"basin = '{basin}'")
