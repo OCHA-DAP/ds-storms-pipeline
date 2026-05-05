@@ -852,15 +852,32 @@ def _load_wsp_for_exposure(
     return gdf_wsp
 
 
-def _load_done_nhc_wsp_exp(engine) -> list[str]:
+def _load_done_nhc_wsp_exp(engine) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
-                text("SELECT DISTINCT pcode FROM storms.nhc_wsp_adm0_exp"),
+                text(
+                    "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
+                    " FROM storms.nhc_wsp_exposure"
+                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                ),
                 conn,
-            )["pcode"].tolist()
+            )
     except Exception:
-        return []
+        return pd.DataFrame(columns=_WSP_EXP_KEY_COLS)
+
+
+def _filter_done_nhc_wsp(wsp: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+    merge_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
+    SENTINEL = "__null__"
+    wsp_keys = wsp[merge_cols].assign(atcf_id=wsp["atcf_id"].fillna(SENTINEL))
+    done_keys = done_country[merge_cols].assign(atcf_id=done_country["atcf_id"].fillna(SENTINEL))
+    merged = wsp_keys.merge(
+        done_keys.drop_duplicates().assign(_done=True),
+        on=merge_cols,
+        how="left",
+    )
+    return wsp[merged["_done"].isna().values].reset_index(drop=True)
 
 
 def run_nhc_wsp_exp(
@@ -891,18 +908,11 @@ def run_nhc_wsp_exp(
 
     da_wp_global, da_wp_wrapped = load_pop()
 
-    done = [] if overwrite else _load_done_nhc_wsp_exp(engine)
-    if done:
-        logger.info(f"{len(done)} countries already in DB — skipping")
+    done_df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite else _load_done_nhc_wsp_exp(engine)
 
-    processed = skipped_done = skipped_no_overlap = 0
+    processed = skipped = 0
     for i, iso3 in enumerate(country_list, 1):
         prefix = f"[{i}/{len(country_list)}] {iso3}"
-
-        if iso3 in done:
-            skipped_done += 1
-            logger.info(f"{prefix} — already done, skipping")
-            continue
 
         adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
         minx, _, maxx, _ = adm_geom.bounds
@@ -916,24 +926,45 @@ def run_nhc_wsp_exp(
             da_wp = da_wp_global
             wsp = gdf_wsp
 
-        wsp_in_country = wsp[wsp.intersects(adm_geom)]
-        if wsp_in_country.empty:
-            skipped_no_overlap += 1
-            logger.info(f"{prefix} — no WSP overlap, skipping")
-            continue
+        intersects_mask = wsp.intersects(adm_geom)
+        wsp_in = wsp[intersects_mask]
+        wsp_zero = wsp[~intersects_mask]
 
-        logger.info(f"{prefix} — {len(wsp_in_country)} WSP polygons")
-        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-        df = calculate_exposure(wsp_in_country, da_wp_country)
-        df["adm0_pcode"] = iso3
-        del da_wp_country
+        if not overwrite and not done_df.empty:
+            done_country = done_df[done_df["pcode"] == iso3]
+            if not done_country.empty:
+                wsp_in = _filter_done_nhc_wsp(wsp_in, done_country)
+                wsp_zero = _filter_done_nhc_wsp(wsp_zero, done_country)
+                if wsp_in.empty and wsp_zero.empty:
+                    skipped += 1
+                    logger.info(f"{prefix} — all done, skipping")
+                    continue
+
+        logger.info(f"{prefix} — {len(wsp_in)} intersecting, {len(wsp_zero)} zeros")
+
+        if not wsp_in.empty:
+            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+            df = calculate_exposure(wsp_in, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = iso3
+            df["admin_level"] = _EXP_ADMIN_LEVEL
+            del da_wp_country
+        else:
+            df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS + ["iso3", "pop_exposed"])
+
+        if not wsp_zero.empty:
+            df_zeros = wsp_zero.drop(columns=["geometry", "id"], errors="ignore").copy()
+            df_zeros["iso3"] = iso3
+            df_zeros["pcode"] = iso3
+            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
+            df_zeros["pop_exposed"] = 0
+            df = pd.concat([df, df_zeros], ignore_index=True)
 
         out = df.drop(columns=["id"], errors="ignore")
-        key_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "adm0_pcode"]
-        out = out.drop_duplicates(subset=key_cols, keep="last")
+        out = out.drop_duplicates(subset=_WSP_EXP_KEY_COLS, keep="last")
         with engine.connect() as conn:
             out.to_sql(
-                "nhc_wsp_adm0_exp",
+                "nhc_wsp_exposure",
                 conn,
                 schema="storms",
                 if_exists="append",
@@ -943,10 +974,7 @@ def run_nhc_wsp_exp(
             conn.commit()
         processed += 1
 
-    logger.info(
-        f"WSP exposure done: {processed} written, "
-        f"{skipped_done} already done, {skipped_no_overlap} no overlap."
-    )
+    logger.info(f"WSP exposure done: {processed} written, {skipped} already done.")
     engine.dispose()
 
 
