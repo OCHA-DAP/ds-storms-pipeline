@@ -21,8 +21,12 @@ from src.pipelines.nhc import (
     run_nhc_archive,
     run_nhc_current,
     run_nhc_realtime,
-    run_nhc_wind_buffers,
-    run_nhc_wind_exp,
+    run_nhc_tracks_fcast_buffers,
+    run_nhc_tracks_fcast_exp,
+    run_nhc_tracks_obsv_buffers,
+    run_nhc_tracks_obsv_exp,
+    run_nhc_tracks_fcastonly_buffers,
+    run_nhc_tracks_fcastonly_exp,
     run_nhc_wsp_exp,
 )
 
@@ -149,14 +153,38 @@ def main():
     # ------------------------------------------------------------------ #
     # NHC wind buffers
     # ------------------------------------------------------------------ #
-    nhc_wind_buffers_parser = subparsers.add_parser(
-        "nhc-wind-buffers",
+    nhc_tracks_fcast_buffers_parser = subparsers.add_parser(
+        "nhc-tracks-fcast-buffers",
         parents=[common],
         help="Compute NHC forecast wind buffer polygons from tracks",
     )
-    nhc_wind_buffers_parser.add_argument("--basin")
-    nhc_wind_buffers_parser.add_argument("--start-year", type=int)
-    nhc_wind_buffers_parser.add_argument("--overwrite", action="store_true")
+    nhc_tracks_fcast_buffers_parser.add_argument("--basin")
+    nhc_tracks_fcast_buffers_parser.add_argument("--start-year", type=int)
+    nhc_tracks_fcast_buffers_parser.add_argument("--overwrite", action="store_true")
+
+    # ------------------------------------------------------------------ #
+    # NHC observational track buffers
+    # ------------------------------------------------------------------ #
+    nhc_tracks_obsv_buffers_parser = subparsers.add_parser(
+        "nhc-tracks-obsv-buffers",
+        parents=[common],
+        help="Compute cumulative observational NHC wind buffer polygons from tracks",
+    )
+    nhc_tracks_obsv_buffers_parser.add_argument("--basin")
+    nhc_tracks_obsv_buffers_parser.add_argument("--start-year", type=int)
+    nhc_tracks_obsv_buffers_parser.add_argument("--overwrite", action="store_true")
+
+    # ------------------------------------------------------------------ #
+    # NHC forecast-only track buffers
+    # ------------------------------------------------------------------ #
+    nhc_tracks_fcastonly_buffers_parser = subparsers.add_parser(
+        "nhc-tracks-fcastonly-buffers",
+        parents=[common],
+        help="Compute NHC forecast-only wind buffer polygons (forecast minus observed swath)",
+    )
+    nhc_tracks_fcastonly_buffers_parser.add_argument("--basin")
+    nhc_tracks_fcastonly_buffers_parser.add_argument("--start-year", type=int)
+    nhc_tracks_fcastonly_buffers_parser.add_argument("--overwrite", action="store_true")
 
     # ------------------------------------------------------------------ #
     # NHC track exposure
@@ -167,6 +195,32 @@ def main():
         help="Population exposure from NHC forecast wind buffers",
     )
     nhc_track_exp_parser.add_argument(
+        "--since", metavar="YYYY-MM-DD",
+        help="Only include buffers with issued_time on or after this date",
+    )
+
+    # ------------------------------------------------------------------ #
+    # NHC observed track buffer exposure
+    # ------------------------------------------------------------------ #
+    nhc_obsv_exp_parser = subparsers.add_parser(
+        "nhc-obsv-exp",
+        parents=[common, exp_common],
+        help="Population exposure from NHC cumulative observed track buffers",
+    )
+    nhc_obsv_exp_parser.add_argument(
+        "--since", metavar="YYYY-MM-DD",
+        help="Only include buffers with valid_time on or after this date",
+    )
+
+    # ------------------------------------------------------------------ #
+    # NHC forecast-only track buffer exposure
+    # ------------------------------------------------------------------ #
+    nhc_fcastonly_exp_parser = subparsers.add_parser(
+        "nhc-fcastonly-exp",
+        parents=[common, exp_common],
+        help="Population exposure from NHC forecast-only track buffers",
+    )
+    nhc_fcastonly_exp_parser.add_argument(
         "--since", metavar="YYYY-MM-DD",
         help="Only include buffers with issued_time on or after this date",
     )
@@ -251,8 +305,24 @@ def main():
             save_dir=args.save_dir,
             chunksize=args.chunksize,
         )
-    elif args.pipeline == "nhc-wind-buffers":
-        run_nhc_wind_buffers(
+    elif args.pipeline == "nhc-tracks-fcast-buffers":
+        run_nhc_tracks_fcast_buffers(
+            write_mode=args.mode,
+            chunksize=args.chunksize,
+            basin=args.basin,
+            start_year=args.start_year,
+            overwrite=args.overwrite,
+        )
+    elif args.pipeline == "nhc-tracks-obsv-buffers":
+        run_nhc_tracks_obsv_buffers(
+            write_mode=args.mode,
+            chunksize=args.chunksize,
+            basin=args.basin,
+            start_year=args.start_year,
+            overwrite=args.overwrite,
+        )
+    elif args.pipeline == "nhc-tracks-fcastonly-buffers":
+        run_nhc_tracks_fcastonly_buffers(
             write_mode=args.mode,
             chunksize=args.chunksize,
             basin=args.basin,
@@ -261,7 +331,25 @@ def main():
         )
     elif args.pipeline == "nhc-track-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
-        run_nhc_wind_exp(
+        run_nhc_tracks_fcast_exp(
+            countries=countries,
+            since=args.since,
+            basin=args.basin,
+            overwrite=args.overwrite,
+            mode=args.mode,
+        )
+    elif args.pipeline == "nhc-obsv-exp":
+        countries = [c.upper() for c in args.countries] if args.countries else None
+        run_nhc_tracks_obsv_exp(
+            countries=countries,
+            since=args.since,
+            basin=args.basin,
+            overwrite=args.overwrite,
+            mode=args.mode,
+        )
+    elif args.pipeline == "nhc-fcastonly-exp":
+        countries = [c.upper() for c in args.countries] if args.countries else None
+        run_nhc_tracks_fcastonly_exp(
             countries=countries,
             since=args.since,
             basin=args.basin,

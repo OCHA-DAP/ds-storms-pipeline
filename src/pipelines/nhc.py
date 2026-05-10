@@ -474,7 +474,7 @@ def run_nhc_archive(
 # ---------------------------------------------------------------------------
 
 
-def _load_nhc_wind_buffer_tracks(
+def _load_nhc_tracks_fcast_buffer_tracks(
     engine,
     basin: str | None = None,
     start_year: int | None = None,
@@ -510,12 +510,12 @@ def _load_nhc_wind_buffer_tracks(
 def _load_existing_nhc_keys(engine) -> set:
     with engine.connect() as conn:
         result = conn.execute(
-            text("SELECT DISTINCT atcf_id, issued_time FROM storms.nhc_wind_buffers")
+            text("SELECT DISTINCT atcf_id, issued_time FROM storms.nhc_tracks_fcast_buffers")
         )
         return {(row[0], row[1]) for row in result}
 
 
-def _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize):
+def _write_nhc_tracks_fcast_buffer_batch(batch, conn, cols, chunksize):
     gdf = pd.concat(batch, ignore_index=True).rename(
         columns={"speed": "wind_speed_kt"}
     )
@@ -527,7 +527,7 @@ def _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize):
             lambda g: g.wkt if g is not None else None
         )
     gdf[cols].to_sql(
-        name="nhc_wind_buffers",
+        name="nhc_tracks_fcast_buffers",
         con=conn,
         schema="storms",
         if_exists="append",
@@ -538,7 +538,7 @@ def _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize):
     conn.commit()
 
 
-def process_nhc_wind_buffers(
+def process_nhc_tracks_fcast_buffers(
     read_engine,
     write_engine,
     chunksize,
@@ -548,7 +548,7 @@ def process_nhc_wind_buffers(
     issued_time=None,
 ):
     logger.info("Loading NHC tracks with wind radii...")
-    gdf_tracks = _load_nhc_wind_buffer_tracks(
+    gdf_tracks = _load_nhc_tracks_fcast_buffer_tracks(
         read_engine, basin=basin, start_year=start_year, issued_time=issued_time
     )
     n_issuances = gdf_tracks.groupby(["atcf_id", "issued_time"]).ngroups
@@ -587,7 +587,9 @@ def process_nhc_wind_buffers(
     batch = []
     with write_engine.connect() as conn:
         for (atcf_id, it), group in tqdm(
-            gdf_tracks.groupby(["atcf_id", "issued_time"])
+            gdf_tracks.groupby(["atcf_id", "issued_time"]),
+            unit="issuance",
+            leave=False,
         ):
             gdf_buffers = calculate_wind_buffers_gdf(
                 group, quad_cols_format="quadrant_radius_{speed}_{quad}"
@@ -597,16 +599,16 @@ def process_nhc_wind_buffers(
             batch.append(gdf_buffers)
 
             if len(batch) >= _WIND_BUFFER_BATCH_SIZE:
-                _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize)
+                _write_nhc_tracks_fcast_buffer_batch(batch, conn, cols, chunksize)
                 batch = []
 
         if batch:
-            _write_nhc_wind_buffer_batch(batch, conn, cols, chunksize)
+            _write_nhc_tracks_fcast_buffer_batch(batch, conn, cols, chunksize)
 
     logger.info("Successfully wrote NHC wind buffers.")
 
 
-def run_nhc_wind_buffers(
+def run_nhc_tracks_fcast_buffers(
     write_mode="dev",
     chunksize=1000,
     basin=None,
@@ -622,7 +624,7 @@ def run_nhc_wind_buffers(
     read_engine = stratus.get_engine(stage="prod")
     write_engine = stratus.get_engine(stage=write_mode, write=True)
     try:
-        process_nhc_wind_buffers(
+        process_nhc_tracks_fcast_buffers(
             read_engine=read_engine,
             write_engine=write_engine,
             chunksize=chunksize,
@@ -638,6 +640,326 @@ def run_nhc_wind_buffers(
 
 
 # ---------------------------------------------------------------------------
+# Observational track cumulative buffers
+# ---------------------------------------------------------------------------
+
+
+def _load_nhc_tracks_obsv_buffer_tracks(
+    engine,
+    basin: str | None = None,
+    start_year: int | None = None,
+    issued_time=None,
+) -> gpd.GeoDataFrame:
+    base_filters = [
+        "leadtime = 0",
+        "(quadrant_radius_34 IS NOT NULL OR quadrant_radius_50 IS NOT NULL OR quadrant_radius_64 IS NOT NULL)",
+    ]
+    if issued_time is not None:
+        # Load full history for storms that have a new advisory at this time
+        filters = base_filters + [
+            f"atcf_id IN ("
+            f"SELECT DISTINCT atcf_id FROM storms.nhc_tracks_geo"
+            f" WHERE leadtime = 0 AND issued_time = '{issued_time}')",
+            f"issued_time <= '{issued_time}'",
+        ]
+    else:
+        filters = base_filters[:]
+        if basin:
+            filters.append(f"basin = '{basin}'")
+        if start_year:
+            filters.append(f"EXTRACT(YEAR FROM issued_time) >= {start_year}")
+
+    where = " AND ".join(filters)
+    query = f"""
+        SELECT atcf_id, basin, issued_time, issued_time AS valid_time,
+               quadrant_radius_34, quadrant_radius_50, quadrant_radius_64,
+               geometry
+        FROM storms.nhc_tracks_geo
+        WHERE {where}
+        ORDER BY atcf_id, issued_time
+    """
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_existing_nhc_obsv_keys(engine) -> set:
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT DISTINCT atcf_id, valid_time FROM storms.nhc_tracks_obsv_buffers")
+        )
+        return {(row[0], row[1]) for row in result}
+
+
+def _write_nhc_tracks_obsv_buffer_batch(batch, conn, cols, chunksize):
+    gdf = pd.concat(batch, ignore_index=True).rename(
+        columns={"speed": "wind_speed_kt"}
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Geometry column does not contain geometry"
+        )
+        gdf["geometry"] = gdf["geometry"].apply(
+            lambda g: g.wkt if g is not None else None
+        )
+    gdf[cols].to_sql(
+        name="nhc_tracks_obsv_buffers",
+        con=conn,
+        schema="storms",
+        if_exists="append",
+        index=False,
+        method=stratus.postgres_upsert,
+        chunksize=chunksize,
+    )
+    conn.commit()
+
+
+def process_nhc_tracks_obsv_buffers(
+    read_engine,
+    write_engine,
+    chunksize,
+    basin=None,
+    start_year=None,
+    overwrite=False,
+    issued_time=None,
+):
+    logger.info("Loading NHC observational (leadtime=0) track points...")
+    gdf_obsv = _load_nhc_tracks_obsv_buffer_tracks(
+        read_engine, basin=basin, start_year=start_year, issued_time=issued_time
+    )
+    if gdf_obsv.empty:
+        logger.info("No observational track points found. Nothing to do.")
+        return
+    logger.info(
+        f"Loaded {len(gdf_obsv)} obs points across {gdf_obsv['atcf_id'].nunique()} storms."
+    )
+
+    existing = set() if overwrite else _load_existing_nhc_obsv_keys(write_engine)
+
+    logger.info("Expanding quadrant radius columns...")
+    for speed in BUFFER_SPEEDS:
+        gdf_obsv = expand_quad_col(gdf_obsv, f"quadrant_radius_{speed}")
+
+    logger.info("Calculating and writing cumulative NHC observational track buffers...")
+    cols = ["atcf_id", "valid_time", "wind_speed_kt", "geometry"]
+    batch = []
+    with write_engine.connect() as conn:
+        for atcf_id, storm_gdf in tqdm(
+            gdf_obsv.groupby("atcf_id"),
+            unit="storm",
+            leave=False,
+        ):
+            sorted_times = sorted(storm_gdf["issued_time"].unique())
+            for t in sorted_times:
+                if issued_time is not None and t != issued_time:
+                    continue
+                if (atcf_id, t) in existing:
+                    continue
+                cumulative = storm_gdf[storm_gdf["issued_time"] <= t]
+                gdf_buffers = calculate_wind_buffers_gdf(
+                    cumulative, quad_cols_format="quadrant_radius_{speed}_{quad}"
+                )
+                gdf_buffers["atcf_id"] = atcf_id
+                gdf_buffers["valid_time"] = t
+                batch.append(gdf_buffers)
+
+                if len(batch) >= _WIND_BUFFER_BATCH_SIZE:
+                    _write_nhc_tracks_obsv_buffer_batch(batch, conn, cols, chunksize)
+                    batch = []
+
+        if batch:
+            _write_nhc_tracks_obsv_buffer_batch(batch, conn, cols, chunksize)
+
+    logger.info("Successfully wrote NHC observational track buffers.")
+
+
+def run_nhc_tracks_obsv_buffers(
+    write_mode="dev",
+    chunksize=1000,
+    basin=None,
+    start_year=None,
+    overwrite=False,
+    issued_time=None,
+):
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting NHC observational track buffers pipeline...")
+    read_engine = stratus.get_engine(stage="prod")
+    write_engine = stratus.get_engine(stage=write_mode, write=True)
+    try:
+        process_nhc_tracks_obsv_buffers(
+            read_engine=read_engine,
+            write_engine=write_engine,
+            chunksize=chunksize,
+            basin=basin,
+            start_year=start_year,
+            overwrite=overwrite,
+            issued_time=issued_time,
+        )
+        logger.info("NHC observational track buffers pipeline finished.")
+    except Exception as e:
+        logger.error(f"An error occurred: {e}", exc_info=True)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Forecast-only buffers (fcast minus observed swath)
+# ---------------------------------------------------------------------------
+
+_FCASTONLY_BATCH_SIZE = _WIND_BUFFER_BATCH_SIZE * 3
+
+
+def _load_nhc_fcastonly_inputs(
+    engine,
+    basin: str | None = None,
+    start_year: int | None = None,
+    issued_time=None,
+) -> pd.DataFrame:
+    filters = []
+    joins = ""
+    if issued_time is not None:
+        filters.append(f"f.issued_time = '{issued_time}'")
+    else:
+        if basin:
+            joins = " JOIN storms.nhc_storms s ON f.atcf_id = s.atcf_id"
+            filters.append(f"s.genesis_basin = '{basin}'")
+        if start_year:
+            filters.append(f"EXTRACT(YEAR FROM f.issued_time) >= {start_year}")
+
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    query = f"""
+        SELECT f.atcf_id, f.issued_time, f.wind_speed_kt,
+               ST_AsText(f.geometry) AS fcast_geom,
+               ST_AsText(o.geometry) AS obsv_geom
+        FROM storms.nhc_tracks_fcast_buffers f{joins}
+        LEFT JOIN storms.nhc_tracks_obsv_buffers o
+            ON f.atcf_id = o.atcf_id
+           AND f.issued_time = o.valid_time
+           AND f.wind_speed_kt = o.wind_speed_kt
+        {where}
+        ORDER BY f.atcf_id, f.issued_time, f.wind_speed_kt
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn)
+
+
+def _load_existing_nhc_fcastonly_keys(engine) -> set:
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT DISTINCT atcf_id, issued_time FROM storms.nhc_tracks_fcastonly_buffers")
+        )
+        return {(row[0], row[1]) for row in result}
+
+
+def _write_nhc_tracks_fcastonly_buffer_batch(batch: list[dict], conn, chunksize: int):
+    df = pd.DataFrame(batch)
+    df.to_sql(
+        name="nhc_tracks_fcastonly_buffers",
+        con=conn,
+        schema="storms",
+        if_exists="append",
+        index=False,
+        method=stratus.postgres_upsert,
+        chunksize=chunksize,
+    )
+    conn.commit()
+
+
+def process_nhc_tracks_fcastonly_buffers(
+    read_engine,
+    write_engine,
+    chunksize,
+    basin=None,
+    start_year=None,
+    overwrite=False,
+    issued_time=None,
+):
+    from shapely import wkt as shapely_wkt
+
+    logger.info("Loading fcast and obsv buffer inputs...")
+    df = _load_nhc_fcastonly_inputs(
+        read_engine, basin=basin, start_year=start_year, issued_time=issued_time
+    )
+    if df.empty:
+        logger.info("No forecast buffers found. Nothing to do.")
+        return
+    logger.info(f"Loaded {len(df)} rows across {df['atcf_id'].nunique()} storms.")
+
+    existing = set() if overwrite else _load_existing_nhc_fcastonly_keys(write_engine)
+    warned: set = set()
+    batch: list[dict] = []
+
+    with write_engine.connect() as conn:
+        for _, row in df.iterrows():
+            key = (row["atcf_id"], row["issued_time"])
+            if key in existing:
+                continue
+
+            fcast_geom = shapely_wkt.loads(row["fcast_geom"])
+
+            if pd.isna(row["obsv_geom"]) or row["obsv_geom"] is None:
+                if key not in warned:
+                    logger.warning(
+                        f"No obsv buffer for {row['atcf_id']} at {row['issued_time']} "
+                        f"— storing full forecast geometry"
+                    )
+                    warned.add(key)
+                result_geom = fcast_geom
+            else:
+                obsv_geom = shapely_wkt.loads(row["obsv_geom"])
+                diff = fcast_geom.difference(obsv_geom)
+                result_geom = None if diff.is_empty else diff
+
+            batch.append({
+                "atcf_id": row["atcf_id"],
+                "issued_time": row["issued_time"],
+                "wind_speed_kt": row["wind_speed_kt"],
+                "geometry": result_geom.wkt if result_geom is not None else None,
+            })
+
+            if len(batch) >= _FCASTONLY_BATCH_SIZE:
+                _write_nhc_tracks_fcastonly_buffer_batch(batch, conn, chunksize)
+                batch = []
+
+        if batch:
+            _write_nhc_tracks_fcastonly_buffer_batch(batch, conn, chunksize)
+
+    logger.info("Successfully wrote NHC forecast-only track buffers.")
+
+
+def run_nhc_tracks_fcastonly_buffers(
+    write_mode="dev",
+    chunksize=1000,
+    basin=None,
+    start_year=None,
+    overwrite=False,
+    issued_time=None,
+):
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting NHC forecast-only track buffers pipeline...")
+    # Both input tables (fcast_buffers, obsv_buffers) live in the same DB as the output
+    engine = stratus.get_engine(stage=write_mode, write=True)
+    try:
+        process_nhc_tracks_fcastonly_buffers(
+            read_engine=engine,
+            write_engine=engine,
+            chunksize=chunksize,
+            basin=basin,
+            start_year=start_year,
+            overwrite=overwrite,
+            issued_time=issued_time,
+        )
+        logger.info("NHC forecast-only track buffers pipeline finished.")
+    except Exception as e:
+        logger.error(f"An error occurred: {e}", exc_info=True)
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Population exposure — NHC wind buffers
 # ---------------------------------------------------------------------------
 
@@ -646,7 +968,7 @@ _WSP_EXP_KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"
 _EXP_ADMIN_LEVEL = 0
 
 
-def _load_nhc_wind_exp_buffers(
+def _load_nhc_tracks_fcast_exp_buffers(
     engine,
     since: str | None = None,
     basin: str | None = None,
@@ -664,7 +986,7 @@ def _load_nhc_wind_exp_buffers(
         where = "WHERE " + " AND ".join(filters)
         query = (
             f"SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
-            f" FROM storms.nhc_wind_buffers b"
+            f" FROM storms.nhc_tracks_fcast_buffers b"
             f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
             f" {where}"
         )
@@ -672,20 +994,20 @@ def _load_nhc_wind_exp_buffers(
         where = ("WHERE " + " AND ".join(filters)) if filters else ""
         query = (
             f"SELECT atcf_id, issued_time, wind_speed_kt, geometry"
-            f" FROM storms.nhc_wind_buffers {where}"
+            f" FROM storms.nhc_tracks_fcast_buffers {where}"
         )
 
     with engine.connect() as conn:
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_wind_exp(engine) -> pd.DataFrame:
+def _load_done_nhc_tracks_fcast_exp(engine) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
-                    " FROM storms.nhc_wind_exposure"
+                    " FROM storms.nhc_tracks_fcast_exposure"
                     f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
                 ),
                 conn,
@@ -694,7 +1016,7 @@ def _load_done_nhc_wind_exp(engine) -> pd.DataFrame:
         return pd.DataFrame(columns=_TRACK_EXP_KEY_COLS)
 
 
-def _filter_done_nhc_wind(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+def _filter_done_nhc_tracks_fcast(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
     merge_cols = ["atcf_id", "issued_time", "wind_speed_kt"]
     merged = buffers[merge_cols].merge(
         done_country[merge_cols].drop_duplicates().assign(_done=True),
@@ -704,7 +1026,7 @@ def _filter_done_nhc_wind(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame)
     return buffers[merged["_done"].isna().values].reset_index(drop=True)
 
 
-def run_nhc_wind_exp(
+def run_nhc_tracks_fcast_exp(
     countries: list[str] | None = None,
     since: str | None = None,
     basin: str | None = None,
@@ -720,7 +1042,7 @@ def run_nhc_wind_exp(
     engine = stratus.get_engine(stage=mode, write=True)
 
     logger.info("Loading NHC wind buffers for exposure calculation...")
-    gdf_buffers = _load_nhc_wind_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
+    gdf_buffers = _load_nhc_tracks_fcast_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
     if gdf_buffers.empty:
         logger.info("No wind buffers found for the given filters. Skipping.")
         return
@@ -732,7 +1054,7 @@ def run_nhc_wind_exp(
 
     da_wp_global, da_wp_wrapped = load_pop()
 
-    done_df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite else _load_done_nhc_wind_exp(engine)
+    done_df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_fcast_exp(engine)
 
     processed = skipped = 0
     for i, iso3 in enumerate(country_list, 1):
@@ -757,8 +1079,8 @@ def run_nhc_wind_exp(
         if not overwrite and not done_df.empty:
             done_country = done_df[done_df["pcode"] == iso3]
             if not done_country.empty:
-                buf_in = _filter_done_nhc_wind(buf_in, done_country)
-                buf_zero = _filter_done_nhc_wind(buf_zero, done_country)
+                buf_in = _filter_done_nhc_tracks_fcast(buf_in, done_country)
+                buf_zero = _filter_done_nhc_tracks_fcast(buf_zero, done_country)
                 if buf_in.empty and buf_zero.empty:
                     skipped += 1
                     logger.info(f"{prefix} — all done, skipping")
@@ -787,7 +1109,7 @@ def run_nhc_wind_exp(
         out = df.drop_duplicates(subset=_TRACK_EXP_KEY_COLS, keep="last")
         with engine.connect() as conn:
             out.to_sql(
-                "nhc_wind_exposure",
+                "nhc_tracks_fcast_exposure",
                 conn,
                 schema="storms",
                 if_exists="append",
@@ -798,6 +1120,330 @@ def run_nhc_wind_exp(
         processed += 1
 
     logger.info(f"NHC wind exposure done: {processed} written, {skipped} skipped.")
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Population exposure — NHC observed track buffers
+# ---------------------------------------------------------------------------
+
+_OBSV_EXP_KEY_COLS = ["atcf_id", "valid_time", "wind_speed_kt", "admin_level", "pcode"]
+
+
+def _load_nhc_tracks_obsv_exp_buffers(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    valid_time=None,
+) -> gpd.GeoDataFrame:
+    filters = []
+    if since:
+        filters.append(f"b.valid_time >= '{since}'")
+    if basin:
+        filters.append(f"s.genesis_basin = '{basin}'")
+    if valid_time is not None:
+        filters.append(f"b.valid_time = '{valid_time}'")
+
+    if basin:
+        where = "WHERE " + " AND ".join(filters)
+        query = (
+            f"SELECT b.atcf_id, b.valid_time, b.wind_speed_kt, b.geometry"
+            f" FROM storms.nhc_tracks_obsv_buffers b"
+            f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
+            f" {where}"
+        )
+    else:
+        where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        query = (
+            f"SELECT atcf_id, valid_time, wind_speed_kt, geometry"
+            f" FROM storms.nhc_tracks_obsv_buffers {where}"
+        )
+
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_done_nhc_tracks_obsv_exp(engine) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text(
+                    "SELECT atcf_id, valid_time, wind_speed_kt, admin_level, pcode"
+                    " FROM storms.nhc_tracks_obsv_exposure"
+                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                ),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=_OBSV_EXP_KEY_COLS)
+
+
+def _filter_done_nhc_tracks_obsv(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+    merge_cols = ["atcf_id", "valid_time", "wind_speed_kt"]
+    merged = buffers[merge_cols].merge(
+        done_country[merge_cols].drop_duplicates().assign(_done=True),
+        on=merge_cols,
+        how="left",
+    )
+    return buffers[merged["_done"].isna().values].reset_index(drop=True)
+
+
+def run_nhc_tracks_obsv_exp(
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    mode: str = "dev",
+    valid_time=None,
+) -> None:
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    logger.info("Loading NHC observed track buffers for exposure calculation...")
+    gdf_buffers = _load_nhc_tracks_obsv_exp_buffers(engine, since=since, basin=basin, valid_time=valid_time)
+    if gdf_buffers.empty:
+        logger.info("No observed track buffers found for the given filters. Skipping.")
+        return
+    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    logger.info(f"Processing {len(country_list)} countries...")
+
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done_df = pd.DataFrame(columns=_OBSV_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_obsv_exp(engine)
+
+    processed = skipped = 0
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{len(country_list)}] {iso3}"
+
+        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        minx, _, maxx, _ = adm_geom.bounds
+        wrap = maxx > 160 or minx < -160
+
+        if wrap:
+            da_wp = da_wp_wrapped
+            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+            buffers = gdf_buffers_anti
+        else:
+            da_wp = da_wp_global
+            buffers = gdf_buffers
+
+        intersects_mask = buffers.intersects(adm_geom)
+        buf_in = buffers[intersects_mask]
+        buf_zero = buffers[~intersects_mask]
+
+        if not overwrite and not done_df.empty:
+            done_country = done_df[done_df["pcode"] == iso3]
+            if not done_country.empty:
+                buf_in = _filter_done_nhc_tracks_obsv(buf_in, done_country)
+                buf_zero = _filter_done_nhc_tracks_obsv(buf_zero, done_country)
+                if buf_in.empty and buf_zero.empty:
+                    skipped += 1
+                    logger.info(f"{prefix} — all done, skipping")
+                    continue
+
+        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+
+        if not buf_in.empty:
+            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+            df = calculate_exposure(buf_in, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = iso3
+            df["admin_level"] = _EXP_ADMIN_LEVEL
+            del da_wp_country
+        else:
+            df = pd.DataFrame(columns=_OBSV_EXP_KEY_COLS + ["iso3", "pop_exposed"])
+
+        if not buf_zero.empty:
+            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
+            df_zeros["iso3"] = iso3
+            df_zeros["pcode"] = iso3
+            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
+            df_zeros["pop_exposed"] = 0
+            df = pd.concat([df, df_zeros], ignore_index=True)
+
+        out = df.drop_duplicates(subset=_OBSV_EXP_KEY_COLS, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                "nhc_tracks_obsv_exposure",
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        processed += 1
+
+    logger.info(f"NHC observed track exposure done: {processed} written, {skipped} skipped.")
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Population exposure — NHC forecast-only track buffers
+# ---------------------------------------------------------------------------
+
+_FCASTONLY_EXP_KEY_COLS = ["atcf_id", "issued_time", "wind_speed_kt", "admin_level", "pcode"]
+
+
+def _load_nhc_tracks_fcastonly_exp_buffers(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+) -> gpd.GeoDataFrame:
+    filters = []
+    if since:
+        filters.append(f"b.issued_time >= '{since}'")
+    if basin:
+        filters.append(f"s.genesis_basin = '{basin}'")
+    if issued_time is not None:
+        filters.append(f"b.issued_time = '{issued_time}'")
+
+    if basin:
+        where = "WHERE " + " AND ".join(filters)
+        query = (
+            f"SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
+            f" FROM storms.nhc_tracks_fcastonly_buffers b"
+            f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
+            f" {where}"
+        )
+    else:
+        where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        query = (
+            f"SELECT atcf_id, issued_time, wind_speed_kt, geometry"
+            f" FROM storms.nhc_tracks_fcastonly_buffers {where}"
+        )
+
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_done_nhc_tracks_fcastonly_exp(engine) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text(
+                    "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
+                    " FROM storms.nhc_tracks_fcastonly_exposure"
+                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                ),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS)
+
+
+def _filter_done_nhc_tracks_fcastonly(buffers: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+    merge_cols = ["atcf_id", "issued_time", "wind_speed_kt"]
+    merged = buffers[merge_cols].merge(
+        done_country[merge_cols].drop_duplicates().assign(_done=True),
+        on=merge_cols,
+        how="left",
+    )
+    return buffers[merged["_done"].isna().values].reset_index(drop=True)
+
+
+def run_nhc_tracks_fcastonly_exp(
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    mode: str = "dev",
+    issued_time=None,
+) -> None:
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    logger.info("Loading NHC forecast-only track buffers for exposure calculation...")
+    gdf_buffers = _load_nhc_tracks_fcastonly_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
+    if gdf_buffers.empty:
+        logger.info("No forecast-only track buffers found for the given filters. Skipping.")
+        return
+    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    logger.info(f"Processing {len(country_list)} countries...")
+
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done_df = pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_fcastonly_exp(engine)
+
+    processed = skipped = 0
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{len(country_list)}] {iso3}"
+
+        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        minx, _, maxx, _ = adm_geom.bounds
+        wrap = maxx > 160 or minx < -160
+
+        if wrap:
+            da_wp = da_wp_wrapped
+            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+            buffers = gdf_buffers_anti
+        else:
+            da_wp = da_wp_global
+            buffers = gdf_buffers
+
+        intersects_mask = buffers.intersects(adm_geom)
+        buf_in = buffers[intersects_mask]
+        buf_zero = buffers[~intersects_mask]
+
+        if not overwrite and not done_df.empty:
+            done_country = done_df[done_df["pcode"] == iso3]
+            if not done_country.empty:
+                buf_in = _filter_done_nhc_tracks_fcastonly(buf_in, done_country)
+                buf_zero = _filter_done_nhc_tracks_fcastonly(buf_zero, done_country)
+                if buf_in.empty and buf_zero.empty:
+                    skipped += 1
+                    logger.info(f"{prefix} — all done, skipping")
+                    continue
+
+        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+
+        if not buf_in.empty:
+            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+            df = calculate_exposure(buf_in, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = iso3
+            df["admin_level"] = _EXP_ADMIN_LEVEL
+            del da_wp_country
+        else:
+            df = pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS + ["iso3", "pop_exposed"])
+
+        if not buf_zero.empty:
+            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
+            df_zeros["iso3"] = iso3
+            df_zeros["pcode"] = iso3
+            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
+            df_zeros["pop_exposed"] = 0
+            df = pd.concat([df, df_zeros], ignore_index=True)
+
+        out = df.drop_duplicates(subset=_FCASTONLY_EXP_KEY_COLS, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                "nhc_tracks_fcastonly_exposure",
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        processed += 1
+
+    logger.info(f"NHC forecast-only track exposure done: {processed} written, {skipped} skipped.")
     engine.dispose()
 
 
@@ -1032,7 +1678,7 @@ def run_nhc_realtime(
 
     try:
         logger.info("Running NHC wind buffers...")
-        process_nhc_wind_buffers(
+        process_nhc_tracks_fcast_buffers(
             read_engine=read_engine,
             write_engine=write_engine,
             chunksize=chunksize,
@@ -1042,10 +1688,44 @@ def run_nhc_realtime(
         logger.error(f"NHC wind buffers failed: {e}", exc_info=True)
 
     try:
+        logger.info("Running NHC observational track buffers...")
+        process_nhc_tracks_obsv_buffers(
+            read_engine=read_engine,
+            write_engine=write_engine,
+            chunksize=chunksize,
+            issued_time=track_issued_time,
+        )
+    except Exception as e:
+        logger.error(f"NHC observational track buffers failed: {e}", exc_info=True)
+
+    try:
+        logger.info("Running NHC forecast-only track buffers...")
+        process_nhc_tracks_fcastonly_buffers(
+            read_engine=write_engine,
+            write_engine=write_engine,
+            chunksize=chunksize,
+            issued_time=track_issued_time,
+        )
+    except Exception as e:
+        logger.error(f"NHC forecast-only track buffers failed: {e}", exc_info=True)
+
+    try:
         logger.info("Running NHC track exposure...")
-        run_nhc_wind_exp(mode=mode, issued_time=track_issued_time)
+        run_nhc_tracks_fcast_exp(mode=mode, issued_time=track_issued_time)
     except Exception as e:
         logger.error(f"NHC track exposure failed: {e}", exc_info=True)
+
+    try:
+        logger.info("Running NHC observed track exposure...")
+        run_nhc_tracks_obsv_exp(mode=mode, valid_time=track_issued_time)
+    except Exception as e:
+        logger.error(f"NHC observed track exposure failed: {e}", exc_info=True)
+
+    try:
+        logger.info("Running NHC forecast-only track exposure...")
+        run_nhc_tracks_fcastonly_exp(mode=mode, issued_time=track_issued_time)
+    except Exception as e:
+        logger.error(f"NHC forecast-only track exposure failed: {e}", exc_info=True)
 
     if wsp_issued_time is not None:
         try:
