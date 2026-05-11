@@ -20,7 +20,6 @@ CREATE TABLE IF NOT EXISTS storms.gdacs_exposure
 (
     gdacs_eventid    INTEGER     NOT NULL,
     gdacs_episodeid  INTEGER     NOT NULL,
-    atcf_id          VARCHAR,
     valid_time       TIMESTAMP   NOT NULL,
     wind_speed_kt    SMALLINT    NOT NULL CHECK (wind_speed_kt IN (34, 50, 64)),
     admin_level      SMALLINT    NOT NULL,
@@ -42,8 +41,6 @@ COMMENT ON COLUMN storms.gdacs_exposure.gdacs_eventid IS
     'GDACS native event identifier (e.g. 1001067 for BERYL-24)';
 COMMENT ON COLUMN storms.gdacs_exposure.gdacs_episodeid IS
     'GDACS episode (advisory) identifier — one episode per ~6h model run';
-COMMENT ON COLUMN storms.gdacs_exposure.atcf_id IS
-    'ATCF storm identifier (e.g. AL092023); nullable, populated by the GDACS->ATCF matching function once available';
 COMMENT ON COLUMN storms.gdacs_exposure.valid_time IS
     'Timestamp of the episode (most recent advisory included in the cumulative buffer, UTC)';
 COMMENT ON COLUMN storms.gdacs_exposure.wind_speed_kt IS
@@ -65,10 +62,6 @@ COMMENT ON COLUMN storms.gdacs_exposure.pop_exposed IS
 
 CREATE INDEX IF NOT EXISTS idx_gdacs_exposure_gdacs_eventid
     ON storms.gdacs_exposure (gdacs_eventid)
-    TABLESPACE pg_default;
-
-CREATE INDEX IF NOT EXISTS idx_gdacs_exposure_atcf_id
-    ON storms.gdacs_exposure (atcf_id)
     TABLESPACE pg_default;
 
 CREATE INDEX IF NOT EXISTS idx_gdacs_exposure_valid_time

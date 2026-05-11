@@ -20,8 +20,6 @@ CREATE TABLE IF NOT EXISTS storms.adam_exposure
 (
     adam_eventid     INTEGER     NOT NULL,
     adam_episodeid   INTEGER     NOT NULL,
-    gdacs_eventid    INTEGER,
-    atcf_id          VARCHAR,
     valid_time       TIMESTAMP   NOT NULL,
     wind_speed_kt    SMALLINT    NOT NULL CHECK (wind_speed_kt IN (34, 50, 64)),
     admin_level      SMALLINT    NOT NULL,
@@ -43,10 +41,6 @@ COMMENT ON COLUMN storms.adam_exposure.adam_eventid IS
     'ADAM native event identifier (integer; ADAM also exposes a string ``uid`` field which is not stored here)';
 COMMENT ON COLUMN storms.adam_exposure.adam_episodeid IS
     'ADAM episode identifier — one episode per advisory; latest-per-event used in the historical compile';
-COMMENT ON COLUMN storms.adam_exposure.gdacs_eventid IS
-    'GDACS event identifier when linkable (ADAM ingests GDACS feeds for some sources); nullable';
-COMMENT ON COLUMN storms.adam_exposure.atcf_id IS
-    'ATCF storm identifier (e.g. AL092023); nullable, populated by the ADAM->ATCF matching function once available';
 COMMENT ON COLUMN storms.adam_exposure.valid_time IS
     'Timestamp of the episode (most recent advisory included in the cumulative footprint, UTC)';
 COMMENT ON COLUMN storms.adam_exposure.wind_speed_kt IS
@@ -68,14 +62,6 @@ COMMENT ON COLUMN storms.adam_exposure.pop_exposed IS
 
 CREATE INDEX IF NOT EXISTS idx_adam_exposure_adam_eventid
     ON storms.adam_exposure (adam_eventid)
-    TABLESPACE pg_default;
-
-CREATE INDEX IF NOT EXISTS idx_adam_exposure_gdacs_eventid
-    ON storms.adam_exposure (gdacs_eventid)
-    TABLESPACE pg_default;
-
-CREATE INDEX IF NOT EXISTS idx_adam_exposure_atcf_id
-    ON storms.adam_exposure (atcf_id)
     TABLESPACE pg_default;
 
 CREATE INDEX IF NOT EXISTS idx_adam_exposure_valid_time
