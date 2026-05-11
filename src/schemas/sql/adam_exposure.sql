@@ -18,8 +18,8 @@
 
 CREATE TABLE IF NOT EXISTS storms.adam_exposure
 (
-    adam_eventid     VARCHAR     NOT NULL,
-    adam_episodeid   VARCHAR     NOT NULL,
+    adam_eventid     INTEGER     NOT NULL,
+    adam_episodeid   INTEGER     NOT NULL,
     gdacs_eventid    INTEGER,
     atcf_id          VARCHAR,
     valid_time       TIMESTAMP   NOT NULL,
@@ -39,7 +39,7 @@ ALTER TABLE IF EXISTS storms.adam_exposure
 COMMENT ON TABLE storms.adam_exposure IS
     'Population exposure to WFP ADAM cumulative wind footprint, by admin unit. admin_level=0 is country level.';
 COMMENT ON COLUMN storms.adam_exposure.adam_eventid IS
-    'ADAM native event identifier (string form, may include WFP source codes)';
+    'ADAM native event identifier (integer; ADAM also exposes a string ``uid`` field which is not stored here)';
 COMMENT ON COLUMN storms.adam_exposure.adam_episodeid IS
     'ADAM episode identifier — one episode per advisory; latest-per-event used in the historical compile';
 COMMENT ON COLUMN storms.adam_exposure.gdacs_eventid IS
