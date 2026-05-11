@@ -28,6 +28,8 @@ from src.pipelines.nhc import (
     run_nhc_tracks_fcastonly_buffers,
     run_nhc_tracks_fcastonly_exp,
     run_nhc_wsp_exp,
+    run_nhc_wsp_fcastonly_polygons,
+    run_nhc_wsp_fcastonly_exp,
 )
 
 
@@ -239,6 +241,38 @@ def main():
     )
 
     # ------------------------------------------------------------------ #
+    # NHC WSP forecast-only polygons (WSP minus observed track swath)
+    # ------------------------------------------------------------------ #
+    nhc_wsp_fcastonly_polygons_parser = subparsers.add_parser(
+        "nhc-wsp-fcastonly-polygons",
+        parents=[common],
+        help="Compute WSP forecast-only polygons (WSP minus observed track swath)",
+    )
+    nhc_wsp_fcastonly_polygons_parser.add_argument(
+        "--since", metavar="YYYY-MM-DD",
+        help="Only process WSP polygons with issued_time on or after this date",
+    )
+    nhc_wsp_fcastonly_polygons_parser.add_argument("--basin", metavar="BASIN")
+    nhc_wsp_fcastonly_polygons_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Process only this specific issued_time",
+    )
+    nhc_wsp_fcastonly_polygons_parser.add_argument("--overwrite", action="store_true")
+
+    # ------------------------------------------------------------------ #
+    # NHC WSP forecast-only exposure
+    # ------------------------------------------------------------------ #
+    nhc_wsp_fcastonly_exp_parser = subparsers.add_parser(
+        "nhc-wsp-fcastonly-exp",
+        parents=[common, exp_common],
+        help="Population exposure from WSP forecast-only polygons",
+    )
+    nhc_wsp_fcastonly_exp_parser.add_argument(
+        "--since", metavar="YYYY-MM-DD",
+        help="Only include polygons with issued_time on or after this date",
+    )
+
+    # ------------------------------------------------------------------ #
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -359,6 +393,23 @@ def main():
     elif args.pipeline == "nhc-wsp-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
         run_nhc_wsp_exp(
+            countries=countries,
+            since=args.since,
+            basin=args.basin,
+            overwrite=args.overwrite,
+            mode=args.mode,
+        )
+    elif args.pipeline == "nhc-wsp-fcastonly-polygons":
+        run_nhc_wsp_fcastonly_polygons(
+            mode=args.mode,
+            since=args.since,
+            basin=args.basin,
+            issued_time=getattr(args, "issued_time", None),
+            overwrite=args.overwrite,
+        )
+    elif args.pipeline == "nhc-wsp-fcastonly-exp":
+        countries = [c.upper() for c in args.countries] if args.countries else None
+        run_nhc_wsp_fcastonly_exp(
             countries=countries,
             since=args.since,
             basin=args.basin,

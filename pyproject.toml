@@ -4,5 +4,6 @@ line-length = 79
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.10.9",
     "tqdm>=4.67.3",
 ]

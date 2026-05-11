@@ -271,11 +271,17 @@ def process_wsp_polygons(gdf, engine, chunksize):
 
     logger.info(f"Processing {len(gdf)} WSP polygon rows...")
 
+    from shapely.geometry import box as shapely_box
+    _world = shapely_box(-180, -90, 180, 90)
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore", message="Geometry column does not contain geometry"
         )
         gdf = gdf.copy()
+        gdf["geometry"] = gdf["geometry"].apply(
+            lambda g: g.intersection(_world) if g is not None and not g.is_empty else g
+        )
         gdf["geometry"] = gdf["geometry"].apply(
             lambda g: g.wkt if g is not None else None
         )
@@ -1056,6 +1062,7 @@ def run_nhc_tracks_fcast_exp(
 
     done_df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_fcast_exp(engine)
 
+    buffers_sindex = gdf_buffers.sindex
     processed = skipped = 0
     for i, iso3 in enumerate(country_list, 1):
         prefix = f"[{i}/{len(country_list)}] {iso3}"
@@ -1067,44 +1074,37 @@ def run_nhc_tracks_fcast_exp(
         if wrap:
             da_wp = da_wp_wrapped
             adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buffers = gdf_buffers_anti
+            buf_in = gdf_buffers_anti[gdf_buffers_anti.intersects(adm_geom)]
         else:
             da_wp = da_wp_global
-            buffers = gdf_buffers
+            candidate_idx = list(buffers_sindex.intersection(adm_geom.bounds))
+            if not candidate_idx:
+                skipped += 1
+                continue
+            candidates = gdf_buffers.iloc[candidate_idx]
+            buf_in = candidates[candidates.intersects(adm_geom)]
 
-        intersects_mask = buffers.intersects(adm_geom)
-        buf_in = buffers[intersects_mask]
-        buf_zero = buffers[~intersects_mask]
+        if buf_in.empty:
+            skipped += 1
+            continue
 
         if not overwrite and not done_df.empty:
             done_country = done_df[done_df["pcode"] == iso3]
             if not done_country.empty:
                 buf_in = _filter_done_nhc_tracks_fcast(buf_in, done_country)
-                buf_zero = _filter_done_nhc_tracks_fcast(buf_zero, done_country)
-                if buf_in.empty and buf_zero.empty:
+                if buf_in.empty:
                     skipped += 1
                     logger.info(f"{prefix} — all done, skipping")
                     continue
 
-        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+        logger.info(f"{prefix} — {len(buf_in)} intersecting")
 
-        if not buf_in.empty:
-            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-            df = calculate_exposure(buf_in, da_wp_country)
-            df["iso3"] = iso3
-            df["pcode"] = iso3
-            df["admin_level"] = _EXP_ADMIN_LEVEL
-            del da_wp_country
-        else:
-            df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS + ["iso3", "pop_exposed"])
-
-        if not buf_zero.empty:
-            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
-            df_zeros["iso3"] = iso3
-            df_zeros["pcode"] = iso3
-            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
-            df_zeros["pop_exposed"] = 0
-            df = pd.concat([df, df_zeros], ignore_index=True)
+        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+        df = calculate_exposure(buf_in, da_wp_country)
+        df["iso3"] = iso3
+        df["pcode"] = iso3
+        df["admin_level"] = _EXP_ADMIN_LEVEL
+        del da_wp_country
 
         out = df.drop_duplicates(subset=_TRACK_EXP_KEY_COLS, keep="last")
         with engine.connect() as conn:
@@ -1218,6 +1218,7 @@ def run_nhc_tracks_obsv_exp(
 
     done_df = pd.DataFrame(columns=_OBSV_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_obsv_exp(engine)
 
+    buffers_sindex = gdf_buffers.sindex
     processed = skipped = 0
     for i, iso3 in enumerate(country_list, 1):
         prefix = f"[{i}/{len(country_list)}] {iso3}"
@@ -1229,44 +1230,37 @@ def run_nhc_tracks_obsv_exp(
         if wrap:
             da_wp = da_wp_wrapped
             adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buffers = gdf_buffers_anti
+            buf_in = gdf_buffers_anti[gdf_buffers_anti.intersects(adm_geom)]
         else:
             da_wp = da_wp_global
-            buffers = gdf_buffers
+            candidate_idx = list(buffers_sindex.intersection(adm_geom.bounds))
+            if not candidate_idx:
+                skipped += 1
+                continue
+            candidates = gdf_buffers.iloc[candidate_idx]
+            buf_in = candidates[candidates.intersects(adm_geom)]
 
-        intersects_mask = buffers.intersects(adm_geom)
-        buf_in = buffers[intersects_mask]
-        buf_zero = buffers[~intersects_mask]
+        if buf_in.empty:
+            skipped += 1
+            continue
 
         if not overwrite and not done_df.empty:
             done_country = done_df[done_df["pcode"] == iso3]
             if not done_country.empty:
                 buf_in = _filter_done_nhc_tracks_obsv(buf_in, done_country)
-                buf_zero = _filter_done_nhc_tracks_obsv(buf_zero, done_country)
-                if buf_in.empty and buf_zero.empty:
+                if buf_in.empty:
                     skipped += 1
                     logger.info(f"{prefix} — all done, skipping")
                     continue
 
-        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+        logger.info(f"{prefix} — {len(buf_in)} intersecting")
 
-        if not buf_in.empty:
-            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-            df = calculate_exposure(buf_in, da_wp_country)
-            df["iso3"] = iso3
-            df["pcode"] = iso3
-            df["admin_level"] = _EXP_ADMIN_LEVEL
-            del da_wp_country
-        else:
-            df = pd.DataFrame(columns=_OBSV_EXP_KEY_COLS + ["iso3", "pop_exposed"])
-
-        if not buf_zero.empty:
-            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
-            df_zeros["iso3"] = iso3
-            df_zeros["pcode"] = iso3
-            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
-            df_zeros["pop_exposed"] = 0
-            df = pd.concat([df, df_zeros], ignore_index=True)
+        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+        df = calculate_exposure(buf_in, da_wp_country)
+        df["iso3"] = iso3
+        df["pcode"] = iso3
+        df["admin_level"] = _EXP_ADMIN_LEVEL
+        del da_wp_country
 
         out = df.drop_duplicates(subset=_OBSV_EXP_KEY_COLS, keep="last")
         with engine.connect() as conn:
@@ -1380,6 +1374,7 @@ def run_nhc_tracks_fcastonly_exp(
 
     done_df = pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_fcastonly_exp(engine)
 
+    buffers_sindex = gdf_buffers.sindex
     processed = skipped = 0
     for i, iso3 in enumerate(country_list, 1):
         prefix = f"[{i}/{len(country_list)}] {iso3}"
@@ -1391,44 +1386,37 @@ def run_nhc_tracks_fcastonly_exp(
         if wrap:
             da_wp = da_wp_wrapped
             adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buffers = gdf_buffers_anti
+            buf_in = gdf_buffers_anti[gdf_buffers_anti.intersects(adm_geom)]
         else:
             da_wp = da_wp_global
-            buffers = gdf_buffers
+            candidate_idx = list(buffers_sindex.intersection(adm_geom.bounds))
+            if not candidate_idx:
+                skipped += 1
+                continue
+            candidates = gdf_buffers.iloc[candidate_idx]
+            buf_in = candidates[candidates.intersects(adm_geom)]
 
-        intersects_mask = buffers.intersects(adm_geom)
-        buf_in = buffers[intersects_mask]
-        buf_zero = buffers[~intersects_mask]
+        if buf_in.empty:
+            skipped += 1
+            continue
 
         if not overwrite and not done_df.empty:
             done_country = done_df[done_df["pcode"] == iso3]
             if not done_country.empty:
                 buf_in = _filter_done_nhc_tracks_fcastonly(buf_in, done_country)
-                buf_zero = _filter_done_nhc_tracks_fcastonly(buf_zero, done_country)
-                if buf_in.empty and buf_zero.empty:
+                if buf_in.empty:
                     skipped += 1
                     logger.info(f"{prefix} — all done, skipping")
                     continue
 
-        logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
+        logger.info(f"{prefix} — {len(buf_in)} intersecting")
 
-        if not buf_in.empty:
-            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-            df = calculate_exposure(buf_in, da_wp_country)
-            df["iso3"] = iso3
-            df["pcode"] = iso3
-            df["admin_level"] = _EXP_ADMIN_LEVEL
-            del da_wp_country
-        else:
-            df = pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS + ["iso3", "pop_exposed"])
-
-        if not buf_zero.empty:
-            df_zeros = buf_zero.drop(columns=["geometry"], errors="ignore").copy()
-            df_zeros["iso3"] = iso3
-            df_zeros["pcode"] = iso3
-            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
-            df_zeros["pop_exposed"] = 0
-            df = pd.concat([df, df_zeros], ignore_index=True)
+        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+        df = calculate_exposure(buf_in, da_wp_country)
+        df["iso3"] = iso3
+        df["pcode"] = iso3
+        df["admin_level"] = _EXP_ADMIN_LEVEL
+        del da_wp_country
 
         out = df.drop_duplicates(subset=_FCASTONLY_EXP_KEY_COLS, keep="last")
         with engine.connect() as conn:
@@ -1556,6 +1544,7 @@ def run_nhc_wsp_exp(
 
     done_df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite else _load_done_nhc_wsp_exp(engine)
 
+    wsp_sindex = gdf_wsp.sindex
     processed = skipped = 0
     for i, iso3 in enumerate(country_list, 1):
         prefix = f"[{i}/{len(country_list)}] {iso3}"
@@ -1567,44 +1556,37 @@ def run_nhc_wsp_exp(
         if wrap:
             da_wp = da_wp_wrapped
             adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            wsp = gdf_wsp_anti
+            wsp_in = gdf_wsp_anti[gdf_wsp_anti.intersects(adm_geom)]
         else:
             da_wp = da_wp_global
-            wsp = gdf_wsp
+            candidate_idx = list(wsp_sindex.intersection(adm_geom.bounds))
+            if not candidate_idx:
+                skipped += 1
+                continue
+            candidates = gdf_wsp.iloc[candidate_idx]
+            wsp_in = candidates[candidates.intersects(adm_geom)]
 
-        intersects_mask = wsp.intersects(adm_geom)
-        wsp_in = wsp[intersects_mask]
-        wsp_zero = wsp[~intersects_mask]
+        if wsp_in.empty:
+            skipped += 1
+            continue
 
         if not overwrite and not done_df.empty:
             done_country = done_df[done_df["pcode"] == iso3]
             if not done_country.empty:
                 wsp_in = _filter_done_nhc_wsp(wsp_in, done_country)
-                wsp_zero = _filter_done_nhc_wsp(wsp_zero, done_country)
-                if wsp_in.empty and wsp_zero.empty:
+                if wsp_in.empty:
                     skipped += 1
                     logger.info(f"{prefix} — all done, skipping")
                     continue
 
-        logger.info(f"{prefix} — {len(wsp_in)} intersecting, {len(wsp_zero)} zeros, calculating...")
+        logger.info(f"{prefix} — {len(wsp_in)} intersecting, calculating...")
 
-        if not wsp_in.empty:
-            da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-            df = calculate_exposure(wsp_in, da_wp_country)
-            df["iso3"] = iso3
-            df["pcode"] = iso3
-            df["admin_level"] = _EXP_ADMIN_LEVEL
-            del da_wp_country
-        else:
-            df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS + ["iso3", "pop_exposed"])
-
-        if not wsp_zero.empty:
-            df_zeros = wsp_zero.drop(columns=["geometry", "id"], errors="ignore").copy()
-            df_zeros["iso3"] = iso3
-            df_zeros["pcode"] = iso3
-            df_zeros["admin_level"] = _EXP_ADMIN_LEVEL
-            df_zeros["pop_exposed"] = 0
-            df = pd.concat([df, df_zeros], ignore_index=True)
+        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+        df = calculate_exposure(wsp_in, da_wp_country)
+        df["iso3"] = iso3
+        df["pcode"] = iso3
+        df["admin_level"] = _EXP_ADMIN_LEVEL
+        del da_wp_country
 
         out = df.drop(columns=["id"], errors="ignore")
         out = out.drop_duplicates(subset=_WSP_EXP_KEY_COLS, keep="last")
@@ -1623,6 +1605,355 @@ def run_nhc_wsp_exp(
         processed += 1
 
     logger.info(f"WSP exposure done: {processed} written, {skipped} already done.")
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# WSP forecast-only polygons (WSP minus observed track swath)
+# ---------------------------------------------------------------------------
+
+_WSP_FCASTONLY_BATCH_SIZE = 500
+_WSP_OBSV_OFFSET_HOURS = 3
+
+
+def _load_obsv_buffer_lookup(engine, atcf_ids: list[str]) -> dict:
+    """Load nhc_tracks_obsv_buffers for the given storms into a dict keyed by
+    (atcf_id, valid_time, wind_speed_kt)."""
+    from shapely import wkt as shapely_wkt
+
+    if not atcf_ids:
+        return {}
+    ids_sql = ", ".join(f"'{a}'" for a in atcf_ids)
+    query = (
+        f"SELECT atcf_id, valid_time, wind_speed_kt, ST_AsText(geometry) AS geom_wkt"
+        f" FROM storms.nhc_tracks_obsv_buffers"
+        f" WHERE atcf_id IN ({ids_sql})"
+    )
+    with engine.connect() as conn:
+        df = pd.read_sql(text(query), conn)
+
+    lookup = {}
+    for _, row in df.iterrows():
+        if row["geom_wkt"] is not None:
+            lookup[(row["atcf_id"], row["valid_time"], int(row["wind_speed_kt"]))] = (
+                shapely_wkt.loads(row["geom_wkt"])
+            )
+    return lookup
+
+
+def process_nhc_wsp_fcastonly_polygons(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+    overwrite: bool = False,
+    chunksize: int = 500,
+) -> None:
+    from datetime import timedelta
+    from shapely import wkt as shapely_wkt
+    from shapely.geometry import box as shapely_box
+    _world = shapely_box(-180, -90, 180, 90)
+
+    logger.info("Loading WSP polygons for fcastonly cut-out...")
+    gdf_wsp = _load_wsp_for_exposure(engine, since=since, basin=basin, issued_time=issued_time)
+    if gdf_wsp.empty:
+        logger.info("No WSP polygons found. Skipping.")
+        return
+    logger.info(f"Loaded {len(gdf_wsp)} WSP rows.")
+
+    atcf_ids = [a for a in gdf_wsp["atcf_id"].dropna().unique()]
+    logger.info(f"Loading obsv buffers for {len(atcf_ids)} storms...")
+    obsv_lookup = _load_obsv_buffer_lookup(engine, atcf_ids)
+    logger.info(f"Loaded {len(obsv_lookup)} obsv buffer entries.")
+
+    if not overwrite:
+        with engine.connect() as conn:
+            existing = pd.read_sql(
+                text(
+                    "SELECT issued_time, wind_threshold_kt, percentage, atcf_id"
+                    " FROM storms.nhc_wsp_fcastonly_polygon"
+                ),
+                conn,
+            )
+        SENTINEL = "__null__"
+        existing_keys = set(
+            zip(
+                existing["issued_time"],
+                existing["wind_threshold_kt"],
+                existing["percentage"],
+                existing["atcf_id"].fillna(SENTINEL),
+            )
+        )
+    else:
+        existing_keys = set()
+
+    offset = timedelta(hours=_WSP_OBSV_OFFSET_HOURS)
+    no_obsv = offset_used = exact_used = already_done = 0
+    batch = []
+
+    for _, row in gdf_wsp.iterrows():
+        it = row["issued_time"]
+        kt = int(row["wind_threshold_kt"])
+        pct = int(row["percentage"])
+        atcf_id = row["atcf_id"] if pd.notna(row["atcf_id"]) else None
+        SENTINEL = "__null__"
+        key = (it, kt, pct, atcf_id if atcf_id is not None else SENTINEL)
+
+        if key in existing_keys:
+            already_done += 1
+            continue
+
+        wsp_geom = row.geometry.intersection(_world)
+        if wsp_geom.is_empty:
+            continue
+        obsv_valid_time = None
+        result_geom = wsp_geom
+
+        if atcf_id is not None:
+            obsv_geom = obsv_lookup.get((atcf_id, it + offset, kt))
+            if obsv_geom is not None:
+                obsv_valid_time = it + offset
+                offset_used += 1
+            else:
+                obsv_geom = obsv_lookup.get((atcf_id, it, kt))
+                if obsv_geom is not None:
+                    obsv_valid_time = it
+                    exact_used += 1
+                else:
+                    no_obsv += 1
+
+            if obsv_geom is not None:
+                diff = wsp_geom.difference(obsv_geom)
+                result_geom = None if diff.is_empty else diff
+        else:
+            no_obsv += 1
+
+        batch.append({
+            "issued_time": it,
+            "wind_threshold_kt": kt,
+            "percentage": pct,
+            "atcf_id": atcf_id,
+            "obsv_valid_time": obsv_valid_time,
+            "geometry": result_geom.wkt if result_geom is not None else None,
+        })
+
+        if len(batch) >= _WSP_FCASTONLY_BATCH_SIZE:
+            _write_wsp_fcastonly_batch(batch, engine, chunksize)
+            batch = []
+
+    if batch:
+        _write_wsp_fcastonly_batch(batch, engine, chunksize)
+
+    logger.info(
+        f"WSP fcastonly polygons done: {offset_used} with +3h offset, "
+        f"{exact_used} exact-time fallback, {no_obsv} no obsv buffer, "
+        f"{already_done} skipped (already done)."
+    )
+
+
+def _write_wsp_fcastonly_batch(batch: list[dict], engine, chunksize: int) -> None:
+    df = pd.DataFrame(batch)
+    key_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
+    df = df.drop_duplicates(subset=key_cols, keep="last")
+    with engine.connect() as conn:
+        df.to_sql(
+            name="nhc_wsp_fcastonly_polygon",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
+        conn.commit()
+
+
+def run_nhc_wsp_fcastonly_polygons(
+    mode: str = "dev",
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+    overwrite: bool = False,
+    chunksize: int = 500,
+) -> None:
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting NHC WSP forecast-only polygon pipeline...")
+    engine = stratus.get_engine(stage=mode, write=True)
+    try:
+        process_nhc_wsp_fcastonly_polygons(
+            engine=engine,
+            since=since,
+            basin=basin,
+            issued_time=issued_time,
+            overwrite=overwrite,
+            chunksize=chunksize,
+        )
+        logger.info("NHC WSP forecast-only polygon pipeline finished.")
+    except Exception as e:
+        logger.error(f"An error occurred: {e}", exc_info=True)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Population exposure — NHC WSP forecast-only polygons
+# ---------------------------------------------------------------------------
+
+
+def _load_wsp_fcastonly_for_exposure(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+) -> gpd.GeoDataFrame:
+    filters = []
+    if since:
+        filters.append(f"p.issued_time >= '{since}'")
+    if basin:
+        filters.append(f"s.genesis_basin = '{basin}'")
+    if issued_time is not None:
+        filters.append(f"p.issued_time = '{issued_time}'")
+
+    if basin:
+        where = "WHERE " + " AND ".join(filters)
+        query = (
+            f"SELECT p.issued_time, p.wind_threshold_kt, p.percentage, p.atcf_id, p.geometry"
+            f" FROM storms.nhc_wsp_fcastonly_polygon p"
+            f" JOIN storms.nhc_storms s ON p.atcf_id = s.atcf_id"
+            f" {where}"
+        )
+    else:
+        where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        query = (
+            f"SELECT issued_time, wind_threshold_kt, percentage, atcf_id, geometry"
+            f" FROM storms.nhc_wsp_fcastonly_polygon {where}"
+        )
+
+    with engine.connect() as conn:
+        return gpd.read_postgis(query, conn, geom_col="geometry")
+
+
+def _load_done_nhc_wsp_fcastonly_exp(engine) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text(
+                    "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
+                    " FROM storms.nhc_wsp_fcastonly_exposure"
+                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                ),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=_WSP_EXP_KEY_COLS)
+
+
+def _filter_done_nhc_wsp_fcastonly(wsp: gpd.GeoDataFrame, done_country: pd.DataFrame) -> gpd.GeoDataFrame:
+    merge_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
+    SENTINEL = "__null__"
+    wsp_keys = wsp[merge_cols].assign(atcf_id=wsp["atcf_id"].fillna(SENTINEL))
+    done_keys = done_country[merge_cols].assign(atcf_id=done_country["atcf_id"].fillna(SENTINEL))
+    merged = wsp_keys.merge(
+        done_keys.drop_duplicates().assign(_done=True),
+        on=merge_cols,
+        how="left",
+    )
+    return wsp[merged["_done"].isna().values].reset_index(drop=True)
+
+
+def run_nhc_wsp_fcastonly_exp(
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    mode: str = "dev",
+    issued_time=None,
+) -> None:
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    logger.info("Loading WSP fcastonly polygons for exposure calculation...")
+    gdf_wsp = _load_wsp_fcastonly_for_exposure(engine, since=since, basin=basin, issued_time=issued_time)
+    if gdf_wsp.empty:
+        logger.info("No WSP fcastonly polygons found for the given filters. Skipping.")
+        return
+    gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    logger.info(f"Processing {len(country_list)} countries...")
+
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done_df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite else _load_done_nhc_wsp_fcastonly_exp(engine)
+
+    wsp_sindex = gdf_wsp.sindex
+    processed = skipped = 0
+    for i, iso3 in enumerate(country_list, 1):
+        prefix = f"[{i}/{len(country_list)}] {iso3}"
+
+        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        minx, _, maxx, _ = adm_geom.bounds
+        wrap = maxx > 160 or minx < -160
+
+        if wrap:
+            da_wp = da_wp_wrapped
+            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+            wsp_in = gdf_wsp_anti[gdf_wsp_anti.intersects(adm_geom)]
+        else:
+            da_wp = da_wp_global
+            candidate_idx = list(wsp_sindex.intersection(adm_geom.bounds))
+            if not candidate_idx:
+                skipped += 1
+                continue
+            candidates = gdf_wsp.iloc[candidate_idx]
+            wsp_in = candidates[candidates.intersects(adm_geom)]
+
+        if wsp_in.empty:
+            skipped += 1
+            continue
+
+        if not overwrite and not done_df.empty:
+            done_country = done_df[done_df["pcode"] == iso3]
+            if not done_country.empty:
+                wsp_in = _filter_done_nhc_wsp_fcastonly(wsp_in, done_country)
+                if wsp_in.empty:
+                    skipped += 1
+                    logger.info(f"{prefix} — all done, skipping")
+                    continue
+
+        logger.info(f"{prefix} — {len(wsp_in)} intersecting, calculating...")
+
+        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
+        df = calculate_exposure(wsp_in, da_wp_country)
+        df["iso3"] = iso3
+        df["pcode"] = iso3
+        df["admin_level"] = _EXP_ADMIN_LEVEL
+        del da_wp_country
+
+        out = df.drop(columns=["id"], errors="ignore")
+        out = out.drop_duplicates(subset=_WSP_EXP_KEY_COLS, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                "nhc_wsp_fcastonly_exposure",
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        n_exposed = int((df["pop_exposed"] > 0).sum())
+        logger.info(f"{prefix} — done ({n_exposed} rows with pop > 0)")
+        processed += 1
+
+    logger.info(f"WSP fcastonly exposure done: {processed} written, {skipped} already done.")
     engine.dispose()
 
 
@@ -1733,6 +2064,18 @@ def run_nhc_realtime(
             run_nhc_wsp_exp(mode=mode, issued_time=wsp_issued_time)
         except Exception as e:
             logger.error(f"NHC WSP exposure failed: {e}", exc_info=True)
+
+        try:
+            logger.info("Running NHC WSP forecast-only polygons...")
+            process_nhc_wsp_fcastonly_polygons(engine=write_engine, issued_time=wsp_issued_time)
+        except Exception as e:
+            logger.error(f"NHC WSP fcastonly polygons failed: {e}", exc_info=True)
+
+        try:
+            logger.info("Running NHC WSP forecast-only exposure...")
+            run_nhc_wsp_fcastonly_exp(mode=mode, issued_time=wsp_issued_time)
+        except Exception as e:
+            logger.error(f"NHC WSP fcastonly exposure failed: {e}", exc_info=True)
     else:
         logger.info("No WSP data — skipping WSP exposure.")
 
