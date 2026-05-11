@@ -25,10 +25,11 @@ CREATE TABLE IF NOT EXISTS storms.gdacs_exposure
     wind_speed_kt    SMALLINT    NOT NULL CHECK (wind_speed_kt IN (34, 50, 64)),
     admin_level      SMALLINT    NOT NULL,
     iso3             VARCHAR(3)  NOT NULL,
-    pcode            VARCHAR(20) NOT NULL,
+    admin_name       VARCHAR     NOT NULL,
+    pcode            VARCHAR(20),
     pop_exposed      INTEGER     NOT NULL,
     CONSTRAINT gdacs_exposure_unique
-        UNIQUE (gdacs_eventid, gdacs_episodeid, wind_speed_kt, admin_level, pcode)
+        UNIQUE (gdacs_eventid, gdacs_episodeid, wind_speed_kt, admin_level, iso3, admin_name)
 )
 TABLESPACE pg_default;
 
@@ -50,9 +51,11 @@ COMMENT ON COLUMN storms.gdacs_exposure.wind_speed_kt IS
 COMMENT ON COLUMN storms.gdacs_exposure.admin_level IS
     'Administrative level (0 = country, 1 = first subnational, etc.)';
 COMMENT ON COLUMN storms.gdacs_exposure.iso3 IS
-    'ISO 3166-1 alpha-3 country code';
+    'ISO 3166-1 alpha-3 country code (parent country at admin_level=1)';
+COMMENT ON COLUMN storms.gdacs_exposure.admin_name IS
+    'Admin unit name as reported by GDACS — CNTRY_NAME at admin_level=0, ADMIN_NAME at admin_level=1. Always populated.';
 COMMENT ON COLUMN storms.gdacs_exposure.pcode IS
-    'Admin unit p-code (ISO3 at admin_level=0, country-prefixed pcode for subnational)';
+    'Admin unit p-code. Nullable: populated as iso3 at admin_level=0; null at admin_level=1 until backfilled by a downstream enrichment step (GDACS only emits proprietary FIPS_ADMIN/GMI_ADMIN codes, not standard pcodes).';
 COMMENT ON COLUMN storms.gdacs_exposure.pop_exposed IS
     'Population count exposed within this admin unit to this wind buffer, as reported by GDACS';
 
