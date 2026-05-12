@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime, timedelta
 
+from src.pipelines.adam import run_adam_archive, run_adam_current
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.gdacs import run_gdacs_archive, run_gdacs_current
 from src.pipelines.ibtracs import run_ibtracs
@@ -119,6 +120,31 @@ def main():
         "match", parents=[common], help="Run GDACS->ATCF matching pipeline"
     )
 
+    # ADAM subparser
+    adam_parser = subparsers.add_parser(
+        "adam", parents=[common], help="Run ADAM pipeline"
+    )
+    adam_parser.add_argument(
+        "--from-date",
+        help="Archive mode: start date (YYYY-MM-DD). If not provided, runs current mode (last `days_back` days).",
+    )
+    adam_parser.add_argument(
+        "--to-date",
+        help="Archive mode: end date (YYYY-MM-DD). Defaults to today.",
+    )
+    adam_parser.add_argument(
+        "--days-back",
+        type=int,
+        default=14,
+        help="Current mode: how many days back from today (default 14).",
+    )
+    adam_parser.add_argument(
+        "--source",
+        choices=["NOAA", "JTWC"],
+        default="NOAA",
+        help="ADAM source filter (default: NOAA)",
+    )
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -178,6 +204,22 @@ def main():
             )
     elif args.pipeline == "match":
         run_match(mode=args.mode)
+    elif args.pipeline == "adam":
+        if args.from_date is not None:
+            run_adam_archive(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                source=args.source,
+                mode=args.mode,
+                chunksize=args.chunksize,
+            )
+        else:
+            run_adam_current(
+                mode=args.mode,
+                days_back=args.days_back,
+                source=args.source,
+                chunksize=args.chunksize,
+            )
 
 
 if __name__ == "__main__":

@@ -18,17 +18,19 @@
 
 CREATE TABLE IF NOT EXISTS storms.adam_exposure
 (
-    adam_eventid     INTEGER     NOT NULL,
-    adam_episodeid   INTEGER     NOT NULL,
-    valid_time       TIMESTAMP   NOT NULL,
-    wind_speed_kt    SMALLINT    NOT NULL CHECK (wind_speed_kt IN (34, 50, 64)),
-    admin_level      SMALLINT    NOT NULL,
-    iso3             VARCHAR(3)  NOT NULL,
-    admin_name       VARCHAR     NOT NULL,
-    pcode            VARCHAR(20),
-    pop_exposed      INTEGER,
+    adam_eventid       INTEGER     NOT NULL,
+    adam_episodeid     INTEGER     NOT NULL,
+    valid_time         TIMESTAMP   NOT NULL,
+    wind_speed_kt      SMALLINT    NOT NULL CHECK (wind_speed_kt IN (34, 50, 64)),
+    admin_level        SMALLINT    NOT NULL,
+    iso3               VARCHAR(3),
+    admin_name         VARCHAR     NOT NULL,
+    parent_admin_name  VARCHAR,
+    pcode              VARCHAR(20),
+    pop_exposed        INTEGER,
     CONSTRAINT adam_exposure_unique
-        UNIQUE (adam_eventid, adam_episodeid, wind_speed_kt, admin_level, iso3, admin_name)
+        UNIQUE NULLS NOT DISTINCT
+        (adam_eventid, adam_episodeid, wind_speed_kt, admin_level, iso3, admin_name, parent_admin_name)
 )
 TABLESPACE pg_default;
 
@@ -46,11 +48,13 @@ COMMENT ON COLUMN storms.adam_exposure.valid_time IS
 COMMENT ON COLUMN storms.adam_exposure.wind_speed_kt IS
     'Wind speed threshold in knots (34, 50, or 64). ADAM 60/90/120 km/h thresholds are mapped to 34/50/64 kt for cross-source comparability.';
 COMMENT ON COLUMN storms.adam_exposure.admin_level IS
-    'Administrative level (0 = country, 1 = first subnational, etc.)';
+    'Administrative level (0 = country, 1 = first subnational, 2 = second subnational). ADAM CSV is at admin_level=2; admin_level=0 and =1 rows are aggregated by the pipeline.';
 COMMENT ON COLUMN storms.adam_exposure.iso3 IS
-    'ISO 3166-1 alpha-3 country code (parent country at admin_level=1)';
+    'ISO 3166-1 alpha-3 country code (parent country at admin_level=1,2). Nullable when ADAM''s ADM0_NAME cannot be mapped via pycountry + overrides (rare: disputed territories).';
 COMMENT ON COLUMN storms.adam_exposure.admin_name IS
-    'Admin unit name as reported by ADAM — ADM0_NAME at admin_level=0, ADM1_NAME at admin_level=1. Always populated.';
+    'Admin unit name as reported by ADAM — ADM0_NAME at admin_level=0, ADM1_NAME at admin_level=1, ADM2_NAME at admin_level=2. Always populated.';
+COMMENT ON COLUMN storms.adam_exposure.parent_admin_name IS
+    'Name of the parent admin unit — null at admin_level=0, ADM0_NAME at admin_level=1, ADM1_NAME at admin_level=2. Lets consumers walk the hierarchy without joins.';
 COMMENT ON COLUMN storms.adam_exposure.pcode IS
     'Admin unit p-code. Nullable: populated as iso3 at admin_level=0; null at admin_level=1 until backfilled by a downstream enrichment step (ADAM only emits an admin name at ADM1, no code).';
 COMMENT ON COLUMN storms.adam_exposure.pop_exposed IS
