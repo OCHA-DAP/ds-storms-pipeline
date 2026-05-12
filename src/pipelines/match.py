@@ -21,7 +21,7 @@ gdacs_eventid is not yet linked in storms.storm_id_lookup.
 
 import logging
 from functools import partial
-from typing import Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import coloredlogs
 import ocha_stratus as stratus
@@ -38,11 +38,19 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def _load_unmatched_eventids(engine) -> pd.DataFrame:
+# The two lookups below are deliberately asymmetric:
+#   load_matched_eventids — *every* matched gdacs_eventid (used by the
+#       inline path to skip events it just ingested but already linked).
+#   _load_unmatched_eventids — events in gdacs_exposure not yet linked
+#       (used by the standalone retry to bound work to events whose
+#       exposure has already been ingested at least once).
+
+
+def _load_unmatched_eventids(engine) -> List[int]:
     """GDACS events present in gdacs_exposure but not yet linked
-    in storm_id_lookup. One row per gdacs_eventid."""
+    in storm_id_lookup."""
     with engine.connect() as conn:
-        return pd.read_sql(
+        df = pd.read_sql(
             """
             SELECT DISTINCT g.gdacs_eventid
             FROM storms.gdacs_exposure g
@@ -52,12 +60,11 @@ def _load_unmatched_eventids(engine) -> pd.DataFrame:
             """,
             conn,
         )
+    return [int(x) for x in df["gdacs_eventid"]]
 
 
-def _load_matched_eventids(engine) -> Set[int]:
-    """gdacs_eventids already linked to an atcf_id. Used by the
-    inline pass in the GDACS pipeline to skip events that are
-    already resolved."""
+def load_matched_eventids(engine) -> Set[int]:
+    """gdacs_eventids already linked to an atcf_id."""
     with engine.connect() as conn:
         df = pd.read_sql(
             """
@@ -70,7 +77,7 @@ def _load_matched_eventids(engine) -> Set[int]:
     return {int(x) for x in df["gdacs_eventid"]}
 
 
-def _load_freshest_nhc_tracks(engine) -> pd.DataFrame:
+def load_freshest_nhc_tracks(engine) -> pd.DataFrame:
     """NHC tracks, one row per (atcf_id, valid_time) at freshest
     issuance. Required shape for gdacs.match_to_atcf — without
     dedup the mean distance gets dragged around by stale forecasts."""
@@ -89,9 +96,15 @@ def _load_freshest_nhc_tracks(engine) -> pd.DataFrame:
 
 
 def attempt_match(
-    eventid: int, nhc_tracks: pd.DataFrame
+    eventid: int,
+    nhc_tracks: pd.DataFrame,
+    detail: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Resolve a single GDACS eventid → atcf_id geometrically.
+
+    Pass ``detail`` (a pre-fetched output of
+    :func:`gdacs.get_event_detail`) to skip the get_timeline internal
+    re-fetch when the caller already has it.
 
     Returns None when the event has no timeline, the timeline
     fetch fails, or no NHC track sits within the distance
@@ -99,7 +112,7 @@ def attempt_match(
     later"; nothing here raises.
     """
     try:
-        timeline = gdacs_api.get_timeline(eventid)
+        timeline = gdacs_api.get_timeline(eventid, detail=detail)
     except gdacs_api.NoTimelineError:
         logger.info(
             "  no timeline for eventid=%s — leaving unmatched", eventid,
@@ -114,7 +127,7 @@ def attempt_match(
     return gdacs_api.match_to_atcf(timeline, nhc_tracks)
 
 
-def _upsert_matches(matches, engine) -> None:
+def upsert_matches(matches: List[dict], engine) -> None:
     """matches: list of {'gdacs_eventid': int, 'atcf_id': str}.
     No-op when empty."""
     if not matches:
@@ -147,24 +160,23 @@ def run_match(mode: str = "dev") -> None:
     engine = stratus.get_engine(mode, write=True)
 
     unmatched = _load_unmatched_eventids(engine)
-    if len(unmatched) == 0:
+    if not unmatched:
         logger.info("No unmatched GDACS events. Done.")
         return
     logger.info("Found %d unmatched GDACS events", len(unmatched))
 
-    nhc_tracks = _load_freshest_nhc_tracks(engine)
+    nhc_tracks = load_freshest_nhc_tracks(engine)
     logger.info(
         "Loaded %d NHC track rows (freshest per atcf×valid_time)",
         len(nhc_tracks),
     )
 
     matches = []
-    for _, row in unmatched.iterrows():
-        eventid = int(row["gdacs_eventid"])
+    for eventid in unmatched:
         atcf_id = attempt_match(eventid, nhc_tracks)
         if atcf_id is not None:
             matches.append({"gdacs_eventid": eventid, "atcf_id": atcf_id})
 
     logger.info("Resolved %d/%d events", len(matches), len(unmatched))
-    _upsert_matches(matches, engine)
+    upsert_matches(matches, engine)
     logger.info("Pipeline successfully finished!")

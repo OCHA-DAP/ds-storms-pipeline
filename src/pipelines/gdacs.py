@@ -10,13 +10,10 @@ and write to storms.gdacs_exposure in long format. Wind threshold
 standardization (GDACS buffer39 → 34 kt, buffer74 → 64 kt) and the
 wide→long pivot live here; ocha-lens stays GDACS-faithful.
 
-Inline matching: for each newly-ingested event we also attempt to
-resolve its NHC atcf_id via .match.attempt_match. This piggybacks
-on the per-event API loop we're already running for exposure, so
-each event's timeline is fetched at most once over its lifetime.
-Events that can't be matched yet (no NHC counterpart, timeline
-fetch failure) stay absent from storm_id_lookup and get retried
-on the next ingestion run — or via the standalone match pipeline.
+Inline matching: for each newly-ingested event we attempt to
+resolve its NHC atcf_id via .match.attempt_match, so the GDACS
+timeline is fetched once per event lifetime instead of paying a
+second API trip in a separate match pass.
 """
 
 import logging
@@ -33,10 +30,10 @@ from dotenv import load_dotenv
 from ocha_lens.datasources import gdacs as gdacs_api
 
 from .match import (
-    _load_freshest_nhc_tracks,
-    _load_matched_eventids,
-    _upsert_matches,
     attempt_match,
+    load_freshest_nhc_tracks,
+    load_matched_eventids,
+    upsert_matches,
 )
 
 
@@ -138,12 +135,8 @@ def _ingest_event_range(
 
     engine = stratus.get_engine(mode, write=True)
 
-    # Inline match prep: pull NHC tracks + the set of already-matched
-    # gdacs_eventids once before the loop. Per-event we attempt match
-    # only when the event isn't already resolved, so timeline is
-    # fetched at most once per event over its lifetime.
-    nhc_tracks = _load_freshest_nhc_tracks(engine)
-    already_matched = _load_matched_eventids(engine)
+    nhc_tracks = load_freshest_nhc_tracks(engine)
+    already_matched = load_matched_eventids(engine)
     logger.info(
         "Loaded %d NHC track rows; %d events already matched",
         len(nhc_tracks), len(already_matched),
@@ -163,8 +156,8 @@ def _ingest_event_range(
             detail = gdacs_api.get_event_detail(eventid)
             episode_id = gdacs_api.latest_episode_id(detail)
             valid_time = pd.to_datetime(ev["to_date"])
-            adm0 = gdacs_api.get_exposure_adm0(eventid)
-            adm1 = gdacs_api.get_exposure_adm1(eventid)
+            adm0 = gdacs_api.get_exposure_adm0(eventid, detail=detail)
+            adm1 = gdacs_api.get_exposure_adm1(eventid, detail=detail)
         except gdacs_api.NoEpisodesError:
             # Legitimate "event has no episodes yet" — skip, retry
             # next run when GDACS has caught up.
@@ -185,7 +178,7 @@ def _ingest_event_range(
         logger.info("  +%d rows", len(rows))
 
         if eventid not in already_matched:
-            atcf_id = attempt_match(eventid, nhc_tracks)
+            atcf_id = attempt_match(eventid, nhc_tracks, detail=detail)
             if atcf_id is not None:
                 matches.append(
                     {"gdacs_eventid": eventid, "atcf_id": atcf_id}
@@ -218,7 +211,7 @@ def _ingest_event_range(
     else:
         logger.info("No exposure rows to write")
 
-    _upsert_matches(matches, engine)
+    upsert_matches(matches, engine)
 
 
 def run_gdacs_current(
