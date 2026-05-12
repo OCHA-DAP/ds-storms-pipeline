@@ -1,24 +1,27 @@
-"""GDACS → NHC ATCF matching pipeline.
+"""GDACS → NHC ATCF matching.
 
-Reads unmatched GDACS events from storms.gdacs_exposure, resolves
-their atcf_id via a two-tier strategy, upserts storms.storm_id_lookup.
+Resolves the NHC atcf_id for GDACS events via geometric matching:
+inner-join GDACS timeline ↔ NHC tracks on valid_time, group by
+atcf_id, pick the one with smallest mean great-circle distance
+(ocha_lens.datasources.gdacs.match_to_atcf).
 
-1. CHEAP — DB only. Look up distinct atcf_ids in NHC tracks at the
-   same valid_time as the GDACS event's latest advisory issue time.
-   If exactly one atcf_id is active, the match is unambiguous; no
-   GDACS API call needed.
+Two entry points share the same per-event logic:
 
-2. GEOMETRIC — only when tier 1 returns multiple candidates. Fetch
-   the GDACS timeline live, run ocha_lens.datasources.gdacs.match_to_atcf
-   (inner join on valid_time + groupby-mean-distance) to pick the
-   right atcf_id among the candidates.
+  - attempt_match(eventid, nhc_tracks) is called inline by the
+    GDACS exposure pipeline, so timeline is fetched once per event
+    lifetime alongside the exposure fetches.
+  - run_match() is the standalone retry path for events already
+    in gdacs_exposure but still missing an atcf_id (e.g., NHC
+    tracks backfilled after GDACS, or a transient timeline-fetch
+    failure during ingestion).
 
-Idempotent. Re-runs only process events still missing an atcf_id.
+Both forms are idempotent — they only touch events whose
+gdacs_eventid is not yet linked in storms.storm_id_lookup.
 """
 
 import logging
 from functools import partial
-from typing import List
+from typing import Optional, Set
 
 import coloredlogs
 import ocha_stratus as stratus
@@ -35,29 +38,42 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def _load_unmatched_events(engine) -> pd.DataFrame:
-    """GDACS events in gdacs_exposure but not yet linked in
-    storm_id_lookup. Returns one row per gdacs_eventid with the
-    latest valid_time (its latest advisory issue time)."""
+def _load_unmatched_eventids(engine) -> pd.DataFrame:
+    """GDACS events present in gdacs_exposure but not yet linked
+    in storm_id_lookup. One row per gdacs_eventid."""
     with engine.connect() as conn:
         return pd.read_sql(
             """
-            SELECT g.gdacs_eventid,
-                   MAX(g.valid_time) AS gdacs_issue_time
+            SELECT DISTINCT g.gdacs_eventid
             FROM storms.gdacs_exposure g
             LEFT JOIN storms.storm_id_lookup l
                 ON g.gdacs_eventid = l.gdacs_eventid
             WHERE l.atcf_id IS NULL
-            GROUP BY g.gdacs_eventid
             """,
             conn,
         )
 
 
+def _load_matched_eventids(engine) -> Set[int]:
+    """gdacs_eventids already linked to an atcf_id. Used by the
+    inline pass in the GDACS pipeline to skip events that are
+    already resolved."""
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            """
+            SELECT gdacs_eventid
+            FROM storms.storm_id_lookup
+            WHERE atcf_id IS NOT NULL
+            """,
+            conn,
+        )
+    return {int(x) for x in df["gdacs_eventid"]}
+
+
 def _load_freshest_nhc_tracks(engine) -> pd.DataFrame:
     """NHC tracks, one row per (atcf_id, valid_time) at freshest
-    issuance. Required shape for gdacs.match_to_atcf (geometric
-    tier) — without dedup it averages across stale forecasts."""
+    issuance. Required shape for gdacs.match_to_atcf — without
+    dedup the mean distance gets dragged around by stale forecasts."""
     with engine.connect() as conn:
         return pd.read_sql(
             """
@@ -72,93 +88,37 @@ def _load_freshest_nhc_tracks(engine) -> pd.DataFrame:
         )
 
 
-def _candidates_at_time(
-    nhc_tracks: pd.DataFrame, t: pd.Timestamp
-) -> List[str]:
-    return (
-        nhc_tracks.loc[nhc_tracks["valid_time"] == t, "atcf_id"]
-        .unique()
-        .tolist()
-    )
+def attempt_match(
+    eventid: int, nhc_tracks: pd.DataFrame
+) -> Optional[str]:
+    """Resolve a single GDACS eventid → atcf_id geometrically.
+
+    Returns None when the event has no timeline, the timeline
+    fetch fails, or no NHC track sits within the distance
+    threshold. The caller treats None as "leave unmatched, retry
+    later"; nothing here raises.
+    """
+    try:
+        timeline = gdacs_api.get_timeline(eventid)
+    except gdacs_api.NoTimelineError:
+        logger.info(
+            "  no timeline for eventid=%s — leaving unmatched", eventid,
+        )
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.warning(
+            "  timeline fetch failed for %s: %s — retry next cycle",
+            eventid, e,
+        )
+        return None
+    return gdacs_api.match_to_atcf(timeline, nhc_tracks)
 
 
-def run_match(mode: str = "dev") -> None:
-    """Match all unmatched GDACS events to NHC atcf_ids."""
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-    logger.info("Starting GDACS → ATCF matching pipeline...")
-
-    engine = stratus.get_engine(mode, write=True)
-
-    unmatched = _load_unmatched_events(engine)
-    if len(unmatched) == 0:
-        logger.info("No unmatched GDACS events. Done.")
-        return
-    logger.info("Found %d unmatched GDACS events", len(unmatched))
-
-    nhc_tracks = _load_freshest_nhc_tracks(engine)
-    logger.info(
-        "Loaded %d NHC track rows (freshest per atcf×valid_time)",
-        len(nhc_tracks),
-    )
-
-    matches = []
-    n_cheap = 0
-    n_geometric = 0
-    n_no_match = 0
-    n_failed = 0
-
-    for _, row in unmatched.iterrows():
-        eventid = int(row["gdacs_eventid"])
-        t = row["gdacs_issue_time"]
-        candidates = _candidates_at_time(nhc_tracks, t)
-
-        if len(candidates) == 0:
-            n_no_match += 1
-            continue
-
-        if len(candidates) == 1:
-            matches.append({"gdacs_eventid": eventid, "atcf_id": candidates[0]})
-            n_cheap += 1
-            continue
-
-        # Multiple candidates → fetch timeline + disambiguate geometrically
-        try:
-            timeline = gdacs_api.get_timeline(eventid)
-        except gdacs_api.NoTimelineError:
-            # Legitimate "event has no timeline" — skip, will stay
-            # unmatched (downstream consumers can see this state).
-            logger.info(
-                "  no timeline for eventid=%s — left unmatched", eventid,
-            )
-            n_no_match += 1
-            continue
-        except requests.exceptions.RequestException as e:
-            logger.warning(
-                "Timeline fetch failed for %s: %s — retry next cycle",
-                eventid, e,
-            )
-            n_failed += 1
-            continue
-
-        atcf_id = gdacs_api.match_to_atcf(timeline, nhc_tracks)
-        if atcf_id is None:
-            n_no_match += 1
-            continue
-        matches.append({"gdacs_eventid": eventid, "atcf_id": atcf_id})
-        n_geometric += 1
-
-    logger.info(
-        "Match cycle: %d cheap, %d geometric, %d no NHC counterpart, "
-        "%d timeline-fetch failures",
-        n_cheap, n_geometric, n_no_match, n_failed,
-    )
-
+def _upsert_matches(matches, engine) -> None:
+    """matches: list of {'gdacs_eventid': int, 'atcf_id': str}.
+    No-op when empty."""
     if not matches:
         return
-
     df = pd.DataFrame(matches)
     upsert = partial(
         stratus.postgres_upsert, constraint="storm_id_lookup_pkey"
@@ -172,4 +132,39 @@ def run_match(mode: str = "dev") -> None:
         index=False,
         method=upsert,
     )
+
+
+def run_match(mode: str = "dev") -> None:
+    """Standalone retry: attempt matching for GDACS events already
+    ingested but still missing an atcf_id. Use after a late NHC
+    backfill, or to retry transient timeline-fetch failures."""
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger.info("Starting GDACS → ATCF matching pipeline...")
+
+    engine = stratus.get_engine(mode, write=True)
+
+    unmatched = _load_unmatched_eventids(engine)
+    if len(unmatched) == 0:
+        logger.info("No unmatched GDACS events. Done.")
+        return
+    logger.info("Found %d unmatched GDACS events", len(unmatched))
+
+    nhc_tracks = _load_freshest_nhc_tracks(engine)
+    logger.info(
+        "Loaded %d NHC track rows (freshest per atcf×valid_time)",
+        len(nhc_tracks),
+    )
+
+    matches = []
+    for _, row in unmatched.iterrows():
+        eventid = int(row["gdacs_eventid"])
+        atcf_id = attempt_match(eventid, nhc_tracks)
+        if atcf_id is not None:
+            matches.append({"gdacs_eventid": eventid, "atcf_id": atcf_id})
+
+    logger.info("Resolved %d/%d events", len(matches), len(unmatched))
+    _upsert_matches(matches, engine)
     logger.info("Pipeline successfully finished!")

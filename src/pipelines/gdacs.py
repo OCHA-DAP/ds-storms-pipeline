@@ -9,6 +9,14 @@ Both modes use ocha_lens.datasources.gdacs for API access + parsing
 and write to storms.gdacs_exposure in long format. Wind threshold
 standardization (GDACS buffer39 → 34 kt, buffer74 → 64 kt) and the
 wide→long pivot live here; ocha-lens stays GDACS-faithful.
+
+Inline matching: for each newly-ingested event we also attempt to
+resolve its NHC atcf_id via .match.attempt_match. This piggybacks
+on the per-event API loop we're already running for exposure, so
+each event's timeline is fetched at most once over its lifetime.
+Events that can't be matched yet (no NHC counterpart, timeline
+fetch failure) stay absent from storm_id_lookup and get retried
+on the next ingestion run — or via the standalone match pipeline.
 """
 
 import logging
@@ -24,6 +32,13 @@ from dotenv import load_dotenv
 
 from ocha_lens.datasources import gdacs as gdacs_api
 
+from .match import (
+    _load_freshest_nhc_tracks,
+    _load_matched_eventids,
+    _upsert_matches,
+    attempt_match,
+)
+
 
 load_dotenv()
 
@@ -31,9 +46,11 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# Wind threshold standardization (GDACS API keys → NHC kt categories).
-# Library-faithful: GDACS returns buffer39 / buffer74; the pipeline
-# is where the policy of mapping to 34 / 64 kt lives.
+# GDACS publishes buffer thresholds in mph (Saffir-Simpson public-facing
+# convention: 39 mph = tropical storm onset, 74 mph = Cat 1 hurricane).
+# We store wind_speed_kt in knots to match NHC operational products
+# (34 kt ≈ 39 mph, 64 kt ≈ 74 mph). Conversion lives here, not in
+# ocha-lens, so the library stays GDACS-faithful.
 _BUFFER_TO_WIND_KT = {
     "buffer39": 34,
     "buffer74": 64,
@@ -119,7 +136,21 @@ def _ingest_event_range(
     )
     logger.info("Got %d events", len(events))
 
+    engine = stratus.get_engine(mode, write=True)
+
+    # Inline match prep: pull NHC tracks + the set of already-matched
+    # gdacs_eventids once before the loop. Per-event we attempt match
+    # only when the event isn't already resolved, so timeline is
+    # fetched at most once per event over its lifetime.
+    nhc_tracks = _load_freshest_nhc_tracks(engine)
+    already_matched = _load_matched_eventids(engine)
+    logger.info(
+        "Loaded %d NHC track rows; %d events already matched",
+        len(nhc_tracks), len(already_matched),
+    )
+
     all_rows = []
+    matches = []
     n_skipped = 0
 
     for i, ev in events.iterrows():
@@ -153,32 +184,41 @@ def _ingest_event_range(
         all_rows.extend(rows)
         logger.info("  +%d rows", len(rows))
 
+        if eventid not in already_matched:
+            atcf_id = attempt_match(eventid, nhc_tracks)
+            if atcf_id is not None:
+                matches.append(
+                    {"gdacs_eventid": eventid, "atcf_id": atcf_id}
+                )
+                logger.info("  matched → atcf_id=%s", atcf_id)
+
     logger.info(
-        "Done fetching: %d rows from %d events (%d skipped)",
-        len(all_rows), len(events) - n_skipped, n_skipped,
+        "Done fetching: %d rows from %d events (%d skipped); "
+        "%d inline matches resolved",
+        len(all_rows), len(events) - n_skipped, n_skipped, len(matches),
     )
 
-    if not all_rows:
-        logger.info("Nothing to write")
-        return
+    if all_rows:
+        df = pd.DataFrame(all_rows)
+        upsert = partial(
+            stratus.postgres_upsert, constraint="gdacs_exposure_unique"
+        )
+        logger.info("Upserting %d rows -> storms.gdacs_exposure (%s)",
+                    len(df), mode)
+        df.to_sql(
+            "gdacs_exposure",
+            engine,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=upsert,
+            chunksize=chunksize,
+        )
+        logger.info("Wrote %d rows", len(df))
+    else:
+        logger.info("No exposure rows to write")
 
-    df = pd.DataFrame(all_rows)
-    engine = stratus.get_engine(mode, write=True)
-    upsert = partial(
-        stratus.postgres_upsert, constraint="gdacs_exposure_unique"
-    )
-    logger.info("Upserting %d rows -> storms.gdacs_exposure (%s)",
-                len(df), mode)
-    df.to_sql(
-        "gdacs_exposure",
-        engine,
-        schema="storms",
-        if_exists="append",
-        index=False,
-        method=upsert,
-        chunksize=chunksize,
-    )
-    logger.info("Wrote %d rows", len(df))
+    _upsert_matches(matches, engine)
 
 
 def run_gdacs_current(
