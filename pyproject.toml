@@ -1,3 +1,46 @@
+[project]
+name = "ds-storms-pipeline"
+version = "0.1.0"
+description = "Pipelines for storm forecasts and observations (IBTrACS, ECMWF, NHC, GDACS, ADAM)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Database
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "alembic>=1.13.0",
+    "geoalchemy2==0.18.0",
+    # Data processing
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "ocha-stratus==0.1.4",
+    "ocha-lens",
+    # Date handling
+    "python-dateutil>=2.8.2",
+    "pytz>=2024.1",
+    # Utilities
+    "tqdm>=4.66.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "coloredlogs==15.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "ruff==0.7.4",
+    "pre-commit==4.0.1",
+    "hypothesis==6.138.2",
+    "marimo==0.23.0",
+    "plotly",
+]
+
+[tool.uv.sources]
+# Use the sibling repo for local-editable development on the
+# unreleased ocha-lens API (get_exposure_adm0/adm1,
+# match_gdacs_to_atcf). Revert to a version pin in `[project]`
+# once a tagged release lands.
+ocha-lens = { path = "../ocha-lens", editable = true }
+
 [tool.ruff]
-# Set the maximum line length to 79.
 line-length = 79

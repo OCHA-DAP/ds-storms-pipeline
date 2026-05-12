@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS storms.adam_exposure
     iso3             VARCHAR(3)  NOT NULL,
     admin_name       VARCHAR     NOT NULL,
     pcode            VARCHAR(20),
-    pop_exposed      INTEGER     NOT NULL,
+    pop_exposed      INTEGER,
     CONSTRAINT adam_exposure_unique
         UNIQUE (adam_eventid, adam_episodeid, wind_speed_kt, admin_level, iso3, admin_name)
 )

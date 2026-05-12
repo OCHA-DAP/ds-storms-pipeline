@@ -2,7 +2,9 @@ import argparse
 from datetime import datetime, timedelta
 
 from src.pipelines.ecmwf import run_ecmwf
+from src.pipelines.gdacs import run_gdacs_archive, run_gdacs_current
 from src.pipelines.ibtracs import run_ibtracs
+from src.pipelines.match import run_match
 from src.pipelines.nhc import run_nhc_current, run_nhc_archive
 
 
@@ -87,6 +89,36 @@ def main():
         help="End year for archive processing (e.g., 2024). If not provided, only processes start-year.",
     )
 
+    # GDACS subparser
+    gdacs_parser = subparsers.add_parser(
+        "gdacs", parents=[common], help="Run GDACS pipeline"
+    )
+    gdacs_parser.add_argument(
+        "--from-date",
+        help="Archive mode: start date (YYYY-MM-DD). If not provided, runs current mode (last `days_back` days).",
+    )
+    gdacs_parser.add_argument(
+        "--to-date",
+        help="Archive mode: end date (YYYY-MM-DD). Defaults to today.",
+    )
+    gdacs_parser.add_argument(
+        "--days-back",
+        type=int,
+        default=7,
+        help="Current mode: how many days back from today (default 7).",
+    )
+    gdacs_parser.add_argument(
+        "--source",
+        choices=["NOAA", "JTWC"],
+        default="NOAA",
+        help="GDACS source filter (default: NOAA)",
+    )
+
+    # Match subparser (GDACS -> NHC atcf_id, writes storm_id_lookup)
+    subparsers.add_parser(
+        "match", parents=[common], help="Run GDACS->ATCF matching pipeline"
+    )
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -126,6 +158,26 @@ def main():
                 save_dir=args.save_dir,
                 chunksize=args.chunksize,
             )
+    elif args.pipeline == "gdacs":
+        if args.from_date is not None:
+            # Archive mode: date range provided
+            run_gdacs_archive(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                source=args.source,
+                mode=args.mode,
+                chunksize=args.chunksize,
+            )
+        else:
+            # Current mode: rolling window from today
+            run_gdacs_current(
+                mode=args.mode,
+                days_back=args.days_back,
+                source=args.source,
+                chunksize=args.chunksize,
+            )
+    elif args.pipeline == "match":
+        run_match(mode=args.mode)
 
 
 if __name__ == "__main__":
