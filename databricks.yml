@@ -1,0 +1,154 @@
+# Databricks Asset Bundle — source-controlled definition of the NHC
+# realtime job. Deploy with:
+#
+#   databricks bundle deploy -t prod        # or -t dev
+#   databricks bundle run nhc_realtime -t prod
+#
+# Asset Bundles are the "GHA-style YAML in the repo" answer to defining
+# Databricks jobs declaratively. The bundle owns the job spec, the
+# schedule, the cluster, and (importantly here) the library deps for
+# each task — no more clicking around the UI.
+#
+# Docs: https://docs.databricks.com/dev-tools/bundles/
+
+bundle:
+  name: ds-storms-pipeline
+
+# ---------------------------------------------------------------------
+# Per-environment overrides. Use -t <target> at deploy/run time.
+# ---------------------------------------------------------------------
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: ${var.databricks_host}
+    variables:
+      mode: dev
+  prod:
+    mode: production
+    workspace:
+      host: ${var.databricks_host}
+    variables:
+      mode: prod
+
+variables:
+  databricks_host:
+    description: Databricks workspace URL (https://...)
+    default: https://adb-XXXXXXXX.azuredatabricks.net
+  mode:
+    description: Pipeline --mode (dev | prod)
+    default: dev
+  # The ocha-lens git ref that has the new strict matcher + containment
+  # fallback + schemas. Pin until merged to main.
+  ocha_lens_ref:
+    description: ocha-lens git ref to install
+    default: wsp-exp-calc
+
+# ---------------------------------------------------------------------
+# Shared cluster config + library list reused by every task.
+#
+# Defining the library list once here means you don't enter dependencies
+# manually per task in the UI — the deploy step applies them everywhere.
+# ---------------------------------------------------------------------
+resources:
+  jobs:
+    nhc_realtime:
+      name: NHC Realtime (${var.mode})
+      # Run every 30 min on the :15 and :45 (advisories drop at :00 and
+      # WSPs land ~3h later — this catches both within an hour).
+      schedule:
+        quartz_cron_expression: "0 15,45 * * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      # One job-level cluster shared by all tasks (cheaper than per-task
+      # job clusters; tasks run sequentially per the depends_on DAG).
+      job_clusters:
+        - job_cluster_key: storms_cluster
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_D8s_v3
+            num_workers: 0          # single-node driver is fine for this
+            data_security_mode: SINGLE_USER
+
+      # Job-level parameters available as {{job.parameters.X}} in tasks.
+      parameters:
+        - name: mode
+          default: ${var.mode}
+
+      tasks:
+        # ============================================================ #
+        # A. ETL — scrape CurrentStorms.json + WSP, write raw tables,
+        #    emit (track_issued_time, wsp_issued_time) as task values.
+        # ============================================================ #
+        - task_key: etl
+          job_cluster_key: storms_cluster
+          notebook_task:
+            notebook_path: ./databricks/notebooks/01_etl.py
+            base_parameters:
+              mode: "{{job.parameters.mode}}"
+          libraries: &storm_libs
+            - pypi: { package: "ocha-stratus" }
+            - pypi:
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@${var.ocha_lens_ref}"
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+
+        # ============================================================ #
+        # B. Tracks processing — fcast/obsv/fcastonly buffers, one run
+        #    each, scoped to the issued_time emitted by A.
+        # ============================================================ #
+        - task_key: tracks_processing
+          job_cluster_key: storms_cluster
+          depends_on: [{ task_key: etl }]
+          notebook_task:
+            notebook_path: ./databricks/notebooks/02_tracks_processing.py
+            base_parameters:
+              mode: "{{job.parameters.mode}}"
+              issued_time: "{{tasks.etl.values.track_issued_time}}"
+          libraries: *storm_libs
+
+        # ============================================================ #
+        # C. Tracks exposure — three exposure tables off the buffers.
+        # ============================================================ #
+        - task_key: tracks_exposure
+          job_cluster_key: storms_cluster
+          depends_on: [{ task_key: tracks_processing }]
+          notebook_task:
+            notebook_path: ./databricks/notebooks/03_tracks_exposure.py
+            base_parameters:
+              mode: "{{job.parameters.mode}}"
+              issued_time: "{{tasks.etl.values.track_issued_time}}"
+          libraries: *storm_libs
+
+        # ============================================================ #
+        # D. WSP processing — matched table + fcastonly clipping. Needs
+        #    obsv buffers from B, so depends on tracks_processing.
+        # ============================================================ #
+        - task_key: wsp_processing
+          job_cluster_key: storms_cluster
+          depends_on: [{ task_key: tracks_processing }]
+          notebook_task:
+            notebook_path: ./databricks/notebooks/04_wsp_processing.py
+            base_parameters:
+              mode: "{{job.parameters.mode}}"
+              wsp_issued_time: "{{tasks.etl.values.wsp_issued_time}}"
+          libraries: *storm_libs
+
+        # ============================================================ #
+        # E. WSP exposure — full WSP exp + fcastonly WSP exp.
+        # ============================================================ #
+        - task_key: wsp_exposure
+          job_cluster_key: storms_cluster
+          depends_on: [{ task_key: wsp_processing }]
+          notebook_task:
+            notebook_path: ./databricks/notebooks/05_wsp_exposure.py
+            base_parameters:
+              mode: "{{job.parameters.mode}}"
+              wsp_issued_time: "{{tasks.etl.values.wsp_issued_time}}"
+          libraries: *storm_libs

@@ -5,10 +5,13 @@
 -- cyclone data, including storm metadata, track data, and wind speed
 -- probability polygons.
 --
--- Tables:
+-- Tables (defined here):
 --   - storms.nhc_storms:        Storm-level metadata (one row per storm)
 --   - storms.nhc_tracks_geo:    Track points with geometry (one row per forecast point)
---   - storms.nhc_wsp_polygon:   WSP probability polygons (one row per issuance/threshold/band)
+--
+-- WSP probability polygons live in dedicated files:
+--   - storms.nhc_wsp_polygon_raw      (nhc_wsp_polygon_raw.sql) — raw NHC output
+--   - storms.nhc_wsp_polygon_matched  (nhc_wsp_polygon_matched.sql) — per-storm
 --
 -- Compatible with ocha-lens NHC module schemas
 -- ============================================================================
@@ -178,55 +181,6 @@ CREATE INDEX IF NOT EXISTS idx_nhc_tracks_geo_basin
     ON storms.nhc_tracks_geo (basin)
     TABLESPACE pg_default;
 
--- ============================================================================
--- Table: storms.nhc_wsp_polygon
--- ============================================================================
--- One row per (issued_time, wind threshold, probability band).
--- Equivalent schema to the official NHC 5km GIS shapefiles.
-
--- DROP TABLE IF EXISTS storms.nhc_wsp_polygon CASCADE;
-
-CREATE TABLE IF NOT EXISTS storms.nhc_wsp_polygon
-(
-    id                BIGSERIAL PRIMARY KEY,
-    issued_time       TIMESTAMP   NOT NULL,
-    wind_threshold_kt SMALLINT    NOT NULL CHECK (wind_threshold_kt IN (34, 50, 64)),
-    percentage        SMALLINT    NOT NULL,
-    geometry          geometry(MultiPolygon, 4326),
-    CONSTRAINT nhc_wsp_polygon_unique UNIQUE (issued_time, wind_threshold_kt, percentage)
-)
-TABLESPACE pg_default;
-
-ALTER TABLE IF EXISTS storms.nhc_wsp_polygon
-    OWNER to {owner};
-
-COMMENT ON TABLE storms.nhc_wsp_polygon IS
-    'NHC basin-wide wind speed probability polygons - one row per issued_time/threshold/probability band';
-COMMENT ON COLUMN storms.nhc_wsp_polygon.issued_time IS
-    'Forecast issued time (UTC)';
-COMMENT ON COLUMN storms.nhc_wsp_polygon.wind_threshold_kt IS
-    'Wind speed threshold in knots (34, 50, or 64)';
-COMMENT ON COLUMN storms.nhc_wsp_polygon.percentage IS
-    'Lower bound of probability band in percent (0, 5, 10, ..., 90). 0 means <5%, 90 means >90%.';
-COMMENT ON COLUMN storms.nhc_wsp_polygon.geometry IS
-    'MultiPolygon covering the probability band area in WGS84 (EPSG:4326). NULL for the <5% band.';
-
--- ============================================================================
--- Indexes (WSP)
--- ============================================================================
-
--- Spatial index for geometry column
-CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_geometry
-    ON storms.nhc_wsp_polygon USING gist (geometry)
-    TABLESPACE pg_default;
-
--- Index on issued_time for temporal queries
-CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_issued_time
-    ON storms.nhc_wsp_polygon (issued_time)
-    TABLESPACE pg_default;
-
--- Index on wind_threshold_kt for filtering by threshold
-CREATE INDEX IF NOT EXISTS idx_nhc_wsp_polygon_threshold
-    ON storms.nhc_wsp_polygon (wind_threshold_kt)
-    TABLESPACE pg_default;
-
+-- The NHC WSP polygon tables have been moved to dedicated schema files:
+--   - storms.nhc_wsp_polygon_raw     (nhc_wsp_polygon_raw.sql)
+--   - storms.nhc_wsp_polygon_matched (nhc_wsp_polygon_matched.sql)

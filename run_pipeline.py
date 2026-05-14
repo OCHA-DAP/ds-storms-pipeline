@@ -2,6 +2,19 @@ import argparse
 import logging
 from datetime import datetime, timedelta
 
+import pandas as pd
+
+
+def _parse_it(value):
+    """Parse a CLI --issued-time argument into a Python datetime.
+
+    Accepts formats like 'YYYY-MM-DDTHH' or 'YYYY-MM-DD HH:MM' that
+    pandas understands. Returns None if value is None/empty.
+    """
+    if value is None or value == "":
+        return None
+    return pd.to_datetime(value).to_pydatetime()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -30,6 +43,8 @@ from src.pipelines.nhc import (
     run_nhc_wsp_exp,
     run_nhc_wsp_fcastonly_polygons,
     run_nhc_wsp_fcastonly_exp,
+    run_nhc_wsp_polygon_matched,
+    run_fill_null_wsp_polygon_matched,
 )
 
 
@@ -140,6 +155,16 @@ def main():
         help="Start year for archive mode. Omit for current active storms.",
     )
     nhc_parser.add_argument("--end-year", type=int)
+    nhc_parser.add_argument(
+        "--out-issued-times-json",
+        metavar="PATH",
+        help=(
+            "After the 'current' mode finishes, write a small JSON file with"
+            " {track_issued_time, wsp_issued_time} extracted from the scraped"
+            " JSON. Downstream Databricks tasks can read this to set task"
+            " values."
+        ),
+    )
 
     # ------------------------------------------------------------------ #
     # NHC realtime (ETL + wind buffers + track exp + WSP exp)
@@ -163,6 +188,10 @@ def main():
     nhc_tracks_fcast_buffers_parser.add_argument("--basin")
     nhc_tracks_fcast_buffers_parser.add_argument("--start-year", type=int)
     nhc_tracks_fcast_buffers_parser.add_argument("--overwrite", action="store_true")
+    nhc_tracks_fcast_buffers_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
+    )
 
     # ------------------------------------------------------------------ #
     # NHC observational track buffers
@@ -175,6 +204,10 @@ def main():
     nhc_tracks_obsv_buffers_parser.add_argument("--basin")
     nhc_tracks_obsv_buffers_parser.add_argument("--start-year", type=int)
     nhc_tracks_obsv_buffers_parser.add_argument("--overwrite", action="store_true")
+    nhc_tracks_obsv_buffers_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
+    )
 
     # ------------------------------------------------------------------ #
     # NHC forecast-only track buffers
@@ -187,6 +220,10 @@ def main():
     nhc_tracks_fcastonly_buffers_parser.add_argument("--basin")
     nhc_tracks_fcastonly_buffers_parser.add_argument("--start-year", type=int)
     nhc_tracks_fcastonly_buffers_parser.add_argument("--overwrite", action="store_true")
+    nhc_tracks_fcastonly_buffers_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
+    )
 
     # ------------------------------------------------------------------ #
     # NHC track exposure
@@ -199,6 +236,10 @@ def main():
     nhc_track_exp_parser.add_argument(
         "--since", metavar="YYYY-MM-DD",
         help="Only include buffers with issued_time on or after this date",
+    )
+    nhc_track_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
     )
 
     # ------------------------------------------------------------------ #
@@ -213,6 +254,13 @@ def main():
         "--since", metavar="YYYY-MM-DD",
         help="Only include buffers with valid_time on or after this date",
     )
+    nhc_obsv_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help=(
+            "Only this issued_time (maps to valid_time on obsv buffers — pass"
+            " the track_issued_time from Task A for realtime / DBX chaining)"
+        ),
+    )
 
     # ------------------------------------------------------------------ #
     # NHC forecast-only track buffer exposure
@@ -226,6 +274,10 @@ def main():
         "--since", metavar="YYYY-MM-DD",
         help="Only include buffers with issued_time on or after this date",
     )
+    nhc_fcastonly_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
+    )
 
     # ------------------------------------------------------------------ #
     # NHC WSP exposure
@@ -238,6 +290,39 @@ def main():
     nhc_wsp_exp_parser.add_argument(
         "--since", metavar="YYYY-MM-DD",
         help="Only include WSP polygons with issued_time on or after this date",
+    )
+    nhc_wsp_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
+    )
+
+    # ------------------------------------------------------------------ #
+    # NHC WSP polygon matched (raw WSP + tracks -> per-storm MultiPolygons)
+    # ------------------------------------------------------------------ #
+    nhc_wsp_polygon_matched_parser = subparsers.add_parser(
+        "nhc-wsp-polygon-matched",
+        parents=[common],
+        help="Build storms.nhc_wsp_polygon_matched from raw WSP + tracks",
+    )
+    nhc_wsp_polygon_matched_parser.add_argument(
+        "--since", metavar="YYYY-MM-DD",
+        help="Only process raw rows with issued_time on or after this date",
+    )
+    nhc_wsp_polygon_matched_parser.add_argument("--basin", metavar="BASIN")
+    nhc_wsp_polygon_matched_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Process only this specific issued_time",
+    )
+    nhc_wsp_polygon_matched_parser.add_argument("--overwrite", action="store_true")
+    nhc_wsp_polygon_matched_parser.add_argument(
+        "--fill-nulls",
+        action="store_true",
+        help=(
+            "Surgically re-match only the rows with atcf_id IS NULL in"
+            " nhc_wsp_polygon_matched, using existing non-NULL rows as"
+            " containment-fallback donors. Implies per-issued_time"
+            " transactions; ignores --overwrite."
+        ),
     )
 
     # ------------------------------------------------------------------ #
@@ -270,6 +355,14 @@ def main():
     nhc_wsp_fcastonly_exp_parser.add_argument(
         "--since", metavar="YYYY-MM-DD",
         help="Only include polygons with issued_time on or after this date",
+    )
+    nhc_wsp_fcastonly_exp_parser.add_argument(
+        "--year", type=int, metavar="YYYY",
+        help="Restrict processing to a single calendar year (parallelization-friendly)",
+    )
+    nhc_wsp_fcastonly_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Only this issued_time (recommended for realtime / DBX chaining)",
     )
 
     # ------------------------------------------------------------------ #
@@ -326,12 +419,23 @@ def main():
                 chunksize=args.chunksize,
             )
         else:
-            run_nhc_current(
+            result = run_nhc_current(
                 mode=args.mode,
                 save_to_blob=args.save_to_blob,
                 save_dir=args.save_dir,
                 chunksize=args.chunksize,
             )
+            if args.out_issued_times_json:
+                import json
+                payload = {
+                    k: (None if v is None else pd.Timestamp(v).isoformat())
+                    for k, v in (result or {}).items()
+                }
+                with open(args.out_issued_times_json, "w") as f:
+                    json.dump(payload, f)
+                logging.getLogger(__name__).info(
+                    f"Wrote issued_times to {args.out_issued_times_json}: {payload}"
+                )
     elif args.pipeline == "nhc-realtime":
         run_nhc_realtime(
             mode=args.mode,
@@ -346,6 +450,7 @@ def main():
             basin=args.basin,
             start_year=args.start_year,
             overwrite=args.overwrite,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-tracks-obsv-buffers":
         run_nhc_tracks_obsv_buffers(
@@ -354,6 +459,7 @@ def main():
             basin=args.basin,
             start_year=args.start_year,
             overwrite=args.overwrite,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-tracks-fcastonly-buffers":
         run_nhc_tracks_fcastonly_buffers(
@@ -362,6 +468,7 @@ def main():
             basin=args.basin,
             start_year=args.start_year,
             overwrite=args.overwrite,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-track-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
@@ -371,15 +478,20 @@ def main():
             basin=args.basin,
             overwrite=args.overwrite,
             mode=args.mode,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-obsv-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
+        # obsv-exp's underlying function uses ``valid_time`` (the obsv
+        # buffer key); the realtime orchestrator passes track_issued_time
+        # here, which equals the latest obsv valid_time.
         run_nhc_tracks_obsv_exp(
             countries=countries,
             since=args.since,
             basin=args.basin,
             overwrite=args.overwrite,
             mode=args.mode,
+            valid_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-fcastonly-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
@@ -389,6 +501,7 @@ def main():
             basin=args.basin,
             overwrite=args.overwrite,
             mode=args.mode,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-wsp-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
@@ -398,13 +511,30 @@ def main():
             basin=args.basin,
             overwrite=args.overwrite,
             mode=args.mode,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
+    elif args.pipeline == "nhc-wsp-polygon-matched":
+        it_arg = _parse_it(getattr(args, "issued_time", None))
+        if getattr(args, "fill_nulls", False):
+            run_fill_null_wsp_polygon_matched(
+                mode=args.mode,
+                since=args.since,
+                issued_time=it_arg,
+            )
+        else:
+            run_nhc_wsp_polygon_matched(
+                mode=args.mode,
+                since=args.since,
+                basin=args.basin,
+                issued_time=it_arg,
+                overwrite=args.overwrite,
+            )
     elif args.pipeline == "nhc-wsp-fcastonly-polygons":
         run_nhc_wsp_fcastonly_polygons(
             mode=args.mode,
             since=args.since,
             basin=args.basin,
-            issued_time=getattr(args, "issued_time", None),
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
             overwrite=args.overwrite,
         )
     elif args.pipeline == "nhc-wsp-fcastonly-exp":
@@ -415,6 +545,8 @@ def main():
             basin=args.basin,
             overwrite=args.overwrite,
             mode=args.mode,
+            year=args.year,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
 
 

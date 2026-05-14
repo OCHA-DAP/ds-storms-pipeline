@@ -9,7 +9,7 @@
 -- (country). Subnational rows (admin_level >= 1) use the same table.
 --
 -- Populated by running: scripts/calc_wsp_adm0_exp.py
--- Source: storms.nhc_wsp_polygon (geometry) x WorldPop 1km raster x
+-- Source: storms.nhc_wsp_polygon_matched (geometry) x WorldPop 1km raster x
 --         FieldMaps ADM boundaries
 -- ============================================================================
 

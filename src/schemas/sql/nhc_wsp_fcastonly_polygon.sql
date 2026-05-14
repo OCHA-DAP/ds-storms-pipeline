@@ -12,8 +12,10 @@
 --   = issued_time       (fallback: no +3h obsv available)
 --   = NULL              (no obsv buffer found; full WSP geometry stored)
 --
--- Unlike nhc_wsp_polygon, this table stores atcf_id directly (matched via
--- match_wsp_to_tracks). Multi-storm issuances produce one row per storm.
+-- Derived from storms.nhc_wsp_polygon_matched (one row per storm/band,
+-- already dissolved per (issued_time, wind_threshold_kt, percentage, atcf_id)).
+-- A single shapely difference against the cumulative observed buffer produces
+-- one MultiPolygon per row, preserving any multi-part geometry.
 --
 -- Populated by running: python run_pipeline.py nhc-wsp-fcastonly-polygons
 -- ============================================================================
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS storms.nhc_wsp_fcastonly_polygon
     percentage        SMALLINT    NOT NULL,
     atcf_id           VARCHAR,
     obsv_valid_time   TIMESTAMP,
-    geometry          geometry(Geometry, 4326),
+    geometry          geometry(MultiPolygon, 4326),
     CONSTRAINT nhc_wsp_fcastonly_polygon_pkey PRIMARY KEY (id),
     CONSTRAINT nhc_wsp_fcastonly_polygon_unique
         UNIQUE NULLS NOT DISTINCT (issued_time, wind_threshold_kt, percentage, atcf_id)
@@ -51,7 +53,7 @@ COMMENT ON COLUMN storms.nhc_wsp_fcastonly_polygon.atcf_id IS
 COMMENT ON COLUMN storms.nhc_wsp_fcastonly_polygon.obsv_valid_time IS
     'valid_time of the obsv buffer used for the cut-out. issued_time + 3h = 3h offset applied; issued_time = exact match fallback; NULL = no obsv buffer found (full WSP geometry stored).';
 COMMENT ON COLUMN storms.nhc_wsp_fcastonly_polygon.geometry IS
-    'WSP polygon minus the cumulative observed track swath in WGS84 (EPSG:4326). NULL if WSP is fully covered by the observed swath.';
+    'WSP polygon minus the cumulative observed track swath as a MultiPolygon in WGS84 (EPSG:4326). Single-part results are still stored as 1-part MultiPolygons for type uniformity. NULL if WSP is fully covered by the observed swath.';
 
 -- ============================================================================
 -- Indexes

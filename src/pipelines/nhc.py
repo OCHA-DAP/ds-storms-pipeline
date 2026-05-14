@@ -22,6 +22,19 @@ from tqdm import tqdm
 
 load_dotenv()
 
+# Silence noisy geopandas/pandas warnings that fire repeatedly in the WSP
+# matching/dissolve loops.
+warnings.filterwarnings(
+    "ignore",
+    message="Geometry column does not contain geometry",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*GeoSeries.notna.*",
+    category=UserWarning,
+)
+
 import ocha_stratus as stratus  # noqa
 
 BUFFER_SPEEDS = [34, 50, 64]
@@ -288,7 +301,7 @@ def process_wsp_polygons(gdf, engine, chunksize):
 
     with engine.connect() as conn:
         gdf.to_sql(
-            name="nhc_wsp_polygon",
+            name="nhc_wsp_polygon_raw",
             con=conn,
             schema="storms",
             if_exists="append",
@@ -301,22 +314,437 @@ def process_wsp_polygons(gdf, engine, chunksize):
     return gdf
 
 
-def run_nhc_current(
-    mode="local", save_to_blob=False, save_dir="storm", chunksize=10000
-):
-    """
-    Main function to process current NHC storms.
+def _to_multipolygon(g):
+    """Coerce a shapely geometry into a MultiPolygon (or None if empty/non-polygonal)."""
+    from shapely.geometry import MultiPolygon, Polygon
+    if g is None or g.is_empty:
+        return None
+    if isinstance(g, MultiPolygon):
+        return g
+    if isinstance(g, Polygon):
+        return MultiPolygon([g])
+    # Rare: dissolve may emit a GeometryCollection if inputs are mixed.
+    polys = [p for p in g.geoms if p.geom_type in ("Polygon", "MultiPolygon")]
+    flat: list[Polygon] = []
+    for p in polys:
+        if isinstance(p, Polygon):
+            flat.append(p)
+        else:
+            flat.extend(p.geoms)
+    return MultiPolygon(flat) if flat else None
 
-    Parameters
-    ----------
-    mode : str
-        Environment stage: "local", "dev", or "prod"
-    save_to_blob : bool
-        Whether to upload raw files to Azure blob storage
-    save_dir : str
-        Directory to save downloaded files
-    chunksize : int
-        Number of rows per batch insert to database
+
+def _list_wsp_issued_times(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+) -> list:
+    """Return the issued_times in nhc_wsp_polygon_raw that also have tracks,
+    after applying the user filters. Sorted ascending."""
+    filters = []
+    params: dict = {}
+    if since:
+        filters.append("t.issued_time >= :since")
+        params["since"] = since
+    if basin:
+        filters.append("t.basin = :basin")
+        params["basin"] = basin
+    if issued_time is not None:
+        filters.append("t.issued_time = :issued_time")
+        params["issued_time"] = issued_time
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    sql = (
+        "SELECT DISTINCT r.issued_time"
+        " FROM storms.nhc_wsp_polygon_raw r"
+        " INNER JOIN storms.nhc_tracks_geo t"
+        " ON t.issued_time = r.issued_time"
+        f" {where}"
+        " ORDER BY r.issued_time"
+    )
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(sql), params)]
+
+
+def _build_matched_for_issued_time(engine, it, chunksize: int = 500) -> int:
+    """Build one issued_time's worth of nhc_wsp_polygon_matched rows.
+
+    Returns the number of rows written.
+    """
+    from ocha_lens.utils.storm import match_wsp_to_tracks
+    from shapely.validation import make_valid
+
+    with engine.connect() as conn:
+        gdf_wsp_raw = gpd.read_postgis(
+            text(
+                "SELECT id, issued_time, wind_threshold_kt, percentage, geometry"
+                " FROM storms.nhc_wsp_polygon_raw"
+                " WHERE issued_time = :it"
+            ),
+            conn, geom_col="geometry", params={"it": it},
+        )
+        gdf_tracks = gpd.read_postgis(
+            text(
+                "SELECT atcf_id, issued_time, geometry"
+                " FROM storms.nhc_tracks_geo WHERE issued_time = :it"
+            ),
+            conn, geom_col="geometry", params={"it": it},
+        )
+
+    if gdf_wsp_raw.empty or gdf_tracks.empty:
+        return 0
+
+    mask = ~gdf_wsp_raw.geometry.is_empty & gdf_wsp_raw.geometry.notna()
+    gdf_wsp_raw = gdf_wsp_raw[mask].copy()
+    gdf_wsp_raw["geometry"] = gdf_wsp_raw["geometry"].apply(
+        lambda g: g if g.is_valid else make_valid(g)
+    )
+
+    matched = match_wsp_to_tracks(gdf_wsp_raw, gdf_tracks)
+    key_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
+    dissolved = matched.dissolve(by=key_cols, dropna=False, as_index=False)
+    dissolved["geometry"] = dissolved["geometry"].apply(_to_multipolygon)
+    dissolved = dissolved[dissolved["geometry"].notna()].copy()
+    if dissolved.empty:
+        return 0
+
+    out = dissolved[key_cols + ["geometry"]].copy()
+    out["geometry"] = out["geometry"].apply(lambda g: g.wkt)
+    with engine.connect() as conn:
+        out.to_sql(
+            name="nhc_wsp_polygon_matched",
+            con=conn,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=stratus.postgres_upsert,
+            chunksize=chunksize,
+        )
+        conn.commit()
+    return len(out)
+
+
+def process_nhc_wsp_polygon_matched(
+    engine,
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+    overwrite: bool = False,
+    chunksize: int = 500,
+) -> None:
+    """Build storms.nhc_wsp_polygon_matched from nhc_wsp_polygon_raw + tracks.
+
+    Processes one issued_time at a time, committing after each. Keeps peak
+    memory bounded by the largest single issuance.
+    """
+    issued_times = _list_wsp_issued_times(
+        engine, since=since, basin=basin, issued_time=issued_time,
+    )
+    if not issued_times:
+        logger.info("No raw WSP issued_times match filters. Skipping.")
+        return
+
+    # Build the skip-set once when overwrite=False.
+    existing_its: set = set()
+    if not overwrite:
+        with engine.connect() as conn:
+            r = conn.execute(text(
+                "SELECT DISTINCT issued_time FROM storms.nhc_wsp_polygon_matched"
+            ))
+            existing_its = {row[0] for row in r}
+
+    n_done = n_written = n_skipped = 0
+    total = len(issued_times)
+    for it in issued_times:
+        if not overwrite and it in existing_its:
+            n_skipped += 1
+            continue
+        rows = _build_matched_for_issued_time(engine, it, chunksize=chunksize)
+        n_done += 1
+        n_written += rows
+        if n_done % 25 == 0 or n_done == total - n_skipped:
+            logger.info(
+                f"matched: {n_done}/{total - n_skipped} issued_times done, "
+                f"{n_written} rows written, {n_skipped} skipped"
+            )
+    logger.info(
+        f"nhc_wsp_polygon_matched done: {n_done} issued_times processed, "
+        f"{n_written} rows written, {n_skipped} skipped."
+    )
+
+
+def run_nhc_wsp_polygon_matched(
+    mode: str = "dev",
+    since: str | None = None,
+    basin: str | None = None,
+    issued_time=None,
+    overwrite: bool = False,
+    chunksize: int = 500,
+) -> None:
+    """CLI wrapper for process_nhc_wsp_polygon_matched."""
+    engine = stratus.get_engine(stage=mode, write=True)
+    process_nhc_wsp_polygon_matched(
+        engine=engine,
+        since=since,
+        basin=basin,
+        issued_time=issued_time,
+        overwrite=overwrite,
+        chunksize=chunksize,
+    )
+
+
+def _list_null_issued_times(
+    engine,
+    since: str | None = None,
+    issued_time=None,
+) -> list:
+    """Return issued_times in nhc_wsp_polygon_matched that have at least one
+    atcf_id IS NULL row, sorted ascending."""
+    filters = ["atcf_id IS NULL"]
+    params: dict = {}
+    if since:
+        filters.append("issued_time >= :since")
+        params["since"] = since
+    if issued_time is not None:
+        filters.append("issued_time = :issued_time")
+        params["issued_time"] = issued_time
+    where = "WHERE " + " AND ".join(filters)
+    sql = (
+        f"SELECT DISTINCT issued_time FROM storms.nhc_wsp_polygon_matched"
+        f" {where} ORDER BY issued_time"
+    )
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(sql), params)]
+
+
+def _fill_nulls_for_issued_time(engine, it) -> tuple[int, int, int]:
+    """For one issued_time, re-match NULL parts using existing non-NULL rows
+    as containment donors, then reconcile the matched table in a single
+    transaction.
+
+    Returns (parts_promoted, parts_still_null, rows_touched).
+    """
+    from ocha_lens.utils.storm import match_wsp_to_tracks
+    from shapely.validation import make_valid
+
+    offset = pd.Timedelta(hours=3)
+
+    with engine.connect() as conn:
+        # Existing matched (atcf_id NOT NULL) → containment donors.
+        gdf_containers = gpd.read_postgis(
+            text(
+                "SELECT issued_time, wind_threshold_kt, percentage, atcf_id,"
+                " geometry FROM storms.nhc_wsp_polygon_matched"
+                " WHERE issued_time = :it AND atcf_id IS NOT NULL"
+            ),
+            conn,
+            geom_col="geometry",
+            params={"it": it},
+        )
+        # NULL rows we want to refine.
+        gdf_null = gpd.read_postgis(
+            text(
+                "SELECT issued_time, wind_threshold_kt, percentage, geometry"
+                " FROM storms.nhc_wsp_polygon_matched"
+                " WHERE issued_time = :it AND atcf_id IS NULL"
+            ),
+            conn,
+            geom_col="geometry",
+            params={"it": it},
+        )
+        # Tracks at issued_time and at issued_time+3h (the matcher's window).
+        gdf_tracks = gpd.read_postgis(
+            text(
+                "SELECT atcf_id, issued_time, valid_time, geometry"
+                " FROM storms.nhc_tracks_geo"
+                " WHERE issued_time IN (:it, :it_plus)"
+            ),
+            conn,
+            geom_col="geometry",
+            params={"it": it, "it_plus": it + offset},
+        )
+
+    if gdf_null.empty:
+        return 0, 0, 0
+
+    # Explode NULL rows into individual parts.
+    mask = ~gdf_null.geometry.is_empty & gdf_null.geometry.notna()
+    gdf_null = gdf_null[mask].copy()
+    gdf_null["geometry"] = gdf_null["geometry"].apply(
+        lambda g: g if g.is_valid else make_valid(g)
+    )
+    null_parts = gdf_null.explode(index_parts=False).reset_index(drop=True)
+    if null_parts.empty:
+        return 0, 0, 0
+
+    # Run the matcher. With no track-line intersect (otherwise these rows
+    # would have matched the first time), promotions come from the
+    # containment fallback against extra_containers (and from any new
+    # matches a lower NULL band might produce within this same call).
+    matched = match_wsp_to_tracks(
+        null_parts,
+        gdf_tracks,
+        extra_containers=gdf_containers if not gdf_containers.empty else None,
+    )
+
+    key_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
+    dissolved = matched.dissolve(by=key_cols, dropna=False, as_index=False)
+    dissolved["geometry"] = dissolved["geometry"].apply(_to_multipolygon)
+    dissolved = dissolved[dissolved["geometry"].notna()].copy()
+    if dissolved.empty:
+        return 0, 0, 0
+
+    # Split into newly-matched (atcf_id NOT NULL) and residual-NULL groups.
+    promoted = dissolved[dissolved["atcf_id"].notna()].copy()
+    residual = dissolved[dissolved["atcf_id"].isna()].copy()
+
+    n_promoted = sum(g.geoms.__len__() if g.geom_type == "MultiPolygon" else 1
+                     for g in promoted.geometry)
+    n_residual = sum(g.geoms.__len__() if g.geom_type == "MultiPolygon" else 1
+                     for g in residual.geometry)
+    n_touched = 0
+
+    # All DB mutations for this issued_time in a single transaction.
+    with engine.begin() as conn:
+        # 1. Drop every existing NULL row for this issued_time so we can
+        #    re-insert just the residual (if any).
+        conn.execute(
+            text(
+                "DELETE FROM storms.nhc_wsp_polygon_matched"
+                " WHERE issued_time = :it AND atcf_id IS NULL"
+            ),
+            {"it": it},
+        )
+
+        # 2. Re-insert residual NULL rows (parts that still didn't match).
+        for _, r in residual.iterrows():
+            conn.execute(
+                text(
+                    "INSERT INTO storms.nhc_wsp_polygon_matched"
+                    " (issued_time, wind_threshold_kt, percentage, atcf_id, geometry)"
+                    " VALUES (:it, :kt, :pct, NULL, ST_GeomFromText(:wkt, 4326))"
+                ),
+                {
+                    "it": r["issued_time"], "kt": int(r["wind_threshold_kt"]),
+                    "pct": int(r["percentage"]), "wkt": r.geometry.wkt,
+                },
+            )
+            n_touched += 1
+
+        # 3. For each newly-promoted (kt, pct, atcf_id), either ST_Union into
+        #    the existing row or INSERT a new one.
+        for _, r in promoted.iterrows():
+            params = {
+                "it": r["issued_time"], "kt": int(r["wind_threshold_kt"]),
+                "pct": int(r["percentage"]), "aid": r["atcf_id"],
+                "wkt": r.geometry.wkt,
+            }
+            existing = conn.execute(
+                text(
+                    "SELECT 1 FROM storms.nhc_wsp_polygon_matched"
+                    " WHERE issued_time = :it AND wind_threshold_kt = :kt"
+                    " AND percentage = :pct AND atcf_id = :aid"
+                ),
+                params,
+            ).first()
+            if existing:
+                conn.execute(
+                    text(
+                        "UPDATE storms.nhc_wsp_polygon_matched"
+                        " SET geometry = ST_Multi(ST_Union(geometry,"
+                        " ST_GeomFromText(:wkt, 4326)))"
+                        " WHERE issued_time = :it AND wind_threshold_kt = :kt"
+                        " AND percentage = :pct AND atcf_id = :aid"
+                    ),
+                    params,
+                )
+            else:
+                conn.execute(
+                    text(
+                        "INSERT INTO storms.nhc_wsp_polygon_matched"
+                        " (issued_time, wind_threshold_kt, percentage, atcf_id, geometry)"
+                        " VALUES (:it, :kt, :pct, :aid,"
+                        " ST_Multi(ST_GeomFromText(:wkt, 4326)))"
+                    ),
+                    params,
+                )
+            n_touched += 1
+
+    return n_promoted, n_residual, n_touched
+
+
+def fill_null_wsp_polygon_matched(
+    engine,
+    since: str | None = None,
+    issued_time=None,
+) -> None:
+    """Re-match the NULL parts in storms.nhc_wsp_polygon_matched using the
+    containment fallback + band ordering provided by
+    ``ocha_lens.utils.storm.match_wsp_to_tracks``.
+
+    Surgical: existing non-NULL rows are only ever extended (ST_Union) with
+    newly-matched parts; nothing is deleted or re-keyed. Existing NULL rows
+    are shrunk (or removed) as their parts find homes.
+
+    The work is per-issued_time, each in its own transaction.
+    """
+    issued_times = _list_null_issued_times(
+        engine, since=since, issued_time=issued_time,
+    )
+    if not issued_times:
+        logger.info(
+            "No issued_times have atcf_id IS NULL rows. Nothing to fill."
+        )
+        return
+
+    total = len(issued_times)
+    n_done = n_promoted = n_residual = 0
+    for it in issued_times:
+        try:
+            p, r, _t = _fill_nulls_for_issued_time(engine, it)
+        except Exception as e:
+            logger.error(f"fill-nulls failed at {it}: {e}", exc_info=True)
+            continue
+        n_done += 1
+        n_promoted += p
+        n_residual += r
+        if n_done % 25 == 0 or n_done == total:
+            logger.info(
+                f"fill-nulls: {n_done}/{total} issued_times — "
+                f"promoted parts: {n_promoted}, still NULL parts: {n_residual}"
+            )
+    logger.info(
+        f"fill-nulls done: {n_done}/{total} issued_times processed, "
+        f"{n_promoted} parts promoted, {n_residual} parts still NULL."
+    )
+
+
+def run_fill_null_wsp_polygon_matched(
+    mode: str = "dev",
+    since: str | None = None,
+    issued_time=None,
+) -> None:
+    """CLI wrapper for fill_null_wsp_polygon_matched."""
+    engine = stratus.get_engine(stage=mode, write=True)
+    fill_null_wsp_polygon_matched(
+        engine=engine, since=since, issued_time=issued_time,
+    )
+
+
+def run_nhc_current(
+    mode="local",
+    save_to_blob=False,
+    save_dir="storm",
+    chunksize=10000,
+) -> dict:
+    """Main function to process current NHC storms.
+
+    Returns a dict with the issued_times of the just-fetched data:
+        {"track_issued_time": pd.Timestamp | None,
+         "wsp_issued_time":   pd.Timestamp | None}
+    Both values come directly from the scraped JSON / shapefile — not
+    from a post-write DB query — so downstream tasks can use them
+    without races against concurrent writers.
     """
     coloredlogs.install(
         logger=logger,
@@ -324,12 +752,12 @@ def run_nhc_current(
     )
 
     logger.info("Starting NHC Current Storms ETL pipeline...")
-
-    # Setting up engine
     engine = stratus.get_engine(stage=mode, write=True)
 
+    track_issued_time = None
+    wsp_issued_time = None
+
     try:
-        # Retrieve current storms data
         df_raw = retrieve_nhc_current(
             stage=mode,
             save_to_blob=save_to_blob,
@@ -338,25 +766,39 @@ def run_nhc_current(
 
         if df_raw is None:
             logger.info("No active storms. Pipeline finished.")
-            return
+            return {
+                "track_issued_time": None,
+                "wsp_issued_time": None,
+            }
 
-        # Process storms and add them to the database
         process_storms(df_raw=df_raw, engine=engine, chunksize=chunksize)
-
-        # Process tracks and add them to the database
         process_tracks(df_raw=df_raw, engine=engine, chunksize=chunksize)
+        if "issued_time" in df_raw.columns:
+            track_issued_time = pd.to_datetime(df_raw["issued_time"]).max()
 
-        # Process wind speed probability polygons
         logger.info("Fetching current WSP polygons...")
         wsp_gdf = lens.nhc.get_wsp()
         if wsp_gdf is not None and len(wsp_gdf) > 0:
             process_wsp_polygons(
                 gdf=wsp_gdf, engine=engine, chunksize=chunksize
             )
+            if "issued_time" in wsp_gdf.columns:
+                wsp_issued_time = pd.to_datetime(
+                    wsp_gdf["issued_time"]
+                ).max()
         else:
             logger.info("No current WSP data available.")
 
         logger.info("Pipeline successfully finished!")
+        logger.info(
+            f"TRACK_ISSUED_TIME={track_issued_time}  "
+            f"WSP_ISSUED_TIME={wsp_issued_time}"
+        )
+
+        return {
+            "track_issued_time": track_issued_time,
+            "wsp_issued_time": wsp_issued_time,
+        }
 
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
@@ -1445,44 +1887,54 @@ def _load_wsp_for_exposure(
     since: str | None = None,
     basin: str | None = None,
     issued_time=None,
+    year: int | None = None,
 ) -> gpd.GeoDataFrame:
-    from ocha_lens.utils.storm import match_wsp_to_tracks
+    """Load matched-per-storm WSP polygons.
 
-    track_filters = []
+    Reads from storms.nhc_wsp_polygon_matched (already one MultiPolygon per
+    (issued_time, wind_threshold_kt, percentage, atcf_id)), so no
+    match_wsp_to_tracks call or post-load dissolve is needed here. To filter
+    by basin, joins on storms.nhc_storms.genesis_basin.
+
+    Pass ``year=YYYY`` to restrict the load to one calendar year — useful
+    for chunking large historical scans.
+    """
+    filters: list[str] = []
+    params: dict = {}
     if since:
-        track_filters.append(f"issued_time >= '{since}'")
-    if basin:
-        track_filters.append(f"basin = '{basin}'")
+        filters.append("m.issued_time >= :since")
+        params["since"] = since
     if issued_time is not None:
-        track_filters.append(f"issued_time = '{issued_time}'")
+        filters.append("m.issued_time = :issued_time")
+        params["issued_time"] = issued_time
+    if basin:
+        filters.append("s.genesis_basin = :basin")
+        params["basin"] = basin
+    if year is not None:
+        filters.append("EXTRACT(YEAR FROM m.issued_time) = :y")
+        params["y"] = year
 
-    track_where = ("WHERE " + " AND ".join(track_filters)) if track_filters else ""
-    wsp_time_filter = (
-        f"WHERE issued_time IN (SELECT DISTINCT issued_time FROM storms.nhc_tracks_geo {track_where})"
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    join = "LEFT JOIN storms.nhc_storms s ON s.atcf_id = m.atcf_id" if basin else ""
+
+    sql = (
+        "SELECT m.issued_time, m.wind_threshold_kt, m.percentage,"
+        " m.atcf_id, m.geometry"
+        " FROM storms.nhc_wsp_polygon_matched m"
+        f" {join}"
+        f" {where}"
     )
 
     with engine.connect() as conn:
-        gdf_wsp_raw = gpd.read_postgis(
-            f"SELECT id, issued_time, wind_threshold_kt, percentage, geometry"
-            f" FROM storms.nhc_wsp_polygon {wsp_time_filter}",
-            conn,
-            geom_col="geometry",
+        gdf_wsp = gpd.read_postgis(
+            text(sql), conn, geom_col="geometry", params=params,
         )
-        track_query = (
-            f"SELECT atcf_id, issued_time, geometry FROM storms.nhc_tracks_geo"
-            f" {track_where}"
-            f" AND issued_time IN (SELECT DISTINCT issued_time FROM storms.nhc_wsp_polygon {wsp_time_filter})"
-            if track_where
-            else
-            f"SELECT atcf_id, issued_time, geometry FROM storms.nhc_tracks_geo"
-            f" WHERE issued_time IN (SELECT DISTINCT issued_time FROM storms.nhc_wsp_polygon)"
-        )
-        gdf_tracks = gpd.read_postgis(track_query, conn, geom_col="geometry")
 
-    logger.info(f"  {len(gdf_wsp_raw)} WSP polygons, {len(gdf_tracks)} track points")
-    gdf_wsp = match_wsp_to_tracks(gdf_wsp_raw, gdf_tracks)
     n_matched = gdf_wsp["atcf_id"].notna().sum()
-    logger.info(f"  {n_matched}/{len(gdf_wsp)} polygons matched to an ATCF ID")
+    logger.info(
+        f"  Loaded {len(gdf_wsp)} matched WSP polygons; "
+        f"{n_matched} with atcf_id, {len(gdf_wsp) - n_matched} unmatched"
+    )
     return gdf_wsp
 
 
@@ -1514,6 +1966,216 @@ def _filter_done_nhc_wsp(wsp: gpd.GeoDataFrame, done_country: pd.DataFrame) -> g
     return wsp[merged["_done"].isna().values].reset_index(drop=True)
 
 
+def _list_years(
+    engine,
+    table: str,
+    since: str | None = None,
+    basin: str | None = None,
+) -> list[int]:
+    """List distinct years in a WSP-shaped table (issued_time TIMESTAMP)."""
+    filters = []
+    params: dict = {}
+    if since:
+        filters.append("t.issued_time >= :since")
+        params["since"] = since
+    if basin:
+        filters.append("s.genesis_basin = :basin")
+        params["basin"] = basin
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    join = (
+        "LEFT JOIN storms.nhc_storms s ON s.atcf_id = t.atcf_id"
+        if basin else ""
+    )
+    sql = (
+        "SELECT DISTINCT EXTRACT(YEAR FROM t.issued_time)::int AS y"
+        f" FROM storms.{table} t {join} {where}"
+        " ORDER BY y"
+    )
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(sql), params)]
+
+
+def _list_matched_issued_times(
+    engine, since: str | None = None, basin: str | None = None,
+) -> list:
+    """List distinct issued_times in nhc_wsp_polygon_matched, filtered."""
+    filters = []
+    params: dict = {}
+    if since:
+        filters.append("m.issued_time >= :since")
+        params["since"] = since
+    if basin:
+        filters.append("s.genesis_basin = :basin")
+        params["basin"] = basin
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    join = "LEFT JOIN storms.nhc_storms s ON s.atcf_id = m.atcf_id" if basin else ""
+    sql = (
+        "SELECT DISTINCT m.issued_time"
+        " FROM storms.nhc_wsp_polygon_matched m"
+        f" {join}"
+        f" {where}"
+        " ORDER BY m.issued_time"
+    )
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(sql), params)]
+
+
+def _run_exp_year_chunk(
+    *,
+    table_label: str,
+    load_chunk,                    # callable(engine, year) -> gpd.GeoDataFrame
+    out_table: str,
+    done_loader,                   # callable(engine) -> done_df
+    done_filter,                   # callable(wsp_in, done_country) -> wsp_in
+    countries,
+    since: str | None,
+    basin: str | None,
+    overwrite: bool,
+    mode: str,
+    issued_time,
+    chunk_source_table: str,
+    single_year: int | None = None,
+) -> None:
+    """Shared year-chunked WSP exposure loop.
+
+    Loads one calendar year of WSP polygons at a time, builds a spatial
+    index across that year, then iterates countries (tqdm). adm/pop are
+    loaded once and reused across all years.
+    """
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from tqdm import tqdm
+    from src.utils.exposure import (
+        GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop,
+    )
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+    engine = stratus.get_engine(stage=mode, write=True)
+
+    if single_year is not None:
+        years = [int(single_year)]
+    elif issued_time is not None:
+        try:
+            it_dt = pd.Timestamp(issued_time)
+            years = [int(it_dt.year)]
+        except Exception:
+            years = _list_years(
+                engine, chunk_source_table, since=since, basin=basin,
+            )
+    else:
+        years = _list_years(
+            engine, chunk_source_table, since=since, basin=basin,
+        )
+
+    if not years:
+        logger.info(f"{table_label}: no years match filters. Skipping.")
+        return
+    logger.info(f"{table_label}: {len(years)} year chunks: {years}")
+
+    gdf_adm1 = load_adm1(countries)
+    country_list = sorted(gdf_adm1["iso_3"].unique())
+    # Pre-dissolve country geometries once — avoids redoing dissolve per year.
+    country_geoms = {
+        iso3: gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
+        for iso3 in country_list
+    }
+    da_wp_global, da_wp_wrapped = load_pop()
+
+    done_df = (
+        pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
+        else done_loader(engine)
+    )
+
+    total_processed = 0
+    for year in years:
+        logger.info(f"{table_label}: loading year {year}…")
+        gdf_wsp = load_chunk(engine, year)
+        if gdf_wsp.empty:
+            logger.info(f"{table_label}: year {year} has no polygons; skipping")
+            continue
+        if issued_time is not None:
+            gdf_wsp = gdf_wsp[gdf_wsp["issued_time"] == pd.Timestamp(issued_time)]
+            if gdf_wsp.empty:
+                continue
+        logger.info(
+            f"{table_label}: year {year} → {len(gdf_wsp)} polygons; "
+            f"running country loop"
+        )
+        gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
+        wsp_sindex = gdf_wsp.sindex
+
+        year_writes = 0
+        pbar = tqdm(
+            country_list, desc=f"{table_label} {year}", unit="country",
+            leave=False,
+        )
+        for iso3 in pbar:
+            adm_geom = country_geoms[iso3]
+            minx, _, maxx, _ = adm_geom.bounds
+            wrap = maxx > 160 or minx < -160
+
+            if wrap:
+                da_wp = da_wp_wrapped
+                adm_geom_local = (
+                    gpd.GeoSeries([adm_geom], crs=4326)
+                    .to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+                )
+                wsp_in = gdf_wsp_anti[gdf_wsp_anti.intersects(adm_geom_local)]
+            else:
+                adm_geom_local = adm_geom
+                da_wp = da_wp_global
+                candidate_idx = list(wsp_sindex.intersection(adm_geom.bounds))
+                if not candidate_idx:
+                    continue
+                candidates = gdf_wsp.iloc[candidate_idx]
+                wsp_in = candidates[candidates.intersects(adm_geom)]
+
+            if wsp_in.empty:
+                continue
+
+            if not overwrite and not done_df.empty:
+                done_country = done_df[done_df["pcode"] == iso3]
+                if not done_country.empty:
+                    wsp_in = done_filter(wsp_in, done_country)
+                    if wsp_in.empty:
+                        continue
+
+            da_wp_country = da_wp.rio.clip([adm_geom_local], all_touched=True)
+            df = calculate_exposure(wsp_in, da_wp_country)
+            df["iso3"] = iso3
+            df["pcode"] = iso3
+            df["admin_level"] = _EXP_ADMIN_LEVEL
+            del da_wp_country
+
+            out = df.drop(columns=["id"], errors="ignore")
+            dups = out[out.duplicated(subset=_WSP_EXP_KEY_COLS, keep=False)]
+            assert dups.empty, (
+                f"Duplicate keys reached {out_table} writer: "
+                f"{dups[_WSP_EXP_KEY_COLS].to_dict('records')}"
+            )
+            with engine.connect() as conn:
+                out.to_sql(
+                    out_table, conn,
+                    schema="storms",
+                    if_exists="append",
+                    index=False,
+                    method=stratus.postgres_upsert,
+                )
+                conn.commit()
+            year_writes += 1
+            total_processed += 1
+            pbar.set_postfix(writes=year_writes)
+        pbar.close()
+        logger.info(
+            f"{table_label}: year {year} done — {year_writes} country writes "
+            f"({total_processed} cumulative)"
+        )
+        del gdf_wsp, gdf_wsp_anti, wsp_sindex
+
+    logger.info(f"{table_label}: all years done; {total_processed} writes.")
+    engine.dispose()
+
+
 def run_nhc_wsp_exp(
     countries: list[str] | None = None,
     since: str | None = None,
@@ -1522,90 +2184,23 @@ def run_nhc_wsp_exp(
     mode: str = "dev",
     issued_time=None,
 ) -> None:
-    import warnings
-    from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
-
-    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
-    engine = stratus.get_engine(stage=mode, write=True)
-
-    logger.info("Loading WSP polygons for exposure calculation...")
-    gdf_wsp = _load_wsp_for_exposure(engine, since=since, basin=basin, issued_time=issued_time)
-    if gdf_wsp.empty:
-        logger.info("No WSP polygons found for the given filters. Skipping.")
-        return
-    gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
-
-    gdf_adm1 = load_adm1(countries)
-    country_list = sorted(gdf_adm1["iso_3"].unique())
-    logger.info(f"Processing {len(country_list)} countries...")
-
-    da_wp_global, da_wp_wrapped = load_pop()
-
-    done_df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite else _load_done_nhc_wsp_exp(engine)
-
-    wsp_sindex = gdf_wsp.sindex
-    processed = skipped = 0
-    for i, iso3 in enumerate(country_list, 1):
-        prefix = f"[{i}/{len(country_list)}] {iso3}"
-
-        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        minx, _, maxx, _ = adm_geom.bounds
-        wrap = maxx > 160 or minx < -160
-
-        if wrap:
-            da_wp = da_wp_wrapped
-            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            wsp_in = gdf_wsp_anti[gdf_wsp_anti.intersects(adm_geom)]
-        else:
-            da_wp = da_wp_global
-            candidate_idx = list(wsp_sindex.intersection(adm_geom.bounds))
-            if not candidate_idx:
-                skipped += 1
-                continue
-            candidates = gdf_wsp.iloc[candidate_idx]
-            wsp_in = candidates[candidates.intersects(adm_geom)]
-
-        if wsp_in.empty:
-            skipped += 1
-            continue
-
-        if not overwrite and not done_df.empty:
-            done_country = done_df[done_df["pcode"] == iso3]
-            if not done_country.empty:
-                wsp_in = _filter_done_nhc_wsp(wsp_in, done_country)
-                if wsp_in.empty:
-                    skipped += 1
-                    logger.info(f"{prefix} — all done, skipping")
-                    continue
-
-        logger.info(f"{prefix} — {len(wsp_in)} intersecting, calculating...")
-
-        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-        df = calculate_exposure(wsp_in, da_wp_country)
-        df["iso3"] = iso3
-        df["pcode"] = iso3
-        df["admin_level"] = _EXP_ADMIN_LEVEL
-        del da_wp_country
-
-        out = df.drop(columns=["id"], errors="ignore")
-        out = out.drop_duplicates(subset=_WSP_EXP_KEY_COLS, keep="last")
-        with engine.connect() as conn:
-            out.to_sql(
-                "nhc_wsp_exposure",
-                conn,
-                schema="storms",
-                if_exists="append",
-                index=False,
-                method=stratus.postgres_upsert,
-            )
-            conn.commit()
-        n_exposed = int((df["pop_exposed"] > 0).sum())
-        logger.info(f"{prefix} — done ({n_exposed} rows with pop > 0)")
-        processed += 1
-
-    logger.info(f"WSP exposure done: {processed} written, {skipped} already done.")
-    engine.dispose()
+    """WSP exposure, chunked by year so peak memory stays bounded."""
+    _run_exp_year_chunk(
+        table_label="WSP exposure",
+        load_chunk=lambda eng, year: _load_wsp_for_exposure(
+            eng, basin=basin, year=year,
+        ),
+        out_table="nhc_wsp_exposure",
+        done_loader=_load_done_nhc_wsp_exp,
+        done_filter=_filter_done_nhc_wsp,
+        countries=countries,
+        since=since,
+        basin=basin,
+        overwrite=overwrite,
+        mode=mode,
+        issued_time=issued_time,
+        chunk_source_table="nhc_wsp_polygon_matched",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1650,21 +2245,54 @@ def process_nhc_wsp_fcastonly_polygons(
     chunksize: int = 500,
 ) -> None:
     from datetime import timedelta
-    from shapely import wkt as shapely_wkt
     from shapely.geometry import box as shapely_box
+    from shapely.validation import make_valid
     _world = shapely_box(-180, -90, 180, 90)
 
-    logger.info("Loading WSP polygons for fcastonly cut-out...")
-    gdf_wsp = _load_wsp_for_exposure(engine, since=since, basin=basin, issued_time=issued_time)
-    if gdf_wsp.empty:
-        logger.info("No WSP polygons found. Skipping.")
+    # Iterate per issued_time so memory only holds one issuance's polygons +
+    # its obsv-buffer lookup at a time. The function loops by recursing into
+    # itself for each issued_time when none is specified.
+    if issued_time is None:
+        issued_times = _list_matched_issued_times(
+            engine, since=since, basin=basin,
+        )
+        if not issued_times:
+            logger.info(
+                "No matched WSP issued_times match filters. Skipping."
+            )
+            return
+        logger.info(
+            f"WSP fcastonly: {len(issued_times)} issued_times to process"
+        )
+        existing_its_skip: set = set()
+        if not overwrite:
+            with engine.connect() as conn:
+                r = conn.execute(text(
+                    "SELECT DISTINCT issued_time"
+                    " FROM storms.nhc_wsp_fcastonly_polygon"
+                ))
+                existing_its_skip = {row[0] for row in r}
+        for n, it in enumerate(issued_times, 1):
+            if not overwrite and it in existing_its_skip:
+                continue
+            process_nhc_wsp_fcastonly_polygons(
+                engine=engine, issued_time=it,
+                overwrite=overwrite, chunksize=chunksize,
+            )
+            if n % 25 == 0 or n == len(issued_times):
+                logger.info(
+                    f"WSP fcastonly: {n}/{len(issued_times)} issued_times"
+                )
+        logger.info("WSP fcastonly polygons: all issued_times processed.")
         return
-    logger.info(f"Loaded {len(gdf_wsp)} WSP rows.")
+
+    logger.info(f"Loading WSP polygons for fcastonly cut-out @ {issued_time}...")
+    gdf_wsp = _load_wsp_for_exposure(engine, issued_time=issued_time, basin=basin)
+    if gdf_wsp.empty:
+        return
 
     atcf_ids = [a for a in gdf_wsp["atcf_id"].dropna().unique()]
-    logger.info(f"Loading obsv buffers for {len(atcf_ids)} storms...")
     obsv_lookup = _load_obsv_buffer_lookup(engine, atcf_ids)
-    logger.info(f"Loaded {len(obsv_lookup)} obsv buffer entries.")
 
     if not overwrite:
         with engine.connect() as conn:
@@ -1672,8 +2300,10 @@ def process_nhc_wsp_fcastonly_polygons(
                 text(
                     "SELECT issued_time, wind_threshold_kt, percentage, atcf_id"
                     " FROM storms.nhc_wsp_fcastonly_polygon"
+                    " WHERE issued_time = :it"
                 ),
                 conn,
+                params={"it": issued_time},
             )
         SENTINEL = "__null__"
         existing_keys = set(
@@ -1703,7 +2333,10 @@ def process_nhc_wsp_fcastonly_polygons(
             already_done += 1
             continue
 
-        wsp_geom = row.geometry.intersection(_world)
+        raw_geom = row.geometry
+        if not raw_geom.is_valid:
+            raw_geom = make_valid(raw_geom)
+        wsp_geom = raw_geom.intersection(_world)
         if wsp_geom.is_empty:
             continue
         obsv_valid_time = None
@@ -1728,6 +2361,11 @@ def process_nhc_wsp_fcastonly_polygons(
         else:
             no_obsv += 1
 
+        # Coerce single Polygon results into a 1-part MultiPolygon so the
+        # nhc_wsp_fcastonly_polygon column type stays uniform.
+        if result_geom is not None:
+            result_geom = _to_multipolygon(result_geom)
+
         batch.append({
             "issued_time": it,
             "wind_threshold_kt": kt,
@@ -1744,17 +2382,24 @@ def process_nhc_wsp_fcastonly_polygons(
     if batch:
         _write_wsp_fcastonly_batch(batch, engine, chunksize)
 
-    logger.info(
-        f"WSP fcastonly polygons done: {offset_used} with +3h offset, "
-        f"{exact_used} exact-time fallback, {no_obsv} no obsv buffer, "
-        f"{already_done} skipped (already done)."
-    )
+    # When called for a single issued_time, the parent loop logs progress —
+    # only log a per-issuance summary when the run touched something.
+    if offset_used + exact_used + no_obsv > 0:
+        logger.debug(
+            f"  {issued_time}: {offset_used} offset, {exact_used} exact, "
+            f"{no_obsv} no-obsv, {already_done} skipped"
+        )
 
 
 def _write_wsp_fcastonly_batch(batch: list[dict], engine, chunksize: int) -> None:
     df = pd.DataFrame(batch)
     key_cols = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"]
-    df = df.drop_duplicates(subset=key_cols, keep="last")
+    # Invariant: matched-table input gives one row per key; the writer should
+    # never see duplicates. Fail loudly if it ever does.
+    dups = df[df.duplicated(subset=key_cols, keep=False)]
+    assert dups.empty, (
+        f"Duplicate keys reached _write_wsp_fcastonly_batch: {dups[key_cols].to_dict('records')}"
+    )
     with engine.connect() as conn:
         df.to_sql(
             name="nhc_wsp_fcastonly_polygon",
@@ -1807,6 +2452,7 @@ def _load_wsp_fcastonly_for_exposure(
     since: str | None = None,
     basin: str | None = None,
     issued_time=None,
+    year: int | None = None,
 ) -> gpd.GeoDataFrame:
     filters = []
     if since:
@@ -1815,20 +2461,23 @@ def _load_wsp_fcastonly_for_exposure(
         filters.append(f"s.genesis_basin = '{basin}'")
     if issued_time is not None:
         filters.append(f"p.issued_time = '{issued_time}'")
+    if year is not None:
+        filters.append(f"EXTRACT(YEAR FROM p.issued_time) = {year}")
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
 
     if basin:
-        where = "WHERE " + " AND ".join(filters)
         query = (
-            f"SELECT p.issued_time, p.wind_threshold_kt, p.percentage, p.atcf_id, p.geometry"
-            f" FROM storms.nhc_wsp_fcastonly_polygon p"
-            f" JOIN storms.nhc_storms s ON p.atcf_id = s.atcf_id"
+            "SELECT p.issued_time, p.wind_threshold_kt, p.percentage,"
+            " p.atcf_id, p.geometry"
+            " FROM storms.nhc_wsp_fcastonly_polygon p"
+            " JOIN storms.nhc_storms s ON p.atcf_id = s.atcf_id"
             f" {where}"
         )
     else:
-        where = ("WHERE " + " AND ".join(filters)) if filters else ""
         query = (
-            f"SELECT issued_time, wind_threshold_kt, percentage, atcf_id, geometry"
-            f" FROM storms.nhc_wsp_fcastonly_polygon {where}"
+            "SELECT p.issued_time, p.wind_threshold_kt, p.percentage,"
+            " p.atcf_id, p.geometry"
+            f" FROM storms.nhc_wsp_fcastonly_polygon p {where}"
         )
 
     with engine.connect() as conn:
@@ -1863,6 +2512,31 @@ def _filter_done_nhc_wsp_fcastonly(wsp: gpd.GeoDataFrame, done_country: pd.DataF
     return wsp[merged["_done"].isna().values].reset_index(drop=True)
 
 
+def _list_fcastonly_issued_times(
+    engine, since: str | None = None, basin: str | None = None,
+) -> list:
+    """List distinct issued_times in nhc_wsp_fcastonly_polygon, filtered."""
+    filters = []
+    params: dict = {}
+    if since:
+        filters.append("p.issued_time >= :since")
+        params["since"] = since
+    if basin:
+        filters.append("s.genesis_basin = :basin")
+        params["basin"] = basin
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    join = "JOIN storms.nhc_storms s ON s.atcf_id = p.atcf_id" if basin else ""
+    sql = (
+        "SELECT DISTINCT p.issued_time"
+        " FROM storms.nhc_wsp_fcastonly_polygon p"
+        f" {join}"
+        f" {where}"
+        " ORDER BY p.issued_time"
+    )
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(sql), params)]
+
+
 def run_nhc_wsp_fcastonly_exp(
     countries: list[str] | None = None,
     since: str | None = None,
@@ -1870,91 +2544,30 @@ def run_nhc_wsp_fcastonly_exp(
     overwrite: bool = False,
     mode: str = "dev",
     issued_time=None,
+    year: int | None = None,
 ) -> None:
-    import warnings
-    from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+    """WSP fcastonly exposure, chunked by year.
 
-    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
-    engine = stratus.get_engine(stage=mode, write=True)
-
-    logger.info("Loading WSP fcastonly polygons for exposure calculation...")
-    gdf_wsp = _load_wsp_fcastonly_for_exposure(engine, since=since, basin=basin, issued_time=issued_time)
-    if gdf_wsp.empty:
-        logger.info("No WSP fcastonly polygons found for the given filters. Skipping.")
-        return
-    gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
-
-    gdf_adm1 = load_adm1(countries)
-    country_list = sorted(gdf_adm1["iso_3"].unique())
-    logger.info(f"Processing {len(country_list)} countries...")
-
-    da_wp_global, da_wp_wrapped = load_pop()
-
-    done_df = pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite else _load_done_nhc_wsp_fcastonly_exp(engine)
-
-    wsp_sindex = gdf_wsp.sindex
-    processed = skipped = 0
-    for i, iso3 in enumerate(country_list, 1):
-        prefix = f"[{i}/{len(country_list)}] {iso3}"
-
-        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        minx, _, maxx, _ = adm_geom.bounds
-        wrap = maxx > 160 or minx < -160
-
-        if wrap:
-            da_wp = da_wp_wrapped
-            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            wsp_in = gdf_wsp_anti[gdf_wsp_anti.intersects(adm_geom)]
-        else:
-            da_wp = da_wp_global
-            candidate_idx = list(wsp_sindex.intersection(adm_geom.bounds))
-            if not candidate_idx:
-                skipped += 1
-                continue
-            candidates = gdf_wsp.iloc[candidate_idx]
-            wsp_in = candidates[candidates.intersects(adm_geom)]
-
-        if wsp_in.empty:
-            skipped += 1
-            continue
-
-        if not overwrite and not done_df.empty:
-            done_country = done_df[done_df["pcode"] == iso3]
-            if not done_country.empty:
-                wsp_in = _filter_done_nhc_wsp_fcastonly(wsp_in, done_country)
-                if wsp_in.empty:
-                    skipped += 1
-                    logger.info(f"{prefix} — all done, skipping")
-                    continue
-
-        logger.info(f"{prefix} — {len(wsp_in)} intersecting, calculating...")
-
-        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-        df = calculate_exposure(wsp_in, da_wp_country)
-        df["iso3"] = iso3
-        df["pcode"] = iso3
-        df["admin_level"] = _EXP_ADMIN_LEVEL
-        del da_wp_country
-
-        out = df.drop(columns=["id"], errors="ignore")
-        out = out.drop_duplicates(subset=_WSP_EXP_KEY_COLS, keep="last")
-        with engine.connect() as conn:
-            out.to_sql(
-                "nhc_wsp_fcastonly_exposure",
-                conn,
-                schema="storms",
-                if_exists="append",
-                index=False,
-                method=stratus.postgres_upsert,
-            )
-            conn.commit()
-        n_exposed = int((df["pop_exposed"] > 0).sum())
-        logger.info(f"{prefix} — done ({n_exposed} rows with pop > 0)")
-        processed += 1
-
-    logger.info(f"WSP fcastonly exposure done: {processed} written, {skipped} already done.")
-    engine.dispose()
+    Pass year=YYYY to restrict to a single calendar year — useful for
+    parallelizing across years from the shell.
+    """
+    _run_exp_year_chunk(
+        table_label="WSP fcastonly exposure",
+        load_chunk=lambda eng, y: _load_wsp_fcastonly_for_exposure(
+            eng, basin=basin, year=y,
+        ),
+        out_table="nhc_wsp_fcastonly_exposure",
+        done_loader=_load_done_nhc_wsp_fcastonly_exp,
+        done_filter=_filter_done_nhc_wsp_fcastonly,
+        countries=countries,
+        since=since,
+        basin=basin,
+        overwrite=overwrite,
+        mode=mode,
+        issued_time=issued_time,
+        chunk_source_table="nhc_wsp_fcastonly_polygon",
+        single_year=year,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1997,7 +2610,7 @@ def run_nhc_realtime(
             text("SELECT MAX(issued_time) FROM storms.nhc_tracks_geo"), conn
         ).iloc[0, 0]
         wsp_issued_time = (
-            pd.read_sql(text("SELECT MAX(issued_time) FROM storms.nhc_wsp_polygon"), conn).iloc[0, 0]
+            pd.read_sql(text("SELECT MAX(issued_time) FROM storms.nhc_wsp_polygon_raw"), conn).iloc[0, 0]
             if wsp_gdf is not None
             else None
         )
@@ -2059,6 +2672,16 @@ def run_nhc_realtime(
         logger.error(f"NHC forecast-only track exposure failed: {e}", exc_info=True)
 
     if wsp_issued_time is not None:
+        try:
+            logger.info("Building NHC WSP polygon matched table...")
+            process_nhc_wsp_polygon_matched(
+                engine=write_engine, issued_time=wsp_issued_time
+            )
+        except Exception as e:
+            logger.error(
+                f"NHC WSP polygon matched build failed: {e}", exc_info=True
+            )
+
         try:
             logger.info("Running NHC WSP exposure...")
             run_nhc_wsp_exp(mode=mode, issued_time=wsp_issued_time)
