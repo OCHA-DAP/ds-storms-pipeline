@@ -1,26 +1,15 @@
 # Databricks Asset Bundle — source-controlled definition of the NHC
-# realtime job. Deploy with:
+# pipeline job.
 #
-#   databricks bundle deploy -t prod        # or -t dev
-#   databricks bundle run nhc_realtime -t prod
+#   databricks bundle validate -t dev -p default
+#   databricks bundle deploy   -t dev -p default
+#   databricks bundle run nhc_pipeline -t dev -p default
 #
-# Asset Bundles are the "GHA-style YAML in the repo" answer to defining
-# Databricks jobs declaratively. The bundle owns the job spec, the
-# schedule, the cluster, and (importantly here) the library deps for
-# each task — no more clicking around the UI.
-#
-# Docs: https://docs.databricks.com/dev-tools/bundles/
+# Bundle docs: https://docs.databricks.com/dev-tools/bundles/
 
 bundle:
   name: ds-storms-pipeline
 
-# ---------------------------------------------------------------------
-# Per-environment overrides. Use -t <target> at deploy/run time.
-# ---------------------------------------------------------------------
-# workspace.host does NOT support ${var.…} interpolation. Hardcode it
-# per target (preferred) — OR omit the `workspace:` block entirely and
-# let the CLI resolve the host from your `databricks auth login`
-# profile / DATABRICKS_HOST env var.
 targets:
   dev:
     mode: development
@@ -40,155 +29,84 @@ variables:
   mode:
     description: Pipeline --mode (dev | prod)
     default: dev
-  # The ocha-lens git ref that has the new strict matcher + containment
-  # fallback + schemas. Pin until merged to main.
-  ocha_lens_ref:
-    description: ocha-lens git ref to install
-    default: wsp-exp-calc
-  # All-purpose interactive cluster the tasks run on. Look up via
+  # The git branch the cluster pulls run_pipeline.py from. Switch to
+  # "main" once your branch merges.
+  git_branch:
+    description: Branch to pull run_pipeline.py from
+    default: wsp-adm0-exp
+  # Interactive cluster the task runs on. Look up via
   # `databricks clusters list -p default --cluster-sources UI,API`.
   existing_cluster_id:
-    description: ID of the interactive cluster to run tasks on
+    description: ID of the interactive cluster
     default: "0515-161935-i2w5mxhc"
 
-# ---------------------------------------------------------------------
-# Shared cluster config + library list reused by every task.
-#
-# Defining the library list once here means you don't enter dependencies
-# manually per task in the UI — the deploy step applies them everywhere.
-# ---------------------------------------------------------------------
+# =====================================================================
+# Single job for both realtime AND backfill. The cron schedule fires
+# with all parameters at their defaults → nhc-realtime against prod.
+# To backfill or re-run anything: click "Run now with different
+# parameters" in the UI and override `subcommand` (e.g.
+# nhc-wsp-fcastonly-exp) + whichever filter applies (year, since,
+# issued_time). The thin dispatcher at databricks/dispatch.py turns
+# the parameter values into a normal `python run_pipeline.py …`
+# invocation, so behaviour matches local CLI exactly.
+# =====================================================================
 resources:
   jobs:
-    nhc_realtime:
-      name: NHC Realtime (${var.mode})
-      # Run at minute 0, every 3 hours (00:00, 03:00, …, 21:00 UTC).
-      # Quartz cron: seconds minutes hours day-of-month month day-of-week.
+    nhc_pipeline:
+      name: NHC Pipeline
+      # Pull run_pipeline.py + src/ from this git ref. Same model as
+      # the existing "Run NHC" job (266763033249426).
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      # Realtime cron: minute 0, every 3 hours UTC.
       schedule:
         quartz_cron_expression: "0 0 0/3 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
-      # Tasks run on an existing interactive cluster (see
-      # var.existing_cluster_id). That cluster carries the policy-bound
-      # spark_env_vars / secrets at the cluster level; nothing to
-      # duplicate here.
-
-      # Job-level parameters available as {{job.parameters.X}} in tasks.
+      # Job parameters appear in the DBX UI as a form when you click
+      # "Run now with different parameters". Cron runs use the defaults.
       parameters:
-        - name: mode
+        - name: subcommand     # which run_pipeline.py subcommand
+          default: nhc-realtime
+        - name: mode           # dev | prod
           default: ${var.mode}
+        - name: issued_time    # YYYY-MM-DDTHH (single advisory)
+          default: ""
+        - name: since          # YYYY-MM-DD (date lower bound)
+          default: ""
+        - name: year           # YYYY (year-chunked exposure pipelines)
+          default: ""
+        - name: overwrite      # "true" to pass --overwrite
+          default: ""
+        - name: fill_nulls     # "true" to pass --fill-nulls (matched only)
+          default: ""
 
       tasks:
-        # ============================================================ #
-        # A. ETL — scrape CurrentStorms.json + WSP, write raw tables,
-        #    emit (track_issued_time, wsp_issued_time) as task values.
-        # ============================================================ #
-        - task_key: etl
+        - task_key: run
           existing_cluster_id: ${var.existing_cluster_id}
-          notebook_task:
-            notebook_path: ./databricks/notebooks/01_etl.py
-            base_parameters:
-              mode: "{{job.parameters.mode}}"
-          libraries: &storm_libs
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.year}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.fill_nulls}}"
+          libraries:
             - pypi: { package: "ocha-stratus" }
             - pypi:
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@${var.ocha_lens_ref}"
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@wsp-exp-calc"
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "rasterio" }
             - pypi: { package: "rioxarray" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
-
-        # ============================================================ #
-        # B. Tracks processing — fcast/obsv/fcastonly buffers, one run
-        #    each, scoped to the issued_time emitted by A.
-        # ============================================================ #
-        - task_key: tracks_processing
-          existing_cluster_id: ${var.existing_cluster_id}
-          depends_on: [{ task_key: etl }]
-          notebook_task:
-            notebook_path: ./databricks/notebooks/02_tracks_processing.py
-            base_parameters:
-              mode: "{{job.parameters.mode}}"
-              issued_time: "{{tasks.etl.values.track_issued_time}}"
-          libraries: *storm_libs
-
-        # ============================================================ #
-        # C. Tracks exposure — three exposure tables off the buffers.
-        # ============================================================ #
-        - task_key: tracks_exposure
-          existing_cluster_id: ${var.existing_cluster_id}
-          depends_on: [{ task_key: tracks_processing }]
-          notebook_task:
-            notebook_path: ./databricks/notebooks/03_tracks_exposure.py
-            base_parameters:
-              mode: "{{job.parameters.mode}}"
-              issued_time: "{{tasks.etl.values.track_issued_time}}"
-          libraries: *storm_libs
-
-        # ============================================================ #
-        # D. WSP processing — matched table + fcastonly clipping. Needs
-        #    obsv buffers from B, so depends on tracks_processing.
-        # ============================================================ #
-        - task_key: wsp_processing
-          existing_cluster_id: ${var.existing_cluster_id}
-          depends_on: [{ task_key: tracks_processing }]
-          notebook_task:
-            notebook_path: ./databricks/notebooks/04_wsp_processing.py
-            base_parameters:
-              mode: "{{job.parameters.mode}}"
-              wsp_issued_time: "{{tasks.etl.values.wsp_issued_time}}"
-          libraries: *storm_libs
-
-        # ============================================================ #
-        # E. WSP exposure — full WSP exp + fcastonly WSP exp.
-        # ============================================================ #
-        - task_key: wsp_exposure
-          existing_cluster_id: ${var.existing_cluster_id}
-          depends_on: [{ task_key: wsp_processing }]
-          notebook_task:
-            notebook_path: ./databricks/notebooks/05_wsp_exposure.py
-            base_parameters:
-              mode: "{{job.parameters.mode}}"
-              wsp_issued_time: "{{tasks.etl.values.wsp_issued_time}}"
-          libraries: *storm_libs
-
-    # =================================================================== #
-    # nhc_backfill — manual-only job for re-running a single pipeline step
-    # over historical data. No schedule. Exposed as job parameters so a
-    # user can click "Run with different parameters" in the DBX UI and
-    # fill in the form (same UX as GHA workflow_dispatch inputs).
-    # =================================================================== #
-    nhc_backfill:
-      name: NHC Backfill
-      # No schedule — manual dispatch only.
-      parameters:
-        - name: step
-          default: wsp-fcastonly-polygons
-        - name: since
-          default: ""
-        - name: issued_time
-          default: ""
-        - name: year
-          default: ""
-        - name: overwrite
-          default: "true"
-        - name: fill_nulls
-          default: "false"
-        - name: mode
-          default: ${var.mode}
-      tasks:
-        - task_key: run
-          existing_cluster_id: ${var.existing_cluster_id}
-          notebook_task:
-            notebook_path: ./databricks/notebooks/backfill.py
-            base_parameters:
-              step: "{{job.parameters.step}}"
-              since: "{{job.parameters.since}}"
-              issued_time: "{{job.parameters.issued_time}}"
-              year: "{{job.parameters.year}}"
-              overwrite: "{{job.parameters.overwrite}}"
-              fill_nulls: "{{job.parameters.fill_nulls}}"
-              mode: "{{job.parameters.mode}}"
-          libraries: *storm_libs
+            - pypi: { package: "geoalchemy2" }
