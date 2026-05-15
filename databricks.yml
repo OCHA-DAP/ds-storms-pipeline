@@ -29,64 +29,178 @@ variables:
   mode:
     description: Pipeline --mode (dev | prod)
     default: dev
-  # The git branch the cluster pulls run_pipeline.py from. Switch to
-  # "main" once your branch merges.
   git_branch:
-    description: Branch to pull run_pipeline.py from
+    description: Branch the cluster pulls run_pipeline.py from
     default: wsp-adm0-exp
-  # Interactive cluster the task runs on. Look up via
-  # `databricks clusters list -p default --cluster-sources UI,API`.
   existing_cluster_id:
-    description: ID of the interactive cluster
+    description: ID of the interactive cluster to run tasks on
     default: "0515-161935-i2w5mxhc"
 
 # =====================================================================
-# Single job for both realtime AND backfill. The cron schedule fires
-# with all parameters at their defaults → nhc-realtime against prod.
-# To backfill or re-run anything: click "Run now with different
-# parameters" in the UI and override `subcommand` (e.g.
-# nhc-wsp-fcastonly-exp) + whichever filter applies (year, since,
-# issued_time). The thin dispatcher at databricks/dispatch.py turns
-# the parameter values into a normal `python run_pipeline.py …`
-# invocation, so behaviour matches local CLI exactly.
+# ONE job for both realtime and backfill.
+#
+#   * Cron runs (or any run with default parameters) → "realtime"
+#     route fires: 5 chained tasks (etl → tracks_processing →
+#     {tracks_exposure, wsp_processing → wsp_exposure}). Each task is
+#     one logical pipeline stage with its own status / retry in the UI.
+#
+#   * "Run with different parameters" → override `subcommand` to a
+#     specific CLI subcommand (e.g. nhc-wsp-fcastonly-exp), fill in
+#     filters (since / issued_time / year / overwrite / fill_nulls) →
+#     `backfill` task fires, realtime chain skipped.
+#
+# The `route` condition_task gates which branch runs. The dispatcher
+# at databricks/dispatch.py turns the seven positional parameters into
+# the right `python run_pipeline.py …` invocation(s) and, after the
+# ETL stage, hands issued_times to downstream realtime tasks via DBX
+# task values.
 # =====================================================================
 resources:
   jobs:
     nhc_pipeline:
       name: NHC Pipeline
-      # Pull run_pipeline.py + src/ from this git ref. Same model as
-      # the existing "Run NHC" job (266763033249426).
       git_source:
         git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
-      # Realtime cron: minute 0, every 3 hours UTC.
       schedule:
         quartz_cron_expression: "0 0 0/3 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
-      # Job parameters appear in the DBX UI as a form when you click
-      # "Run now with different parameters". Cron runs use the defaults.
+      # Sequential — no concurrent overlapping runs; downstream tasks
+      # rely on the ETL having just-written rows.
+      max_concurrent_runs: 1
+
       parameters:
-        - name: subcommand     # which run_pipeline.py subcommand
-          default: nhc-realtime
-        - name: mode           # dev | prod
+        - name: subcommand     # "realtime" (default cron flow) OR any run_pipeline subcommand
+          default: realtime
+        - name: mode
           default: ${var.mode}
-        - name: issued_time    # YYYY-MM-DDTHH (single advisory)
+        - name: issued_time    # YYYY-MM-DDTHH; for backfill
           default: ""
-        - name: since          # YYYY-MM-DD (date lower bound)
+        - name: since          # YYYY-MM-DD; for backfill
           default: ""
-        - name: year           # YYYY (year-chunked exposure pipelines)
+        - name: year           # YYYY; for year-chunked exposure backfills
           default: ""
-        - name: overwrite      # "true" to pass --overwrite
+        - name: overwrite      # "true" or ""
           default: ""
-        - name: fill_nulls     # "true" to pass --fill-nulls (matched only)
+        - name: fill_nulls     # "true" or ""; only for nhc-wsp-polygon-matched
           default: ""
 
       tasks:
-        - task_key: run
+        # ---------------- routing ---------------------------------- #
+        - task_key: route
+          condition_task:
+            op: EQUAL_TO
+            left: "{{job.parameters.subcommand}}"
+            right: "realtime"
+
+        # ---------------- realtime cascade ------------------------- #
+
+        - task_key: etl
+          depends_on:
+            - task_key: route
+              outcome: "true"
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "nhc"
+              - "{{job.parameters.mode}}"
+              - ""  # issued_time
+              - ""  # since
+              - ""  # year
+              - ""  # overwrite
+              - ""  # fill_nulls
+          libraries: &storm_libs
+            - pypi: { package: "ocha-stratus" }
+            - pypi:
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@wsp-exp-calc"
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+            - pypi: { package: "geoalchemy2" }
+            - pypi: { package: "databricks-sdk" }
+
+        - task_key: tracks_processing
+          depends_on:
+            - task_key: etl
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-tracks-processing"
+              - "{{job.parameters.mode}}"
+              - "{{tasks.etl.values.track_issued_time}}"
+              - ""
+              - ""
+              - ""
+              - ""
+          libraries: *storm_libs
+
+        - task_key: tracks_exposure
+          depends_on:
+            - task_key: tracks_processing
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-tracks-exposure"
+              - "{{job.parameters.mode}}"
+              - "{{tasks.etl.values.track_issued_time}}"
+              - ""
+              - ""
+              - ""
+              - ""
+          libraries: *storm_libs
+
+        - task_key: wsp_processing
+          depends_on:
+            - task_key: tracks_processing
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-wsp-processing"
+              - "{{job.parameters.mode}}"
+              - "{{tasks.etl.values.wsp_issued_time}}"
+              - ""
+              - ""
+              - ""
+              - ""
+          libraries: *storm_libs
+
+        - task_key: wsp_exposure
+          depends_on:
+            - task_key: wsp_processing
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-wsp-exposure"
+              - "{{job.parameters.mode}}"
+              - "{{tasks.etl.values.wsp_issued_time}}"
+              - ""
+              - ""
+              - ""
+              - ""
+          libraries: *storm_libs
+
+        # ---------------- backfill --------------------------------- #
+        - task_key: backfill
+          depends_on:
+            - task_key: route
+              outcome: "false"
           existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
@@ -99,14 +213,4 @@ resources:
               - "{{job.parameters.year}}"
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
-          libraries:
-            - pypi: { package: "ocha-stratus" }
-            - pypi:
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@wsp-exp-calc"
-            - pypi: { package: "python-dotenv" }
-            - pypi: { package: "geopandas" }
-            - pypi: { package: "rasterio" }
-            - pypi: { package: "rioxarray" }
-            - pypi: { package: "coloredlogs" }
-            - pypi: { package: "tqdm" }
-            - pypi: { package: "geoalchemy2" }
+          libraries: *storm_libs
