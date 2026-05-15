@@ -57,13 +57,21 @@ def _arg(i, default=""):
     return sys.argv[i] if len(sys.argv) > i else default
 
 
-SUBCOMMAND = _arg(1, "nhc-realtime")
+SUBCOMMAND_DEFAULT = _arg(1, "nhc-realtime")
 MODE = _arg(2, "prod")
 ISSUED_TIME = _arg(3)
 SINCE = _arg(4)
 YEAR = _arg(5)
 OVERWRITE = _arg(6)
 FILL_NULLS = _arg(7)
+SUBCOMMAND_OVERRIDE = _arg(8)
+
+# A non-empty override (from job.parameters.subcommand) trumps the task's
+# hardcoded default. Lets you pick a specific CLI subcommand at run-time
+# without writing a separate task — e.g. right-click wsp_exposure → "Run
+# task" → set subcommand=nhc-wsp-exp to backfill just the full-WSP
+# exposure without also running the fcastonly variant.
+SUBCOMMAND = SUBCOMMAND_OVERRIDE if SUBCOMMAND_OVERRIDE else SUBCOMMAND_DEFAULT
 
 
 def _fallback_issued_time_from_etl() -> str:
