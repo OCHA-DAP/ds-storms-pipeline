@@ -27,10 +27,21 @@ import os
 import subprocess
 import sys
 
-# The dispatcher lives in databricks/; run_pipeline.py is at the repo
-# root. Resolve it absolutely so we don't depend on the cwd the cluster
-# chose when invoking us.
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# DBX's spark_python_task exec context doesn't define __file__. Try the
+# usual ways to find the dispatcher's directory, then walk one level up
+# to the repo root.
+def _find_script_dir():
+    try:
+        return os.path.dirname(os.path.abspath(__file__))  # noqa: F821
+    except NameError:
+        pass
+    if sys.argv and sys.argv[0]:
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.getcwd()
+
+
+SCRIPT_DIR = _find_script_dir()
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 
 
 def _arg(i, default=""):
