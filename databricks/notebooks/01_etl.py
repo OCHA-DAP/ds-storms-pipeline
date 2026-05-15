@@ -14,8 +14,15 @@ dbutils.widgets.text("mode", "dev")
 mode = dbutils.widgets.get("mode")
 
 # COMMAND ----------
-import sys
-sys.path.insert(0, "/Workspace/Repos/ds-storms-pipeline")  # adjust to your repo path
+import os, sys
+# Resolve the bundle's files/ root from the notebook's own path so this
+# works regardless of who deployed or which target.
+_nb_path = (
+    dbutils.notebook.entry_point.getDbutils()
+    .notebook().getContext().notebookPath().get()
+)
+_files_root = _nb_path.rsplit("/databricks/notebooks/", 1)[0]
+sys.path.insert(0, _files_root)
 from src.pipelines.nhc import run_nhc_current
 
 result = run_nhc_current(mode=mode, save_to_blob=False, save_dir="/tmp")

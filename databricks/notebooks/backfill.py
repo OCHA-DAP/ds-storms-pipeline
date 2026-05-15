@@ -48,11 +48,19 @@ fill_nulls = dbutils.widgets.get("fill_nulls").lower() == "true"
 mode = dbutils.widgets.get("mode")
 
 # COMMAND ----------
+import os
 import sys
 
 import pandas as pd
 
-sys.path.insert(0, "/Workspace/Repos/ds-storms-pipeline")
+_nb_path = (
+    dbutils.notebook.entry_point.getDbutils()
+    .notebook()
+    .getContext()
+    .notebookPath()
+    .get()
+)
+sys.path.insert(0, _nb_path.rsplit("/databricks/notebooks/", 1)[0])
 
 issued_time = (
     pd.to_datetime(issued_time_str).to_pydatetime() if issued_time_str else None

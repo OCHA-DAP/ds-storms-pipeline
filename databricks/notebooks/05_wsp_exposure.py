@@ -13,8 +13,13 @@ if wsp_it_str is None:
     dbutils.notebook.exit("no-wsp-issued-time")
 
 # COMMAND ----------
-import pandas as pd, sys
-sys.path.insert(0, "/Workspace/Repos/ds-storms-pipeline")
+import os, sys
+import pandas as pd
+_nb_path = (
+    dbutils.notebook.entry_point.getDbutils()
+    .notebook().getContext().notebookPath().get()
+)
+sys.path.insert(0, _nb_path.rsplit("/databricks/notebooks/", 1)[0])
 from src.pipelines.nhc import run_nhc_wsp_exp, run_nhc_wsp_fcastonly_exp
 
 wsp_it = pd.to_datetime(wsp_it_str).to_pydatetime()
