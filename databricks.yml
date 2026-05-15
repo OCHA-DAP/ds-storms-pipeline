@@ -110,11 +110,6 @@ resources:
             parameters:
               - "nhc"
               - "{{job.parameters.mode}}"
-              - ""  # issued_time
-              - ""  # since
-              - ""  # year
-              - ""  # overwrite
-              - ""  # fill_nulls
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
             - pypi:
@@ -139,10 +134,6 @@ resources:
               - "realtime-tracks-processing"
               - "{{job.parameters.mode}}"
               - "{{tasks.etl.values.track_issued_time}}"
-              - ""
-              - ""
-              - ""
-              - ""
           libraries: *storm_libs
 
         - task_key: tracks_exposure
@@ -156,10 +147,6 @@ resources:
               - "realtime-tracks-exposure"
               - "{{job.parameters.mode}}"
               - "{{tasks.etl.values.track_issued_time}}"
-              - ""
-              - ""
-              - ""
-              - ""
           libraries: *storm_libs
 
         - task_key: wsp_processing
@@ -173,10 +160,6 @@ resources:
               - "realtime-wsp-processing"
               - "{{job.parameters.mode}}"
               - "{{tasks.etl.values.wsp_issued_time}}"
-              - ""
-              - ""
-              - ""
-              - ""
           libraries: *storm_libs
 
         - task_key: wsp_exposure
@@ -190,10 +173,6 @@ resources:
               - "realtime-wsp-exposure"
               - "{{job.parameters.mode}}"
               - "{{tasks.etl.values.wsp_issued_time}}"
-              - ""
-              - ""
-              - ""
-              - ""
           libraries: *storm_libs
 
         # ---------------- backfill --------------------------------- #
