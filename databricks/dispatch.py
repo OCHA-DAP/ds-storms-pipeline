@@ -82,4 +82,11 @@ if __name__ == "__main__":
     cmd = build_cmd()
     print("Running:", " ".join(cmd), flush=True)
     print("cwd:", REPO_ROOT, flush=True)
-    sys.exit(subprocess.run(cmd, check=False, cwd=REPO_ROOT).returncode)
+    rc = subprocess.run(cmd, check=False, cwd=REPO_ROOT).returncode
+    # DBX spark_python_task runs inside an IPython kernel that treats
+    # SystemExit (even SystemExit(0)) as a task failure. So we just let
+    # the script return normally on success, and raise a regular
+    # exception to propagate non-zero exits.
+    if rc != 0:
+        raise RuntimeError(f"run_pipeline.py exited with code {rc}")
+    print("OK")
