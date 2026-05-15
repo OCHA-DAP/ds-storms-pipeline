@@ -2316,6 +2316,18 @@ def process_nhc_wsp_fcastonly_polygons(
         )
     else:
         existing_keys = set()
+        # Clean-and-rebuild for this issued_time: drop any existing
+        # fcastonly rows first so orphans (keys present in fcastonly but
+        # no longer present in the matched table — e.g. after a fill-
+        # nulls pass promoted a NULL atcf_id to a real one) get removed.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "DELETE FROM storms.nhc_wsp_fcastonly_polygon"
+                    " WHERE issued_time = :it"
+                ),
+                {"it": issued_time},
+            )
 
     offset = timedelta(hours=_WSP_OBSV_OFFSET_HOURS)
     no_obsv = offset_used = exact_used = already_done = 0

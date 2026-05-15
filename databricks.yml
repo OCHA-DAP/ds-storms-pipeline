@@ -17,25 +17,26 @@ bundle:
 # ---------------------------------------------------------------------
 # Per-environment overrides. Use -t <target> at deploy/run time.
 # ---------------------------------------------------------------------
+# workspace.host does NOT support ${var.…} interpolation. Hardcode it
+# per target (preferred) — OR omit the `workspace:` block entirely and
+# let the CLI resolve the host from your `databricks auth login`
+# profile / DATABRICKS_HOST env var.
 targets:
   dev:
     mode: development
     default: true
     workspace:
-      host: ${var.databricks_host}
+      profile: default
     variables:
       mode: dev
   prod:
     mode: production
     workspace:
-      host: ${var.databricks_host}
+      profile: default
     variables:
       mode: prod
 
 variables:
-  databricks_host:
-    description: Databricks workspace URL (https://...)
-    default: https://adb-XXXXXXXX.azuredatabricks.net
   mode:
     description: Pipeline --mode (dev | prod)
     default: dev
@@ -44,6 +45,8 @@ variables:
   ocha_lens_ref:
     description: ocha-lens git ref to install
     default: wsp-exp-calc
+  # Job clusters (spun up per-run, ephemeral) — defined below. No
+  # existing_cluster_id needed.
 
 # ---------------------------------------------------------------------
 # Shared cluster config + library list reused by every task.
@@ -62,15 +65,70 @@ resources:
         timezone_id: UTC
         pause_status: UNPAUSED
 
-      # One job-level cluster shared by all tasks (cheaper than per-task
-      # job clusters; tasks run sequentially per the depends_on DAG).
+      # ---------------------------------------------------------------- #
+      # Ephemeral job cluster — created per run, terminated when the job
+      # ends. Defined once here and referenced from every task via
+      # job_cluster_key. Mirrors the workspace cluster spec the user runs
+      # interactively (policy 000C79D951EAF0D6, 17.3.x runtime, DS3_v2,
+      # spot with fallback). Worker count is left to the policy via
+      # apply_policy_default_values; override num_workers/autoscale here
+      # to break out of the policy default.
+      # ---------------------------------------------------------------- #
       job_clusters:
         - job_cluster_key: storms_cluster
           new_cluster:
-            spark_version: 15.4.x-scala2.12
-            node_type_id: Standard_D8s_v3
-            num_workers: 0          # single-node driver is fine for this
-            data_security_mode: SINGLE_USER
+            policy_id: "000C79D951EAF0D6"
+            apply_policy_default_values: true
+            spark_version: "17.3.x-scala2.13"
+            node_type_id: Standard_DS3_v2
+            data_security_mode: LEGACY_SINGLE_USER_STANDARD
+            azure_attributes:
+              availability: SPOT_WITH_FALLBACK_AZURE
+            spark_env_vars:
+              # Pipeline + storage
+              STORAGE_ACCOUNT_DEV: imb0chd0dev
+              STORAGE_ACCOUNT_PROD: imb0chd0prod
+              CONTAINER_RASTER: raster
+              CONTAINER_GLOBAL: global
+              PYSPARK_PYTHON: /databricks/python3/bin/python3
+              # Postgres (dev + prod)
+              DSCI_AZ_DB_DEV_HOST: "{{secrets/dsci/DSCI_AZ_DB_DEV_HOST}}"
+              DSCI_AZ_DB_DEV_UID: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID}}"
+              DSCI_AZ_DB_DEV_PW: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW}}"
+              DSCI_AZ_DB_DEV_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID_WRITE}}"
+              DSCI_AZ_DB_DEV_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW_WRITE}}"
+              DSCI_AZ_DB_PROD_HOST: "{{secrets/dsci/DSCI_AZ_DB_PROD_HOST}}"
+              DSCI_AZ_DB_PROD_UID: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID}}"
+              DSCI_AZ_DB_PROD_PW: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW}}"
+              DSCI_AZ_DB_PROD_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID_WRITE}}"
+              DSCI_AZ_DB_PROD_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW_WRITE}}"
+              # Azure blob SAS tokens
+              DSCI_AZ_BLOB_DEV_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS}}"
+              DSCI_AZ_BLOB_DEV_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS_WRITE}}"
+              DSCI_AZ_BLOB_PROD_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS}}"
+              DSCI_AZ_BLOB_PROD_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS_WRITE}}"
+              # AWS (for ECMWF / hdx-pa-ecmwf bucket)
+              AWS_ACCESS_KEY_ID: "{{secrets/dsci/AWS_ACCESS_KEY_ID}}"
+              AWS_SECRET_ACCESS_KEY: "{{secrets/dsci/AWS_SECRET_ACCESS_KEY}}"
+              AWS_DEFAULT_REGION: us-east-1
+              AWS_BUCKET_NAME: hdx-pa-ecmwf
+              # ECMWF API
+              ECMWF_API_URL: https://api.ecmwf.int/v1
+              ECMWF_API_EMAIL: leonardo.milano@un.org
+              ECMWF_API_KEY: "{{secrets/dsci/ECMWF_API_KEY}}"
+              # CDS / ERA5
+              CDSAPI_URL: https://cds.climate.copernicus.eu/api
+              CDSAPI_KEY: "{{secrets/dsci/CDSAPI_KEY}}"
+              # IMERG
+              IMERG_USERNAME: "{{secrets/dsci/IMERG_USERNAME}}"
+              IMERG_PASSWORD: "{{secrets/dsci/IMERG_PASSWORD}}"
+              # Floodscan (these URLs include signed query strings — rotate
+              # in the spec as needed; ideally move into a secret).
+              FLOODSCAN_MFED_URL: "{{secrets/dsci/FLOODSCAN_MFED_URL}}"
+              FLOODSCAN_SFED_URL: "{{secrets/dsci/FLOODSCAN_SFED_URL}}"
+              # GitHub PAT — move to secret (was hardcoded in source spec;
+              # treat the previous value as compromised and rotate).
+              GH_FLOODSCAN_TOKEN: "{{secrets/dsci/GH_FLOODSCAN_TOKEN}}"
 
       # Job-level parameters available as {{job.parameters.X}} in tasks.
       parameters:
