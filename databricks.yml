@@ -70,9 +70,13 @@ resources:
       # ends. Defined once here and referenced from every task via
       # job_cluster_key. Mirrors the workspace cluster spec the user runs
       # interactively (policy 000C79D951EAF0D6, 17.3.x runtime, DS3_v2,
-      # spot with fallback). Worker count is left to the policy via
-      # apply_policy_default_values; override num_workers/autoscale here
-      # to break out of the policy default.
+      # spot with fallback).
+      #
+      # The policy fixes several fields (FLOODSCAN_*_URL, GH_FLOODSCAN_TOKEN,
+      # num_workers, …) — those are deliberately omitted here so
+      # apply_policy_default_values=true can inject them at run time. Any
+      # field listed below either has no policy rule or matches the policy's
+      # fixed value exactly.
       # ---------------------------------------------------------------- #
       job_clusters:
         - job_cluster_key: storms_cluster
@@ -81,6 +85,7 @@ resources:
             apply_policy_default_values: true
             spark_version: "17.3.x-scala2.13"
             node_type_id: Standard_DS3_v2
+            num_workers: 1
             data_security_mode: LEGACY_SINGLE_USER_STANDARD
             azure_attributes:
               availability: SPOT_WITH_FALLBACK_AZURE
@@ -122,13 +127,9 @@ resources:
               # IMERG
               IMERG_USERNAME: "{{secrets/dsci/IMERG_USERNAME}}"
               IMERG_PASSWORD: "{{secrets/dsci/IMERG_PASSWORD}}"
-              # Floodscan (these URLs include signed query strings — rotate
-              # in the spec as needed; ideally move into a secret).
-              FLOODSCAN_MFED_URL: "{{secrets/dsci/FLOODSCAN_MFED_URL}}"
-              FLOODSCAN_SFED_URL: "{{secrets/dsci/FLOODSCAN_SFED_URL}}"
-              # GitHub PAT — move to secret (was hardcoded in source spec;
-              # treat the previous value as compromised and rotate).
-              GH_FLOODSCAN_TOKEN: "{{secrets/dsci/GH_FLOODSCAN_TOKEN}}"
+              # FLOODSCAN_*_URL and GH_FLOODSCAN_TOKEN are deliberately
+              # omitted — the policy fixes them, and apply_policy_default_values
+              # will inject them at run time.
 
       # Job-level parameters available as {{job.parameters.X}} in tasks.
       parameters:
