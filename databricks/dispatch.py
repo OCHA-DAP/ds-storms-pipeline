@@ -127,7 +127,12 @@ def emit_etl_task_values():
     """Read /tmp/nhc_issued_times.json (written by ``run_pipeline.py
     nhc --out-issued-times-json``) and surface its keys as DBX task
     values so downstream realtime tasks can reference them via
-    ``{{tasks.etl.values.track_issued_time}}`` etc."""
+    ``{{tasks.etl.values.track_issued_time}}`` etc.
+
+    Always emits the keys (as empty strings when the value is None),
+    so downstream reference resolution never fails. Downstream tasks
+    then short-circuit on the empty string.
+    """
     if not os.path.exists(ISSUED_TIMES_JSON):
         print(f"(no {ISSUED_TIMES_JSON} — skipping task value emission)")
         return
@@ -138,10 +143,11 @@ def emit_etl_task_values():
     except ImportError:
         print("(databricks.sdk.runtime missing — skipping task value emission)")
         return
-    for k, v in payload.items():
-        if v:
-            dbutils.jobs.taskValues.set(k, v)
-            print(f"task value: {k}={v}")
+    for k in ("track_issued_time", "wsp_issued_time"):
+        v = payload.get(k)
+        s = v if v else ""
+        dbutils.jobs.taskValues.set(k, s)
+        print(f"task value: {k}={s!r}")
 
 
 def run_one(sub: str, extra: list[str] | tuple[str, ...] = ()) -> None:
@@ -157,10 +163,17 @@ def run_one(sub: str, extra: list[str] | tuple[str, ...] = ()) -> None:
 
 if __name__ == "__main__":
     print(
-        f"DBX dispatcher: subcommand={SUBCOMMAND} mode={MODE} cwd={REPO_ROOT}",
+        f"DBX dispatcher: subcommand={SUBCOMMAND} mode={MODE} "
+        f"issued_time={ISSUED_TIME!r} cwd={REPO_ROOT}",
         flush=True,
     )
-    if SUBCOMMAND in COMPOSITES:
+    # Realtime composites need an issued_time from the ETL stage. If the
+    # ETL emitted "" (no active storms), there's nothing for downstream
+    # to do — return successfully so the DAG continues / completes
+    # without firing a backfill.
+    if SUBCOMMAND in COMPOSITES and not ISSUED_TIME:
+        print(f"(no issued_time supplied for {SUBCOMMAND} — nothing to do)")
+    elif SUBCOMMAND in COMPOSITES:
         for parts in COMPOSITES[SUBCOMMAND]:
             run_one(parts[0], parts[1:])
     else:
