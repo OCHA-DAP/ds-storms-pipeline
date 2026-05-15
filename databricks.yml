@@ -37,23 +37,27 @@ variables:
     default: "0515-161935-i2w5mxhc"
 
 # =====================================================================
-# ONE job for both realtime and backfill.
+# Single job, 5 chained tasks. Each task = one logical pipeline stage,
+# with its own status / retry in the DBX UI.
 #
-#   * Cron runs (or any run with default parameters) → "realtime"
-#     route fires: 5 chained tasks (etl → tracks_processing →
-#     {tracks_exposure, wsp_processing → wsp_exposure}). Each task is
-#     one logical pipeline stage with its own status / retry in the UI.
+# Realtime cron (default params) — full cascade runs:
+#   etl → tracks_processing → {tracks_exposure, wsp_processing → wsp_exposure}
 #
-#   * "Run with different parameters" → override `subcommand` to a
-#     specific CLI subcommand (e.g. nhc-wsp-fcastonly-exp), fill in
-#     filters (since / issued_time / year / overwrite / fill_nulls) →
-#     `backfill` task fires, realtime chain skipped.
+# Backfill — three ways:
 #
-# The `route` condition_task gates which branch runs. The dispatcher
-# at databricks/dispatch.py turns the seven positional parameters into
-# the right `python run_pipeline.py …` invocation(s) and, after the
-# ETL stage, hands issued_times to downstream realtime tasks via DBX
-# task values.
+#   1. Backfill the whole cascade for a specific issued_time:
+#      "Run with different parameters" → set issued_time. The etl task
+#      still fires (cheap re-fetch of the live JSON); downstream tasks
+#      use the user-provided issued_time instead of etl's task value.
+#
+#   2. Backfill a single stage:
+#      Right-click the stage task → "Run task" → set whichever filter
+#      applies (issued_time, since, year, overwrite, fill_nulls). Only
+#      that task runs. The dispatcher picks up the parameters directly.
+#
+#   3. Run a specific subcommand from the local CLI:
+#      `uv run python run_pipeline.py <subcommand> [...]` — identical
+#      to what the dispatcher would invoke.
 # =====================================================================
 resources:
   jobs:
@@ -69,40 +73,24 @@ resources:
         timezone_id: UTC
         pause_status: UNPAUSED
 
-      # Sequential — no concurrent overlapping runs; downstream tasks
-      # rely on the ETL having just-written rows.
       max_concurrent_runs: 1
 
       parameters:
-        - name: subcommand     # "realtime" (default cron flow) OR any run_pipeline subcommand
-          default: realtime
         - name: mode
           default: ${var.mode}
-        - name: issued_time    # YYYY-MM-DDTHH; for backfill
+        - name: issued_time    # YYYY-MM-DDTHH; backfill override for a single advisory
           default: ""
-        - name: since          # YYYY-MM-DD; for backfill
+        - name: since          # YYYY-MM-DD
           default: ""
-        - name: year           # YYYY; for year-chunked exposure backfills
+        - name: year           # YYYY (year-chunked exposure pipelines)
           default: ""
-        - name: overwrite      # "true" or ""
+        - name: overwrite      # "true" / ""
           default: ""
-        - name: fill_nulls     # "true" or ""; only for nhc-wsp-polygon-matched
+        - name: fill_nulls     # "true" / ""; nhc-wsp-polygon-matched only
           default: ""
 
       tasks:
-        # ---------------- routing ---------------------------------- #
-        - task_key: route
-          condition_task:
-            op: EQUAL_TO
-            left: "{{job.parameters.subcommand}}"
-            right: "realtime"
-
-        # ---------------- realtime cascade ------------------------- #
-
         - task_key: etl
-          depends_on:
-            - task_key: route
-              outcome: "true"
           existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
@@ -110,6 +98,11 @@ resources:
             parameters:
               - "nhc"
               - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.year}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.fill_nulls}}"
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
             - pypi:
@@ -133,7 +126,11 @@ resources:
             parameters:
               - "realtime-tracks-processing"
               - "{{job.parameters.mode}}"
-              - "{{tasks.etl.values.track_issued_time}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.year}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.fill_nulls}}"
           libraries: *storm_libs
 
         - task_key: tracks_exposure
@@ -146,7 +143,11 @@ resources:
             parameters:
               - "realtime-tracks-exposure"
               - "{{job.parameters.mode}}"
-              - "{{tasks.etl.values.track_issued_time}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.year}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.fill_nulls}}"
           libraries: *storm_libs
 
         - task_key: wsp_processing
@@ -159,7 +160,11 @@ resources:
             parameters:
               - "realtime-wsp-processing"
               - "{{job.parameters.mode}}"
-              - "{{tasks.etl.values.wsp_issued_time}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.year}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.fill_nulls}}"
           libraries: *storm_libs
 
         - task_key: wsp_exposure
@@ -171,21 +176,6 @@ resources:
             source: GIT
             parameters:
               - "realtime-wsp-exposure"
-              - "{{job.parameters.mode}}"
-              - "{{tasks.etl.values.wsp_issued_time}}"
-          libraries: *storm_libs
-
-        # ---------------- backfill --------------------------------- #
-        - task_key: backfill
-          depends_on:
-            - task_key: route
-              outcome: "false"
-          existing_cluster_id: ${var.existing_cluster_id}
-          spark_python_task:
-            python_file: databricks/dispatch.py
-            source: GIT
-            parameters:
-              - "{{job.parameters.subcommand}}"
               - "{{job.parameters.mode}}"
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.since}}"

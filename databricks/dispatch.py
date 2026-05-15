@@ -65,6 +65,43 @@ YEAR = _arg(5)
 OVERWRITE = _arg(6)
 FILL_NULLS = _arg(7)
 
+
+def _fallback_issued_time_from_etl() -> str:
+    """If the caller didn't supply an issued_time and we're running
+    as part of a job DAG, try to read the one the etl task emitted.
+
+    Returns "" if dbutils isn't available, the etl task didn't run
+    yet, or the key doesn't exist.
+
+    Picks the right key based on the subcommand: WSP-related
+    subcommands use ``wsp_issued_time`` (the WSP issuance, ~0–3h
+    earlier than tracks), everything else uses ``track_issued_time``.
+    """
+    sub_l = SUBCOMMAND.lower()
+    if "wsp" in sub_l:
+        key = "wsp_issued_time"
+    else:
+        key = "track_issued_time"
+    try:
+        from databricks.sdk.runtime import dbutils
+    except ImportError:
+        return ""
+    try:
+        v = dbutils.jobs.taskValues.get(
+            taskKey="etl", key=key, default="", debugValue=""
+        )
+        return v or ""
+    except Exception as e:
+        print(f"(task-value fallback failed: {e})")
+        return ""
+
+
+if not ISSUED_TIME:
+    fallback = _fallback_issued_time_from_etl()
+    if fallback:
+        ISSUED_TIME = fallback
+        print(f"(picked up issued_time={ISSUED_TIME!r} from etl task value)")
+
 # Composite subcommands. Each key is a sentinel the bundle uses; the
 # value is a list of [subcommand, *extra_args] entries the dispatcher
 # expands and runs sequentially against the same shared (mode,
