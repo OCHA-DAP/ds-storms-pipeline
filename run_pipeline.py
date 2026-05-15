@@ -20,7 +20,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
-for _name in ("fsspec", "asyncio", "urllib3", "azure", "uamqp", "rasterio"):
+for _name in (
+    "fsspec", "asyncio", "urllib3", "azure", "uamqp", "rasterio",
+    "boto3", "botocore", "s3transfer",
+):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 from src.pipelines.ecmwf import run_ecmwf
