@@ -23,8 +23,14 @@ Positional contract (mirrors the job's job-level ``parameters:``):
 Empty values are skipped.
 """
 
+import os
 import subprocess
 import sys
+
+# The dispatcher lives in databricks/; run_pipeline.py is at the repo
+# root. Resolve it absolutely so we don't depend on the cwd the cluster
+# chose when invoking us.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _arg(i, default=""):
@@ -41,7 +47,13 @@ FILL_NULLS = _arg(7)
 
 
 def build_cmd():
-    cmd = [sys.executable, "run_pipeline.py", SUBCOMMAND, "--mode", MODE]
+    cmd = [
+        sys.executable,
+        os.path.join(REPO_ROOT, "run_pipeline.py"),
+        SUBCOMMAND,
+        "--mode",
+        MODE,
+    ]
     if ISSUED_TIME:
         cmd += ["--issued-time", ISSUED_TIME]
     if SINCE:
@@ -58,4 +70,5 @@ def build_cmd():
 if __name__ == "__main__":
     cmd = build_cmd()
     print("Running:", " ".join(cmd), flush=True)
-    sys.exit(subprocess.run(cmd, check=False).returncode)
+    print("cwd:", REPO_ROOT, flush=True)
+    sys.exit(subprocess.run(cmd, check=False, cwd=REPO_ROOT).returncode)
