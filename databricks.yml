@@ -153,3 +153,42 @@ resources:
               mode: "{{job.parameters.mode}}"
               wsp_issued_time: "{{tasks.etl.values.wsp_issued_time}}"
           libraries: *storm_libs
+
+    # =================================================================== #
+    # nhc_backfill — manual-only job for re-running a single pipeline step
+    # over historical data. No schedule. Exposed as job parameters so a
+    # user can click "Run with different parameters" in the DBX UI and
+    # fill in the form (same UX as GHA workflow_dispatch inputs).
+    # =================================================================== #
+    nhc_backfill:
+      name: NHC Backfill
+      # No schedule — manual dispatch only.
+      parameters:
+        - name: step
+          default: wsp-fcastonly-polygons
+        - name: since
+          default: ""
+        - name: issued_time
+          default: ""
+        - name: year
+          default: ""
+        - name: overwrite
+          default: "true"
+        - name: fill_nulls
+          default: "false"
+        - name: mode
+          default: ${var.mode}
+      tasks:
+        - task_key: run
+          existing_cluster_id: ${var.existing_cluster_id}
+          notebook_task:
+            notebook_path: ./databricks/notebooks/backfill.py
+            base_parameters:
+              step: "{{job.parameters.step}}"
+              since: "{{job.parameters.since}}"
+              issued_time: "{{job.parameters.issued_time}}"
+              year: "{{job.parameters.year}}"
+              overwrite: "{{job.parameters.overwrite}}"
+              fill_nulls: "{{job.parameters.fill_nulls}}"
+              mode: "{{job.parameters.mode}}"
+          libraries: *storm_libs
