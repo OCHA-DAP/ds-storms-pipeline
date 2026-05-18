@@ -13,7 +13,7 @@ dependencies = [
     # Data processing
     "pandas>=2.0.0",
     "numpy>=1.24.0",
-    "ocha-stratus==0.1.4",
+    "ocha-stratus==0.1.7",
     "ocha-lens",
     # Date handling
     "python-dateutil>=2.8.2",
@@ -26,6 +26,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+analysis = [
+    "matplotlib>=3.10.9",
+    "nbclient>=0.10.4",
+    "nbformat>=5.10.4",
+]
 dev = [
     "pytest>=7.0.0",
     "ruff==0.7.4",
@@ -33,6 +38,7 @@ dev = [
     "hypothesis==6.138.2",
     "marimo==0.23.0",
     "plotly",
+    "ipykernel>=7.2.0",
 ]
 
 [tool.uv.sources]

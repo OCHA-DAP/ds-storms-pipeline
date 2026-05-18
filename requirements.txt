@@ -7,7 +7,7 @@ geoalchemy2==0.18.0
 # Data processing
 pandas>=2.0.0
 numpy>=1.24.0
-ocha-stratus==0.1.4
+ocha-stratus==0.1.7
 ocha-lens==0.4.2
 
 # Date handling
