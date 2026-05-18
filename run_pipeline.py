@@ -26,6 +26,13 @@ for _name in (
 ):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
+# DBR auto-instruments pandas with a Spark usage logger that fails to
+# attach on Python tasks (no JVM in the executor). The WARNING is
+# emitted every time run_pipeline.py imports pandas, which floods the
+# DBX run logs. Suppress it at the source.
+logging.getLogger("pyspark.databricks.pandas").setLevel(logging.ERROR)
+logging.getLogger("pyspark.databricks.pandas.usage_logger").setLevel(logging.ERROR)
+
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import (
     run_ibtracs,
