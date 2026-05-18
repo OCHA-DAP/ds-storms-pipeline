@@ -1,5 +1,8 @@
 """Raster exposure utilities shared across all pipeline datasets."""
-import fsspec
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from io import BytesIO
+
 import geopandas as gpd
 import ocha_stratus as stratus
 import pandas as pd
@@ -8,20 +11,65 @@ from rioxarray.exceptions import NoDataInBounds
 from tqdm import tqdm
 
 GEO_CRS_ANTIMERIDIAN = "+proj=longlat +datum=WGS84 +lon_wrap=180"
-_FIELDMAPS_URL = "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
 _POP_BLOB = "worldpop/pop_count/global_pop_2026_CN_1km_R2025A_UA_v1.tif"
 
+# FieldMaps adm1 polygons are mirrored once into per-country parquet blobs
+# by scripts/mirror_fieldmaps_to_blob.py. Reading from blob (same Azure
+# region as DBX) is ~50x faster than fsspec-ing data.fieldmaps.io for
+# the 1.4 GB upstream parquet over DBX's egress link.
+_FIELDMAPS_BLOB_CONTAINER = "raster"
+_FIELDMAPS_BLOB_PREFIX = "fieldmaps/adm1/"
+_FIELDMAPS_BLOB_PATH_TPL = _FIELDMAPS_BLOB_PREFIX + "{iso3}.parquet"
+_FIELDMAPS_PARALLEL_WORKERS = 16
 
-def load_adm1(countries: list[str] | None) -> gpd.GeoDataFrame:
-    filters = [("iso_3", "in", countries)] if countries else None
-    with fsspec.open(_FIELDMAPS_URL, "rb") as f:
-        return gpd.read_parquet(
-            f, columns=["iso_3", "adm1_id", "geometry"], filters=filters
+
+@lru_cache(maxsize=None)
+def _list_iso3s_in_blob(stage: str) -> tuple[str, ...]:
+    """Return the iso3s available in blob, derived from blob names."""
+    names = stratus.list_container_blobs(
+        stage=stage,
+        container_name=_FIELDMAPS_BLOB_CONTAINER,
+        name_starts_with=_FIELDMAPS_BLOB_PREFIX,
+    )
+    return tuple(sorted(
+        n.removeprefix(_FIELDMAPS_BLOB_PREFIX).removesuffix(".parquet")
+        for n in names
+        if n.endswith(".parquet")
+    ))
+
+
+@lru_cache(maxsize=1024)
+def _load_adm1_country_blob(iso3: str, stage: str) -> gpd.GeoDataFrame:
+    data = stratus.load_blob_data(
+        _FIELDMAPS_BLOB_PATH_TPL.format(iso3=iso3),
+        stage=stage,
+        container_name=_FIELDMAPS_BLOB_CONTAINER,
+    )
+    return gpd.read_parquet(BytesIO(data))
+
+
+def load_adm1(
+    countries: list[str] | None, stage: str = "dev"
+) -> gpd.GeoDataFrame:
+    if countries is None:
+        countries = list(_list_iso3s_in_blob(stage))
+    if not countries:
+        return gpd.GeoDataFrame(
+            columns=["iso_3", "adm1_id", "geometry"], crs="EPSG:4326"
         )
+    with ThreadPoolExecutor(max_workers=_FIELDMAPS_PARALLEL_WORKERS) as ex:
+        parts = list(ex.map(
+            lambda iso3: _load_adm1_country_blob(iso3, stage), countries,
+        ))
+    return gpd.GeoDataFrame(
+        pd.concat(parts, ignore_index=True), crs=parts[0].crs,
+    )
 
 
 def load_adm_units(
-    countries: list[str] | None, admin_level: int
+    countries: list[str] | None,
+    admin_level: int,
+    stage: str = "dev",
 ) -> gpd.GeoDataFrame:
     """Return [iso3, pcode, geometry] for the requested admin level.
 
@@ -30,7 +78,7 @@ def load_adm_units(
     """
     if admin_level not in (0, 1):
         raise ValueError(f"admin_level must be 0 or 1, got {admin_level!r}")
-    gdf = load_adm1(countries)
+    gdf = load_adm1(countries, stage=stage)
     if admin_level == 0:
         out = gdf[["iso_3", "geometry"]].dissolve(by="iso_3").reset_index()
         out = out.rename(columns={"iso_3": "iso3"})

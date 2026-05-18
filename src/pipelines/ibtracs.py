@@ -418,7 +418,7 @@ def run_ibtracs_exp(
         return
     gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
 
-    gdf_adm1 = load_adm1(countries)
+    gdf_adm1 = load_adm1(countries, stage=mode)
     country_list = sorted(gdf_adm1["iso_3"].unique())
     logger.info(f"Processing {len(country_list)} countries...")
 

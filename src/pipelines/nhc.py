@@ -1800,7 +1800,7 @@ def run_nhc_tracks_fcast_exp(
     da_wp_global, da_wp_wrapped = load_pop()
 
     for admin_level in admin_levels:
-        gdf_units = load_adm_units(countries, admin_level)
+        gdf_units = load_adm_units(countries, admin_level, stage=mode)
         country_groups = list(gdf_units.groupby("iso3"))
         logger.info(
             f"admin_level={admin_level}: {len(country_groups)} countries, "
@@ -1955,7 +1955,7 @@ def run_nhc_tracks_obsv_exp(
     da_wp_global, da_wp_wrapped = load_pop()
 
     for admin_level in admin_levels:
-        gdf_units = load_adm_units(countries, admin_level)
+        gdf_units = load_adm_units(countries, admin_level, stage=mode)
         country_groups = list(gdf_units.groupby("iso3"))
         logger.info(
             f"admin_level={admin_level}: {len(country_groups)} countries, "
@@ -2099,7 +2099,7 @@ def run_nhc_tracks_fcastonly_exp(
     da_wp_global, da_wp_wrapped = load_pop()
 
     for admin_level in admin_levels:
-        gdf_units = load_adm_units(countries, admin_level)
+        gdf_units = load_adm_units(countries, admin_level, stage=mode)
         country_groups = list(gdf_units.groupby("iso3"))
         logger.info(
             f"admin_level={admin_level}: {len(country_groups)} countries, "
@@ -2350,7 +2350,7 @@ def _run_exp_year_chunk(
     logger.info(f"{table_label}: {len(years)} year chunks: {years}")
 
     # Pre-load admin units per level once — reused across all years.
-    units_by_level = {al: load_adm_units(countries, al) for al in admin_levels}
+    units_by_level = {al: load_adm_units(countries, al, stage=mode) for al in admin_levels}
     country_groups_by_level = {
         al: list(units_by_level[al].groupby("iso3")) for al in admin_levels
     }
