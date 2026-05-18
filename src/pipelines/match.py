@@ -1,8 +1,9 @@
 """GDACS → NHC ATCF matching.
 
-Resolves the NHC atcf_id for GDACS events via geometric matching:
-inner-join GDACS timeline ↔ NHC tracks on valid_time, group by
-atcf_id, pick the one with smallest mean great-circle distance
+Resolves the NHC atcf_id for GDACS events via genesis-advisory
+matching: look for an NHC row at the exact valid_time of the GDACS
+event's first advisory (smallest advisory_number); pick the
+spatially closest atcf_id under a rounding-only tolerance
 (ocha_lens.datasources.gdacs.match_to_atcf).
 
 Two entry points share the same per-event logic:
@@ -78,9 +79,18 @@ def load_matched_eventids(engine) -> Set[int]:
 
 
 def load_freshest_nhc_tracks(engine) -> pd.DataFrame:
-    """NHC tracks, one row per (atcf_id, valid_time) at freshest
-    issuance. Required shape for gdacs.match_to_atcf — without
-    dedup the mean distance gets dragged around by stale forecasts."""
+    """NHC tracks deduped to one row per ``(atcf_id, valid_time)``
+    at the freshest issuance.
+
+    The genesis-based ``gdacs.match_to_atcf`` requires an exact
+    ``valid_time`` match. At a TCM cycle (e.g. 21Z) the relevant
+    NHC row is typically A-deck OFCL's TAU=3 forecast from the
+    prior synoptic (18Z) — a leadtime>0 row. Filtering to
+    leadtime=0 would miss those, so we keep all leadtimes here
+    and let the matcher pick by valid_time. The DISTINCT ON keeps
+    the freshest issuance per ``(atcf_id, valid_time)`` so a stale
+    forecast can't shadow the canonical row.
+    """
     with engine.connect() as conn:
         return pd.read_sql(
             """
