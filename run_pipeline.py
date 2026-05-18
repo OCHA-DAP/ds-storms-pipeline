@@ -34,9 +34,11 @@ from src.pipelines.ibtracs import (
     run_wind_buffers,
 )
 from src.pipelines.nhc import (
+    NHC_SAMPLE_JSON_URL,
     run_nhc_archive,
     run_nhc_current,
     run_nhc_realtime,
+    run_nhc_scrub,
     run_nhc_tracks_fcast_buffers,
     run_nhc_tracks_fcast_exp,
     run_nhc_tracks_obsv_buffers,
@@ -161,6 +163,15 @@ def main():
     )
     nhc_parser.add_argument("--save-to-blob", action="store_true")
     nhc_parser.add_argument("--save-dir", default="/tmp")
+    nhc_parser.add_argument(
+        "--sample-json", metavar="URL",
+        help=(
+            "Test mode: fetch CurrentStorms.json from this URL instead of the "
+            "live NHC endpoint. WSP polygons follow from the GIS URL inside "
+            "the sample JSON, exactly like realtime. Recommended: "
+            f"{NHC_SAMPLE_JSON_URL}"
+        ),
+    )
     nhc_parser.add_argument(
         "--start-year", type=int,
         help="Start year for archive mode. Omit for current active storms.",
@@ -385,6 +396,39 @@ def main():
     )
 
     # ------------------------------------------------------------------ #
+    # NHC scrub (cleanup test / sample rows from every NHC table)
+    # ------------------------------------------------------------------ #
+    nhc_scrub_parser = subparsers.add_parser(
+        "nhc-scrub", parents=[common],
+        help="Delete sample/test rows for given atcf_ids from all NHC tables",
+    )
+    nhc_scrub_parser.add_argument(
+        "--sample", action="store_true",
+        help=(
+            "Auto-resolve atcf_ids and issued_times from the NHC sample JSON "
+            f"({NHC_SAMPLE_JSON_URL}) and scrub those. Mutually exclusive "
+            "with --atcf-id / --issued-time."
+        ),
+    )
+    nhc_scrub_parser.add_argument(
+        "--atcf-id", action="append", default=[], dest="atcf_id",
+        help="atcf_id to scrub (repeatable). Ignored when --sample is set.",
+    )
+    nhc_scrub_parser.add_argument(
+        "--issued-time", action="append", default=[], dest="issued_time",
+        metavar="YYYY-MM-DDTHH",
+        help=(
+            "issued_time to scrub from nhc_wsp_polygon_raw (repeatable). "
+            "Required if you want WSP raw rows gone. "
+            "Ignored when --sample is set."
+        ),
+    )
+    nhc_scrub_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Log counts only; don't actually delete anything.",
+    )
+
+    # ------------------------------------------------------------------ #
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -443,6 +487,7 @@ def main():
                 save_to_blob=args.save_to_blob,
                 save_dir=args.save_dir,
                 chunksize=args.chunksize,
+                sample_json=args.sample_json,
             )
             if args.out_issued_times_json:
                 import json
@@ -572,6 +617,41 @@ def main():
             year=args.year,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
             admin_levels=getattr(args, "admin_level", None),
+        )
+    elif args.pipeline == "nhc-scrub":
+        if args.sample:
+            import requests
+            data = requests.get(NHC_SAMPLE_JSON_URL, timeout=10).json()
+            storms = data.get("activeStorms", [])
+            atcf_ids = sorted({
+                s["id"][:2].upper() + s["id"][2:] for s in storms
+            })
+            issued_times: list[pd.Timestamp] = []
+            track_times = [pd.Timestamp(s["lastUpdate"]) for s in storms]
+            if track_times:
+                issued_times.append(max(track_times))
+            wsp_times = [
+                pd.Timestamp(s["windSpeedProbabilitiesGIS"]["issuance"])
+                for s in storms
+                if s.get("windSpeedProbabilitiesGIS")
+            ]
+            if wsp_times:
+                issued_times.append(max(wsp_times))
+            issued_times = sorted(set(issued_times))
+        else:
+            if not args.atcf_id:
+                nhc_scrub_parser.error(
+                    "either --sample or at least one --atcf-id is required"
+                )
+            atcf_ids = args.atcf_id
+            issued_times = [
+                pd.Timestamp(t) for t in args.issued_time
+            ]
+        run_nhc_scrub(
+            atcf_ids=atcf_ids,
+            issued_times=issued_times,
+            mode=args.mode,
+            dry_run=args.dry_run,
         )
 
 

@@ -23,6 +23,8 @@ databricks.yml):
     sys.argv[5] = year           # YYYY or ""
     sys.argv[6] = overwrite      # "true" or ""
     sys.argv[7] = fill_nulls     # "true" or ""
+    sys.argv[8] = subcommand_override  # non-empty overrides argv[1]
+    sys.argv[9] = sample_json    # URL for test-mode CurrentStorms JSON, or ""
 
 Composite ``realtime-…`` subcommands expand to multiple
 run_pipeline.py invocations — used by the DBX task chain so each task
@@ -65,6 +67,7 @@ YEAR = _arg(5)
 OVERWRITE = _arg(6)
 FILL_NULLS = _arg(7)
 SUBCOMMAND_OVERRIDE = _arg(8)
+SAMPLE_JSON = _arg(9)
 
 # A non-empty override (from job.parameters.subcommand) trumps the task's
 # hardcoded default. Lets you pick a specific CLI subcommand at run-time
@@ -161,6 +164,15 @@ def build_cmd(sub: str, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
         cmd += ["--overwrite"]
     if FILL_NULLS.lower() == "true":
         cmd += ["--fill-nulls"]
+    # Test mode: only meaningful for the nhc ETL subcommand. Downstream
+    # tasks ignore SAMPLE_JSON — they read the resulting issued_time from
+    # the etl task value, no different from a realtime run.
+    if SAMPLE_JSON and sub == "nhc":
+        cmd += ["--sample-json", SAMPLE_JSON]
+    # Cleanup: from DBX, the only realistic scrub is the sample one.
+    # For ad-hoc atcf_id scrubs, invoke run_pipeline.py locally.
+    if sub == "nhc-scrub":
+        cmd += ["--sample"]
     # After the ETL stage runs, run_pipeline.py writes the issued_times
     # to this file; we then emit them as task values below.
     if sub == "nhc":

@@ -94,6 +94,14 @@ resources:
         # subcommand=nhc-wsp-exp to backfill just full-WSP exposure.
         - name: subcommand
           default: ""
+        # Test mode: when non-empty, the etl task pulls CurrentStorms JSON
+        # from this URL instead of the live endpoint. WSP follows the GIS
+        # URL inside the sample JSON, so the whole cascade runs end-to-end
+        # against fixture data. Recommended:
+        #   https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json
+        # Pair with `subcommand=nhc-scrub` to clean up the test rows after.
+        - name: sample_json
+          default: ""
 
       tasks:
         - task_key: etl
@@ -110,6 +118,7 @@ resources:
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
             - pypi:
@@ -139,6 +148,7 @@ resources:
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
           libraries: *storm_libs
 
         - task_key: tracks_exposure
@@ -157,6 +167,7 @@ resources:
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
           libraries: *storm_libs
 
         - task_key: wsp_processing
@@ -175,6 +186,7 @@ resources:
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
           libraries: *storm_libs
 
         - task_key: wsp_exposure
@@ -193,4 +205,5 @@ resources:
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
           libraries: *storm_libs

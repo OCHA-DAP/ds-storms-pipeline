@@ -10,11 +10,14 @@ Supports two modes:
 import json
 import logging
 import warnings
+from contextlib import contextmanager, nullcontext
 
 import coloredlogs
 import geopandas as gpd
 import ocha_lens as lens
+import ocha_lens.datasources.nhc as _lens_nhc
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 from ocha_lens.utils.storm import calculate_wind_buffers_gdf, expand_quad_col
 from sqlalchemy import text
@@ -42,6 +45,36 @@ _WIND_BUFFER_BATCH_SIZE = 50
 
 
 logger = logging.getLogger(__name__)
+
+
+NHC_SAMPLE_JSON_URL = (
+    "https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json"
+)
+
+
+@contextmanager
+def _patch_current_storms_url(url: str):
+    """Redirect lens.nhc._fetch_current_storms_json to read from `url`.
+
+    Both the tracks fetch (lens.nhc.download_nhc) and the WSP fetch
+    (lens.nhc._load_nhc_wsp_current) call _fetch_current_storms_json
+    internally — patching it once covers both. WSP itself then follows
+    the windSpeedProbabilitiesGIS.zipFile5km URL embedded in the (sample)
+    JSON, identical to realtime behaviour.
+    """
+    original = _lens_nhc._fetch_current_storms_json
+
+    def _patched():
+        logger.info(f"Test mode: fetching CurrentStorms JSON from {url}")
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    _lens_nhc._fetch_current_storms_json = _patched
+    try:
+        yield
+    finally:
+        _lens_nhc._fetch_current_storms_json = original
 
 
 def retrieve_nhc_current(stage="local", save_to_blob=False, save_dir=None):
@@ -736,6 +769,7 @@ def run_nhc_current(
     save_to_blob=False,
     save_dir="storm",
     chunksize=10000,
+    sample_json: str | None = None,
 ) -> dict:
     """Main function to process current NHC storms.
 
@@ -745,6 +779,10 @@ def run_nhc_current(
     Both values come directly from the scraped JSON / shapefile — not
     from a post-write DB query — so downstream tasks can use them
     without races against concurrent writers.
+
+    When ``sample_json`` is set, the CurrentStorms JSON is read from that
+    URL instead of the live NHC endpoint (test mode). WSP polygons still
+    flow from the GIS URL embedded in the JSON, exactly like realtime.
     """
     coloredlogs.install(
         logger=logger,
@@ -757,37 +795,42 @@ def run_nhc_current(
     track_issued_time = None
     wsp_issued_time = None
 
+    ctx = (
+        _patch_current_storms_url(sample_json) if sample_json else nullcontext()
+    )
+
     try:
-        df_raw = retrieve_nhc_current(
-            stage=mode,
-            save_to_blob=save_to_blob,
-            save_dir=save_dir,
-        )
-
-        if df_raw is None:
-            logger.info("No active storms. Pipeline finished.")
-            return {
-                "track_issued_time": None,
-                "wsp_issued_time": None,
-            }
-
-        process_storms(df_raw=df_raw, engine=engine, chunksize=chunksize)
-        process_tracks(df_raw=df_raw, engine=engine, chunksize=chunksize)
-        if "issued_time" in df_raw.columns:
-            track_issued_time = pd.to_datetime(df_raw["issued_time"]).max()
-
-        logger.info("Fetching current WSP polygons...")
-        wsp_gdf = lens.nhc.get_wsp()
-        if wsp_gdf is not None and len(wsp_gdf) > 0:
-            process_wsp_polygons(
-                gdf=wsp_gdf, engine=engine, chunksize=chunksize
+        with ctx:
+            df_raw = retrieve_nhc_current(
+                stage=mode,
+                save_to_blob=save_to_blob,
+                save_dir=save_dir,
             )
-            if "issued_time" in wsp_gdf.columns:
-                wsp_issued_time = pd.to_datetime(
-                    wsp_gdf["issued_time"]
-                ).max()
-        else:
-            logger.info("No current WSP data available.")
+
+            if df_raw is None:
+                logger.info("No active storms. Pipeline finished.")
+                return {
+                    "track_issued_time": None,
+                    "wsp_issued_time": None,
+                }
+
+            process_storms(df_raw=df_raw, engine=engine, chunksize=chunksize)
+            process_tracks(df_raw=df_raw, engine=engine, chunksize=chunksize)
+            if "issued_time" in df_raw.columns:
+                track_issued_time = pd.to_datetime(df_raw["issued_time"]).max()
+
+            logger.info("Fetching current WSP polygons...")
+            wsp_gdf = lens.nhc.get_wsp()
+            if wsp_gdf is not None and len(wsp_gdf) > 0:
+                process_wsp_polygons(
+                    gdf=wsp_gdf, engine=engine, chunksize=chunksize
+                )
+                if "issued_time" in wsp_gdf.columns:
+                    wsp_issued_time = pd.to_datetime(
+                        wsp_gdf["issued_time"]
+                    ).max()
+            else:
+                logger.info("No current WSP data available.")
 
         logger.info("Pipeline successfully finished!")
         logger.info(
@@ -803,6 +846,107 @@ def run_nhc_current(
     except Exception as e:
         logger.error(f"An error occurred: {e}", exc_info=True)
         raise
+
+
+# Atcf-keyed NHC tables in scrub order: downstream first, parents last,
+# so foreign-key references (if any) clear before the rows they point to.
+_NHC_SCRUB_ATCF_TABLES = [
+    "nhc_tracks_fcast_exposure",
+    "nhc_tracks_obsv_exposure",
+    "nhc_tracks_fcastonly_exposure",
+    "nhc_wsp_exposure",
+    "nhc_wsp_fcastonly_exposure",
+    "nhc_tracks_fcast_buffers",
+    "nhc_tracks_obsv_buffers",
+    "nhc_tracks_fcastonly_buffers",
+    "nhc_wsp_polygon_matched",
+    "nhc_wsp_fcastonly_polygon",
+    "nhc_tracks_geo",
+    "nhc_storms",
+]
+
+
+def run_nhc_scrub(
+    atcf_ids: list[str],
+    issued_times: list[pd.Timestamp] | list[str] | None = None,
+    mode: str = "local",
+    dry_run: bool = False,
+) -> None:
+    """Delete rows for the given atcf_ids from every NHC table.
+
+    ``issued_times`` is required ONLY to scrub ``nhc_wsp_polygon_raw``
+    (which has no atcf_id — it's a basin-wide MultiPolygon keyed on
+    issued_time / threshold / band). If omitted, that table is skipped.
+
+    All deletes commit as a single transaction; any failure rolls the
+    whole scrub back.
+    """
+    coloredlogs.install(
+        logger=logger,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    if not atcf_ids:
+        raise ValueError("atcf_ids must be non-empty")
+
+    atcf_ids = sorted(set(atcf_ids))
+    logger.info(
+        f"{'[dry-run] ' if dry_run else ''}Scrubbing atcf_ids={atcf_ids} "
+        f"issued_times={list(issued_times) if issued_times else []}"
+    )
+
+    engine = stratus.get_engine(stage=mode, write=True)
+    with engine.begin() as conn:
+        for tbl in _NHC_SCRUB_ATCF_TABLES:
+            if dry_run:
+                n = conn.execute(
+                    text(
+                        f"SELECT COUNT(*) FROM storms.{tbl} "
+                        "WHERE atcf_id = ANY(:ids)"
+                    ),
+                    {"ids": atcf_ids},
+                ).scalar()
+                logger.info(f"[dry-run] would delete {n} rows from {tbl}")
+            else:
+                result = conn.execute(
+                    text(
+                        f"DELETE FROM storms.{tbl} "
+                        "WHERE atcf_id = ANY(:ids)"
+                    ),
+                    {"ids": atcf_ids},
+                )
+                logger.info(f"deleted {result.rowcount} rows from {tbl}")
+
+        if issued_times:
+            ts_list = [pd.Timestamp(t) for t in issued_times]
+            if dry_run:
+                n = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM storms.nhc_wsp_polygon_raw "
+                        "WHERE issued_time = ANY(:ts)"
+                    ),
+                    {"ts": ts_list},
+                ).scalar()
+                logger.info(
+                    f"[dry-run] would delete {n} rows from nhc_wsp_polygon_raw"
+                )
+            else:
+                result = conn.execute(
+                    text(
+                        "DELETE FROM storms.nhc_wsp_polygon_raw "
+                        "WHERE issued_time = ANY(:ts)"
+                    ),
+                    {"ts": ts_list},
+                )
+                logger.info(
+                    f"deleted {result.rowcount} rows from nhc_wsp_polygon_raw"
+                )
+        else:
+            logger.info(
+                "No issued_times supplied — skipping nhc_wsp_polygon_raw"
+            )
+
+    logger.info(f"{'[dry-run] ' if dry_run else ''}Scrub complete.")
 
 
 def run_nhc_archive(
