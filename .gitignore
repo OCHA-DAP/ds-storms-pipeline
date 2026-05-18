@@ -161,3 +161,6 @@ scratch/*
 examples/*
 
 artefacts/
+
+# Large GADM boundary downloads sometimes land at the repo root
+gadm_*
