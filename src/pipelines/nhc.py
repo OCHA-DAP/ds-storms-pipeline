@@ -1738,17 +1738,24 @@ def _load_nhc_tracks_fcast_exp_buffers(
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_tracks_fcast_exp(engine, admin_level: int) -> pd.DataFrame:
+def _load_done_nhc_tracks_fcast_exp(
+    engine, admin_level: int, issued_time=None
+) -> pd.DataFrame:
+    filters = ["admin_level = :al"]
+    params: dict = {"al": admin_level}
+    if issued_time is not None:
+        filters.append("issued_time = :it")
+        params["it"] = issued_time
+    where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
-                    " FROM storms.nhc_tracks_fcast_exposure"
-                    " WHERE admin_level = :al"
+                    f" FROM storms.nhc_tracks_fcast_exposure WHERE {where}"
                 ),
                 conn,
-                params={"al": admin_level},
+                params=params,
             )
     except Exception:
         return pd.DataFrame(columns=_TRACK_EXP_KEY_COLS)
@@ -1802,7 +1809,9 @@ def run_nhc_tracks_fcast_exp(
 
         done_df = (
             pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite
-            else _load_done_nhc_tracks_fcast_exp(engine, admin_level)
+            else _load_done_nhc_tracks_fcast_exp(
+                engine, admin_level, issued_time=issued_time,
+            )
         )
 
         processed = skipped = 0
@@ -1873,17 +1882,24 @@ def _load_nhc_tracks_obsv_exp_buffers(
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_tracks_obsv_exp(engine, admin_level: int) -> pd.DataFrame:
+def _load_done_nhc_tracks_obsv_exp(
+    engine, admin_level: int, valid_time=None
+) -> pd.DataFrame:
+    filters = ["admin_level = :al"]
+    params: dict = {"al": admin_level}
+    if valid_time is not None:
+        filters.append("valid_time = :vt")
+        params["vt"] = valid_time
+    where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, valid_time, wind_speed_kt, admin_level, pcode"
-                    " FROM storms.nhc_tracks_obsv_exposure"
-                    " WHERE admin_level = :al"
+                    f" FROM storms.nhc_tracks_obsv_exposure WHERE {where}"
                 ),
                 conn,
-                params={"al": admin_level},
+                params=params,
             )
     except Exception:
         return pd.DataFrame(columns=_OBSV_EXP_KEY_COLS)
@@ -1948,7 +1964,9 @@ def run_nhc_tracks_obsv_exp(
 
         done_df = (
             pd.DataFrame(columns=_OBSV_EXP_KEY_COLS) if overwrite
-            else _load_done_nhc_tracks_obsv_exp(engine, admin_level)
+            else _load_done_nhc_tracks_obsv_exp(
+                engine, admin_level, valid_time=valid_time,
+            )
         )
 
         processed = skipped = 0
@@ -2019,17 +2037,24 @@ def _load_nhc_tracks_fcastonly_exp_buffers(
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_tracks_fcastonly_exp(engine, admin_level: int) -> pd.DataFrame:
+def _load_done_nhc_tracks_fcastonly_exp(
+    engine, admin_level: int, issued_time=None
+) -> pd.DataFrame:
+    filters = ["admin_level = :al"]
+    params: dict = {"al": admin_level}
+    if issued_time is not None:
+        filters.append("issued_time = :it")
+        params["it"] = issued_time
+    where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
-                    " FROM storms.nhc_tracks_fcastonly_exposure"
-                    " WHERE admin_level = :al"
+                    f" FROM storms.nhc_tracks_fcastonly_exposure WHERE {where}"
                 ),
                 conn,
-                params={"al": admin_level},
+                params=params,
             )
     except Exception:
         return pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS)
@@ -2083,7 +2108,9 @@ def run_nhc_tracks_fcastonly_exp(
 
         done_df = (
             pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS) if overwrite
-            else _load_done_nhc_tracks_fcastonly_exp(engine, admin_level)
+            else _load_done_nhc_tracks_fcastonly_exp(
+                engine, admin_level, issued_time=issued_time,
+            )
         )
 
         processed = skipped = 0
@@ -2179,17 +2206,24 @@ def _load_wsp_for_exposure(
     return gdf_wsp
 
 
-def _load_done_nhc_wsp_exp(engine, admin_level: int) -> pd.DataFrame:
+def _load_done_nhc_wsp_exp(
+    engine, admin_level: int, issued_time=None
+) -> pd.DataFrame:
+    filters = ["admin_level = :al"]
+    params: dict = {"al": admin_level}
+    if issued_time is not None:
+        filters.append("issued_time = :it")
+        params["it"] = issued_time
+    where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
-                    " FROM storms.nhc_wsp_exposure"
-                    " WHERE admin_level = :al"
+                    f" FROM storms.nhc_wsp_exposure WHERE {where}"
                 ),
                 conn,
-                params={"al": admin_level},
+                params=params,
             )
     except Exception:
         return pd.DataFrame(columns=_WSP_EXP_KEY_COLS)
@@ -2325,7 +2359,7 @@ def _run_exp_year_chunk(
     done_by_level = {
         al: (
             pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
-            else done_loader(engine, al)
+            else done_loader(engine, al, issued_time=issued_time)
         )
         for al in admin_levels
     }
@@ -2713,17 +2747,24 @@ def _load_wsp_fcastonly_for_exposure(
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_wsp_fcastonly_exp(engine, admin_level: int) -> pd.DataFrame:
+def _load_done_nhc_wsp_fcastonly_exp(
+    engine, admin_level: int, issued_time=None
+) -> pd.DataFrame:
+    filters = ["admin_level = :al"]
+    params: dict = {"al": admin_level}
+    if issued_time is not None:
+        filters.append("issued_time = :it")
+        params["it"] = issued_time
+    where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
-                    " FROM storms.nhc_wsp_fcastonly_exposure"
-                    " WHERE admin_level = :al"
+                    f" FROM storms.nhc_wsp_fcastonly_exposure WHERE {where}"
                 ),
                 conn,
-                params={"al": admin_level},
+                params=params,
             )
     except Exception:
         return pd.DataFrame(columns=_WSP_EXP_KEY_COLS)
