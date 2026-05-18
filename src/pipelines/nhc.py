@@ -2385,7 +2385,7 @@ def run_nhc_wsp_exp(
     _run_exp_year_chunk(
         table_label="WSP exposure",
         load_chunk=lambda eng, year: _load_wsp_for_exposure(
-            eng, basin=basin, year=year,
+            eng, basin=basin, year=year, issued_time=issued_time,
         ),
         out_table="nhc_wsp_exposure",
         done_loader=_load_done_nhc_wsp_exp,
@@ -2766,7 +2766,7 @@ def run_nhc_wsp_fcastonly_exp(
     _run_exp_year_chunk(
         table_label="WSP fcastonly exposure",
         load_chunk=lambda eng, y: _load_wsp_fcastonly_for_exposure(
-            eng, basin=basin, year=y,
+            eng, basin=basin, year=y, issued_time=issued_time,
         ),
         out_table="nhc_wsp_fcastonly_exposure",
         done_loader=_load_done_nhc_wsp_fcastonly_exp,
