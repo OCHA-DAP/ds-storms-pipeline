@@ -11,6 +11,7 @@ import json
 import logging
 import warnings
 from contextlib import contextmanager, nullcontext
+from functools import partial
 
 import coloredlogs
 import geopandas as gpd
@@ -279,13 +280,21 @@ def process_storms(df_raw, engine, chunksize):
     logger.info(f"Extracted {len(storms)} storms.")
 
     with engine.connect() as conn:
+        # Conflict-target the PK (atcf_id) rather than the redundant
+        # nhc_storms_unique(atcf_id, storm_id). storm_id is derived from
+        # the storm's current name, so it changes when NHC renames a
+        # system (e.g. placeholder "Nine" → "Harold"). Keying on the PK
+        # lets those renames overwrite the row instead of tripping a
+        # plain-INSERT PK violation.
         storms.to_sql(
             "nhc_storms",
             con=conn,
             schema="storms",
             if_exists="append",
             index=False,
-            method=stratus.postgres_upsert,
+            method=partial(
+                stratus.postgres_upsert, constraint="nhc_storms_pkey"
+            ),
             chunksize=chunksize,
         )
 
