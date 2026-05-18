@@ -1,28 +1,16 @@
-"""WFP ADAM ETL pipeline.
+"""WFP ADAM ETL pipeline (current / archive), mirroring the GDACS pattern.
 
-Two modes (mirroring the GDACS pipeline pattern):
+Per event we call ``ocha_lens.datasources.adam.get_exposure`` to download
+the per-episode population CSV (long-form rows for admin levels 0/1/2,
+cumulative ≥ threshold) and write to ``storms.adam_exposure``. ADAM
+event_id is the same identifier GDACS uses, so we also upsert
+``storms.storm_id_lookup`` with ``adam_eventid = event_id`` — a boolean
+"have we ingested ADAM data for this event?" signal that leaves
+``atcf_id`` untouched.
 
-1. Current — real-time ADAM events from a recent window (days_back).
-2. Archive — historical backfill across a date range.
-
-Both modes call ``ocha_lens.datasources.adam`` to list events and download
-per-event population CSVs, then write rows to ``storms.adam_exposure`` in
-long format covering admin_level 0/1/2. The library returns one DataFrame
-per event with all three levels already cumulative-≥-threshold; this module
-just adds event/episode/valid_time and persists.
-
-ADAM event_id is the same identifier GDACS uses for the same physical event
-(verified empirically — e.g. MILTON-24 is event_id 1001111 in both systems).
-So the pipeline also upserts ``storms.storm_id_lookup`` with
-``adam_eventid = event_id`` for each event it ingests, recording that we
-have ADAM data for the event. Whatever the GDACS pipeline (or later runs of
-ADAM) writes to other columns of that row is preserved.
-
-Idempotency: before the event loop, we pre-load the set of
-(adam_eventid, adam_episodeid) pairs already in ``storms.adam_exposure``
-and skip the CSV download for any event whose latest episode is in that
-set. First backfill downloads everything; subsequent runs only fetch new
-events or events whose latest episode has advanced.
+Idempotency: pre-load (event_id, episode_id) pairs already in
+``adam_exposure`` and skip CSV download for any event whose latest
+episode is already persisted.
 """
 
 import logging
@@ -83,9 +71,6 @@ def _emit_rows(
             "parent_admin_name": (
                 r["parent_admin_name"] if pd.notna(r["parent_admin_name"]) else None
             ),
-            # pcode = iso3 at admin_level=0; null at adm1/adm2 (no public
-            # GAUL→OCHA COD crosswalk yet — deferred to a future geometric
-            # join pipeline that uses ADAM's per-event wind-footprint shp).
             "pcode": (
                 r["iso3"] if int(r["admin_level"]) == 0 and pd.notna(r["iso3"]) else None
             ),
@@ -124,12 +109,12 @@ def _ingest_event_range(
     n_skipped = 0
     n_no_csv = 0
 
-    for i, ev in events.iterrows():
+    for i, (_, ev) in enumerate(events.iterrows(), start=1):
         event_id = int(ev["event_id"])
         episode_id = int(ev["episode_id"])
         logger.info(
             "[%d/%d] event_id=%s episode_id=%s name=%s",
-            i + 1, len(events), event_id, episode_id, ev["name"],
+            i, len(events), event_id, episode_id, ev["name"],
         )
 
         if (event_id, episode_id) in already_ingested:

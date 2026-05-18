@@ -19,13 +19,14 @@ second API trip in a separate match pass.
 import logging
 from datetime import datetime, timezone
 from functools import partial
-from typing import Optional
+from typing import Dict, Optional, Set, Tuple
 
 import coloredlogs
 import ocha_stratus as stratus
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 from ocha_lens.datasources import gdacs as gdacs_api
 
@@ -113,6 +114,50 @@ def _emit_rows(eventid, episode_id, valid_time, adm0_by_buffer, adm1_by_buffer):
     return rows
 
 
+def _load_skip_info(
+    engine,
+) -> Tuple[Dict[int, pd.Timestamp], Set[int]]:
+    """Pre-load DB state used to decide which events to skip.
+
+    Returns
+    -------
+    db_max_vt : dict
+        gdacs_eventid → MAX(valid_time) from storms.gdacs_exposure. An event
+        is "already at this snapshot or fresher" when api_to_date <= the
+        value here.
+    matched_only_eventids : set
+        gdacs_eventids that appear in storm_id_lookup (atcf resolved) but
+        produced zero exposure rows — usually weak storms with no country
+        in the wind buffer (LESLIE / JOYCE pattern). We don't have a
+        valid_time for these to compare against, so we permanently skip
+        them. Cheap correctness vs. re-fetching every run.
+    """
+    with engine.connect() as conn:
+        db_max_vt_df = pd.read_sql(
+            text(
+                "SELECT gdacs_eventid, MAX(valid_time) AS max_vt "
+                "FROM storms.gdacs_exposure "
+                "GROUP BY gdacs_eventid"
+            ),
+            conn,
+        )
+        matched_df = pd.read_sql(
+            text(
+                "SELECT gdacs_eventid FROM storms.storm_id_lookup "
+                "WHERE atcf_id IS NOT NULL"
+            ),
+            conn,
+        )
+    db_max_vt = {
+        int(r.gdacs_eventid): pd.to_datetime(r.max_vt)
+        for r in db_max_vt_df.itertuples()
+    }
+    matched_eventids = {int(x) for x in matched_df["gdacs_eventid"]}
+    # Matched-only = matched but no exposure rows
+    matched_only = matched_eventids - db_max_vt.keys()
+    return db_max_vt, matched_only
+
+
 def _ingest_event_range(
     from_date: str,
     to_date: str,
@@ -137,17 +182,39 @@ def _ingest_event_range(
 
     nhc_tracks = load_freshest_nhc_tracks(engine)
     already_matched = load_matched_eventids(engine)
+    db_max_vt, matched_only_eventids = _load_skip_info(engine)
     logger.info(
-        "Loaded %d NHC track rows; %d events already matched",
+        "Loaded %d NHC track rows; %d events already matched; "
+        "%d events with exposure on file; %d zero-exposure-matched",
         len(nhc_tracks), len(already_matched),
+        len(db_max_vt), len(matched_only_eventids),
     )
 
-    all_rows = []
-    matches = []
-    n_skipped = 0
+    exposure_upsert = partial(
+        stratus.postgres_upsert, constraint="gdacs_exposure_unique"
+    )
+
+    n_skipped_fresh = 0   # already have this snapshot or later
+    n_skipped_zero = 0    # zero-exposure event we matched previously
+    n_skipped_error = 0   # network / no-episodes during fetch
+    n_processed = 0
+    n_rows_written = 0
+    n_matches = 0
 
     for i, ev in events.iterrows():
         eventid = int(ev["eventid"])
+        api_to_date = pd.to_datetime(ev["to_date"])
+
+        # Skip checks (cheap, no HTTP). A failed event from a previous run
+        # is neither in db_max_vt nor matched_only_eventids → falls through
+        # to processing, which auto-retries.
+        if eventid in db_max_vt and api_to_date <= db_max_vt[eventid]:
+            n_skipped_fresh += 1
+            continue
+        if eventid in matched_only_eventids:
+            n_skipped_zero += 1
+            continue
+
         logger.info(
             "[%d/%d] eventid=%s name=%s",
             i + 1, len(events), eventid, ev["name"],
@@ -159,59 +226,55 @@ def _ingest_event_range(
             adm0 = gdacs_api.get_exposure_adm0(eventid, detail=detail)
             adm1 = gdacs_api.get_exposure_adm1(eventid, detail=detail)
         except gdacs_api.NoEpisodesError:
-            # Legitimate "event has no episodes yet" — skip, retry
-            # next run when GDACS has caught up.
+            # Legitimate "event has no episodes yet" — skip, retry next run.
             logger.info("  no episodes yet for %s, skipping", eventid)
-            n_skipped += 1
+            n_skipped_error += 1
             continue
         except requests.exceptions.RequestException as e:
-            # Transient network failure — skip, retry next run.
-            # Any other exception (KeyError on missing API field,
-            # pandera ValidationError on bad data, etc.) propagates
-            # and aborts the run loudly.
+            # Transient network failure — skip, retry next run. Other
+            # exceptions (KeyError / pandera ValidationError) propagate.
             logger.warning("  network error for %s: %s", eventid, e)
-            n_skipped += 1
+            n_skipped_error += 1
             continue
 
         rows = _emit_rows(eventid, episode_id, valid_time, adm0, adm1)
-        all_rows.extend(rows)
         logger.info("  +%d rows", len(rows))
+
+        # Per-event upsert — durable as soon as the event is processed.
+        # Lets us crash anywhere in the loop without losing prior work,
+        # and progress is visible mid-run via DB queries. Cost is one
+        # extra round-trip per event over batched-at-end (~0.5% overhead
+        # vs. a multi-hour run; well worth the resilience).
+        if rows:
+            pd.DataFrame(rows).to_sql(
+                "gdacs_exposure",
+                engine,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=exposure_upsert,
+                chunksize=chunksize,
+            )
+            n_rows_written += len(rows)
 
         if eventid not in already_matched:
             atcf_id = attempt_match(eventid, nhc_tracks, detail=detail)
             if atcf_id is not None:
-                matches.append(
-                    {"gdacs_eventid": eventid, "atcf_id": atcf_id}
+                upsert_matches(
+                    [{"gdacs_eventid": eventid, "atcf_id": atcf_id}], engine,
                 )
+                already_matched.add(eventid)
+                n_matches += 1
                 logger.info("  matched → atcf_id=%s", atcf_id)
 
+        n_processed += 1
+
     logger.info(
-        "Done fetching: %d rows from %d events (%d skipped); "
-        "%d inline matches resolved",
-        len(all_rows), len(events) - n_skipped, n_skipped, len(matches),
+        "Done: processed=%d, rows=%d, matches=%d; "
+        "skipped fresh=%d, zero-exp=%d, errors=%d",
+        n_processed, n_rows_written, n_matches,
+        n_skipped_fresh, n_skipped_zero, n_skipped_error,
     )
-
-    if all_rows:
-        df = pd.DataFrame(all_rows)
-        upsert = partial(
-            stratus.postgres_upsert, constraint="gdacs_exposure_unique"
-        )
-        logger.info("Upserting %d rows -> storms.gdacs_exposure (%s)",
-                    len(df), mode)
-        df.to_sql(
-            "gdacs_exposure",
-            engine,
-            schema="storms",
-            if_exists="append",
-            index=False,
-            method=upsert,
-            chunksize=chunksize,
-        )
-        logger.info("Wrote %d rows", len(df))
-    else:
-        logger.info("No exposure rows to write")
-
-    upsert_matches(matches, engine)
 
 
 def run_gdacs_current(

@@ -156,5 +156,8 @@ pipelines/data/*
 pipelines/temp/*
 exploration/temp/*
 scratch/*
+.scrap/
 
 examples/*
+
+artefacts/

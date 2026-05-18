@@ -2,16 +2,22 @@
 -- WFP ADAM cumulative wind exposure
 -- ============================================================================
 -- One row per (adam_eventid, adam_episodeid, wind_speed_kt, admin_level,
--- pcode): population exposed within that admin unit to the ADAM cumulative
--- wind footprint at that episode snapshot.
+-- admin_name, parent_admin_name): population exposed within that admin unit
+-- to the ADAM cumulative wind footprint at that episode snapshot.
 --
--- Designed to hold exposure at any admin level. admin_level=0 is country
--- level (aggregated from ADM0_NAME in ADAM's population CSV). admin_level=1
--- subnational rows (from ADM1_NAME) use the same table.
+-- Holds exposure at three admin levels in the same table:
+--   admin_level=0 — country (aggregated by pipeline from ADM0_NAME)
+--   admin_level=1 — first subnational (aggregated by pipeline from ADM1_NAME)
+--   admin_level=2 — second subnational (native granularity in ADAM's CSV)
 --
--- Populated by running: python run_pipeline.py adam-exp
--- Source: WFP ADAM OGC API (adam.adam_ts_events collection) + per-event
---         population_csv_url downloads
+-- Populated by: python run_pipeline.py adam
+-- Source:       WFP ADAM OGC API (adam.adam_ts_events collection) +
+--               per-event population_csv_url downloads
+--
+-- NOTE: the UNIQUE constraint uses `NULLS NOT DISTINCT` (PostgreSQL 15+).
+-- iso3 and parent_admin_name are nullable but must still participate in
+-- uniqueness — without this clause two rows with NULL iso3 would not
+-- collide under default NULL-is-distinct semantics.
 -- ============================================================================
 
 -- DROP TABLE IF EXISTS storms.adam_exposure CASCADE;
@@ -66,6 +72,14 @@ COMMENT ON COLUMN storms.adam_exposure.pop_exposed IS
 
 CREATE INDEX IF NOT EXISTS idx_adam_exposure_adam_eventid
     ON storms.adam_exposure (adam_eventid)
+    TABLESPACE pg_default;
+
+-- Supports the pipeline's idempotency lookup
+--   SELECT DISTINCT adam_eventid, adam_episodeid FROM storms.adam_exposure
+-- which is run on every pipeline invocation. Without this, that DISTINCT
+-- degrades to a full table scan as the row count grows (~700 rows/event).
+CREATE INDEX IF NOT EXISTS idx_adam_exposure_event_episode
+    ON storms.adam_exposure (adam_eventid, adam_episodeid)
     TABLESPACE pg_default;
 
 CREATE INDEX IF NOT EXISTS idx_adam_exposure_valid_time
