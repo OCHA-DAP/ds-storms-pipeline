@@ -382,25 +382,35 @@ def _list_wsp_issued_times(
     basin: str | None = None,
     issued_time=None,
 ) -> list:
-    """Return the issued_times in nhc_wsp_polygon_raw that also have tracks,
-    after applying the user filters. Sorted ascending."""
+    """Return WSP raw issued_times that have at least one matching tracks
+    advisory within [r.issued_time, r.issued_time + 3h], sorted ascending.
+
+    The 3-hour forward window reflects NHC's actual publishing cadence:
+    WSP products are issued at synoptic hours (00/06/12/18 UTC) but
+    typically don't appear on the public mirror until the next major
+    advisory (03/09/15/21 UTC), at which point the tracks_geo row for
+    that later advisory is the closest available track context. For
+    storms with no active watches/warnings (no intermediate advisories),
+    this is the *only* tracks-to-WSP mapping that exists.
+    """
     filters = []
     params: dict = {}
     if since:
-        filters.append("t.issued_time >= :since")
+        filters.append("r.issued_time >= :since")
         params["since"] = since
     if basin:
         filters.append("t.basin = :basin")
         params["basin"] = basin
     if issued_time is not None:
-        filters.append("t.issued_time = :issued_time")
+        filters.append("r.issued_time = :issued_time")
         params["issued_time"] = issued_time
     where = ("WHERE " + " AND ".join(filters)) if filters else ""
     sql = (
         "SELECT DISTINCT r.issued_time"
         " FROM storms.nhc_wsp_polygon_raw r"
         " INNER JOIN storms.nhc_tracks_geo t"
-        " ON t.issued_time = r.issued_time"
+        " ON t.issued_time BETWEEN r.issued_time"
+        " AND r.issued_time + INTERVAL '3 hours'"
         f" {where}"
         " ORDER BY r.issued_time"
     )
@@ -425,10 +435,19 @@ def _build_matched_for_issued_time(engine, it, chunksize: int = 500) -> int:
             ),
             conn, geom_col="geometry", params={"it": it},
         )
+        # For each storm, take the earliest tracks advisory within
+        # [WSP issued_time, WSP issued_time + 3h]. Exact-match wins
+        # (ORDER BY issued_time ASC), with the next-later advisory as
+        # the fallback when no intermediate-advisory tracks at the WSP's
+        # synoptic hour are available. See _list_wsp_issued_times for
+        # the why.
         gdf_tracks = gpd.read_postgis(
             text(
-                "SELECT atcf_id, issued_time, geometry"
-                " FROM storms.nhc_tracks_geo WHERE issued_time = :it"
+                "SELECT DISTINCT ON (atcf_id) atcf_id, issued_time, geometry"
+                " FROM storms.nhc_tracks_geo"
+                " WHERE issued_time BETWEEN :it"
+                " AND :it + INTERVAL '3 hours'"
+                " ORDER BY atcf_id, issued_time ASC"
             ),
             conn, geom_col="geometry", params={"it": it},
         )
