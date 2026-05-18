@@ -84,6 +84,14 @@ def main():
         "--overwrite", action="store_true",
         help="Recalculate even if results already exist",
     )
+    exp_common.add_argument(
+        "--admin-level", type=int, choices=[0, 1], action="append",
+        metavar="N", dest="admin_level",
+        help=(
+            "Admin level to compute exposure for (repeatable). "
+            "Default: both 0 and 1."
+        ),
+    )
 
     # ------------------------------------------------------------------ #
     # IBTrACS ETL
@@ -262,6 +270,14 @@ def main():
         help=(
             "Only this issued_time (maps to valid_time on obsv buffers — pass"
             " the track_issued_time from Task A for realtime / DBX chaining)"
+        ),
+    )
+    nhc_obsv_exp_parser.add_argument(
+        "--final-only", action="store_true",
+        help=(
+            "Keep only the final cumulative buffer per (atcf_id, wind_speed_kt) "
+            "at max(valid_time). For historical backfills where intermediate "
+            "advisories aren't needed."
         ),
     )
 
@@ -482,6 +498,7 @@ def main():
             overwrite=args.overwrite,
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
+            admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-obsv-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
@@ -495,6 +512,8 @@ def main():
             overwrite=args.overwrite,
             mode=args.mode,
             valid_time=_parse_it(getattr(args, "issued_time", None)),
+            admin_levels=getattr(args, "admin_level", None),
+            final_only=getattr(args, "final_only", False),
         )
     elif args.pipeline == "nhc-fcastonly-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
@@ -505,6 +524,7 @@ def main():
             overwrite=args.overwrite,
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
+            admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-wsp-exp":
         countries = [c.upper() for c in args.countries] if args.countries else None
@@ -515,6 +535,7 @@ def main():
             overwrite=args.overwrite,
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
+            admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-wsp-polygon-matched":
         it_arg = _parse_it(getattr(args, "issued_time", None))
@@ -550,6 +571,7 @@ def main():
             mode=args.mode,
             year=args.year,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
+            admin_levels=getattr(args, "admin_level", None),
         )
 
 

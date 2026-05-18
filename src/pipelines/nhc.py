@@ -1413,7 +1413,128 @@ def run_nhc_tracks_fcastonly_buffers(
 
 _TRACK_EXP_KEY_COLS = ["atcf_id", "issued_time", "wind_speed_kt", "admin_level", "pcode"]
 _WSP_EXP_KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "admin_level", "pcode"]
-_EXP_ADMIN_LEVEL = 0
+_DEFAULT_ADMIN_LEVELS = [0, 1]
+
+
+def _process_buffer_exposure_country(
+    *,
+    iso3: str,
+    country_units: gpd.GeoDataFrame,    # rows for this iso3, cols [pcode, geometry]
+    admin_level: int,
+    gdf_buffers,                         # epsg:4326
+    gdf_buffers_anti,                    # antimeridian-wrapped
+    buffers_sindex,                      # gdf_buffers.sindex
+    da_wp_global,
+    da_wp_wrapped,
+    done_df: pd.DataFrame,
+    overwrite: bool,
+    key_cols: list[str],
+    done_filter,
+    out_table: str,
+    engine,
+    drop_cols: list[str] | None = None,
+) -> int:
+    """Compute and write per-unit exposure for all admin units in one country.
+
+    Country geometry (union of its units) is used to pre-clip WorldPop and
+    spatially prefilter buffers; per-unit work then sub-clips that smaller
+    raster and intersects against the smaller buffer set.
+
+    Returns number of units written (0 if nothing intersected or all done).
+    """
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure
+
+    country_geom = country_units.geometry.union_all()
+    minx, _, maxx, _ = country_geom.bounds
+    wrap = maxx > 160 or minx < -160
+
+    if wrap:
+        da_wp = da_wp_wrapped
+        country_geom_local = (
+            gpd.GeoSeries([country_geom], crs=4326)
+            .to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+        )
+        country_buffers = gdf_buffers_anti[
+            gdf_buffers_anti.intersects(country_geom_local)
+        ]
+    else:
+        da_wp = da_wp_global
+        country_geom_local = country_geom
+        candidate_idx = list(buffers_sindex.intersection(country_geom.bounds))
+        if not candidate_idx:
+            return 0
+        candidates = gdf_buffers.iloc[candidate_idx]
+        country_buffers = candidates[candidates.intersects(country_geom)]
+
+    if country_buffers.empty:
+        return 0
+
+    da_wp_country = da_wp.rio.clip([country_geom_local], all_touched=True)
+
+    # For admin1, build a small sindex over the country-clipped buffers so
+    # per-unit intersect is cheap. For admin0 we skip — the only unit IS
+    # the country.
+    unit_sindex = country_buffers.sindex if admin_level > 0 else None
+
+    writes = 0
+    for _, unit in country_units.iterrows():
+        pcode = unit["pcode"]
+
+        if admin_level == 0:
+            buf_in = country_buffers
+            unit_geom_local = country_geom_local
+            da_wp_unit = da_wp_country
+        else:
+            unit_geom = unit.geometry
+            if wrap:
+                unit_geom_local = (
+                    gpd.GeoSeries([unit_geom], crs=4326)
+                    .to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
+                )
+                buf_in = country_buffers[country_buffers.intersects(unit_geom_local)]
+            else:
+                unit_geom_local = unit_geom
+                idx2 = list(unit_sindex.intersection(unit_geom.bounds))
+                if not idx2:
+                    continue
+                unit_candidates = country_buffers.iloc[idx2]
+                buf_in = unit_candidates[unit_candidates.intersects(unit_geom)]
+            if buf_in.empty:
+                continue
+            try:
+                da_wp_unit = da_wp_country.rio.clip([unit_geom_local], all_touched=True)
+            except Exception:
+                continue
+
+        if not overwrite and not done_df.empty:
+            done_unit = done_df[done_df["pcode"] == pcode]
+            if not done_unit.empty:
+                buf_in = done_filter(buf_in, done_unit)
+                if buf_in.empty:
+                    continue
+
+        df = calculate_exposure(buf_in, da_wp_unit)
+        df["iso3"] = iso3
+        df["pcode"] = pcode
+        df["admin_level"] = admin_level
+
+        if drop_cols:
+            df = df.drop(columns=drop_cols, errors="ignore")
+
+        out = df.drop_duplicates(subset=key_cols, keep="last")
+        with engine.connect() as conn:
+            out.to_sql(
+                out_table,
+                conn,
+                schema="storms",
+                if_exists="append",
+                index=False,
+                method=stratus.postgres_upsert,
+            )
+            conn.commit()
+        writes += 1
+
+    return writes
 
 
 def _load_nhc_tracks_fcast_exp_buffers(
@@ -1431,34 +1552,31 @@ def _load_nhc_tracks_fcast_exp_buffers(
         filters.append(f"b.issued_time = '{issued_time}'")
 
     if basin:
-        where = "WHERE " + " AND ".join(filters)
-        query = (
-            f"SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
-            f" FROM storms.nhc_tracks_fcast_buffers b"
-            f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
-            f" {where}"
-        )
+        join = " JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
     else:
-        where = ("WHERE " + " AND ".join(filters)) if filters else ""
-        query = (
-            f"SELECT atcf_id, issued_time, wind_speed_kt, geometry"
-            f" FROM storms.nhc_tracks_fcast_buffers {where}"
-        )
+        join = ""
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    query = (
+        "SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
+        " FROM storms.nhc_tracks_fcast_buffers b"
+        f"{join} {where}"
+    )
 
     with engine.connect() as conn:
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_tracks_fcast_exp(engine) -> pd.DataFrame:
+def _load_done_nhc_tracks_fcast_exp(engine, admin_level: int) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
                     " FROM storms.nhc_tracks_fcast_exposure"
-                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                    " WHERE admin_level = :al"
                 ),
                 conn,
+                params={"al": admin_level},
             )
     except Exception:
         return pd.DataFrame(columns=_TRACK_EXP_KEY_COLS)
@@ -1481,13 +1599,16 @@ def run_nhc_tracks_fcast_exp(
     overwrite: bool = False,
     mode: str = "dev",
     issued_time=None,
+    admin_levels: list[int] | None = None,
 ) -> None:
     import warnings
     from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
     engine = stratus.get_engine(stage=mode, write=True)
+
+    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
 
     logger.info("Loading NHC wind buffers for exposure calculation...")
     gdf_buffers = _load_nhc_tracks_fcast_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
@@ -1495,73 +1616,52 @@ def run_nhc_tracks_fcast_exp(
         logger.info("No wind buffers found for the given filters. Skipping.")
         return
     gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
-
-    gdf_adm1 = load_adm1(countries)
-    country_list = sorted(gdf_adm1["iso_3"].unique())
-    logger.info(f"Processing {len(country_list)} countries...")
+    buffers_sindex = gdf_buffers.sindex
 
     da_wp_global, da_wp_wrapped = load_pop()
 
-    done_df = pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_fcast_exp(engine)
+    for admin_level in admin_levels:
+        gdf_units = load_adm_units(countries, admin_level)
+        country_groups = list(gdf_units.groupby("iso3"))
+        logger.info(
+            f"admin_level={admin_level}: {len(country_groups)} countries, "
+            f"{len(gdf_units)} units"
+        )
 
-    buffers_sindex = gdf_buffers.sindex
-    processed = skipped = 0
-    for i, iso3 in enumerate(country_list, 1):
-        prefix = f"[{i}/{len(country_list)}] {iso3}"
+        done_df = (
+            pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite
+            else _load_done_nhc_tracks_fcast_exp(engine, admin_level)
+        )
 
-        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        minx, _, maxx, _ = adm_geom.bounds
-        wrap = maxx > 160 or minx < -160
-
-        if wrap:
-            da_wp = da_wp_wrapped
-            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buf_in = gdf_buffers_anti[gdf_buffers_anti.intersects(adm_geom)]
-        else:
-            da_wp = da_wp_global
-            candidate_idx = list(buffers_sindex.intersection(adm_geom.bounds))
-            if not candidate_idx:
-                skipped += 1
-                continue
-            candidates = gdf_buffers.iloc[candidate_idx]
-            buf_in = candidates[candidates.intersects(adm_geom)]
-
-        if buf_in.empty:
-            skipped += 1
-            continue
-
-        if not overwrite and not done_df.empty:
-            done_country = done_df[done_df["pcode"] == iso3]
-            if not done_country.empty:
-                buf_in = _filter_done_nhc_tracks_fcast(buf_in, done_country)
-                if buf_in.empty:
-                    skipped += 1
-                    logger.info(f"{prefix} — all done, skipping")
-                    continue
-
-        logger.info(f"{prefix} — {len(buf_in)} intersecting")
-
-        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-        df = calculate_exposure(buf_in, da_wp_country)
-        df["iso3"] = iso3
-        df["pcode"] = iso3
-        df["admin_level"] = _EXP_ADMIN_LEVEL
-        del da_wp_country
-
-        out = df.drop_duplicates(subset=_TRACK_EXP_KEY_COLS, keep="last")
-        with engine.connect() as conn:
-            out.to_sql(
-                "nhc_tracks_fcast_exposure",
-                conn,
-                schema="storms",
-                if_exists="append",
-                index=False,
-                method=stratus.postgres_upsert,
+        processed = skipped = 0
+        for i, (iso3, country_units) in enumerate(country_groups, 1):
+            prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
+            n = _process_buffer_exposure_country(
+                iso3=iso3,
+                country_units=country_units,
+                admin_level=admin_level,
+                gdf_buffers=gdf_buffers,
+                gdf_buffers_anti=gdf_buffers_anti,
+                buffers_sindex=buffers_sindex,
+                da_wp_global=da_wp_global,
+                da_wp_wrapped=da_wp_wrapped,
+                done_df=done_df,
+                overwrite=overwrite,
+                key_cols=_TRACK_EXP_KEY_COLS,
+                done_filter=_filter_done_nhc_tracks_fcast,
+                out_table="nhc_tracks_fcast_exposure",
+                engine=engine,
             )
-            conn.commit()
-        processed += 1
+            if n:
+                processed += 1
+                logger.info(f"{prefix} — {n} unit writes")
+            else:
+                skipped += 1
 
-    logger.info(f"NHC wind exposure done: {processed} written, {skipped} skipped.")
+        logger.info(
+            f"admin_level={admin_level} done: {processed} countries written, "
+            f"{skipped} skipped."
+        )
     engine.dispose()
 
 
@@ -1587,34 +1687,31 @@ def _load_nhc_tracks_obsv_exp_buffers(
         filters.append(f"b.valid_time = '{valid_time}'")
 
     if basin:
-        where = "WHERE " + " AND ".join(filters)
-        query = (
-            f"SELECT b.atcf_id, b.valid_time, b.wind_speed_kt, b.geometry"
-            f" FROM storms.nhc_tracks_obsv_buffers b"
-            f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
-            f" {where}"
-        )
+        join = " JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
     else:
-        where = ("WHERE " + " AND ".join(filters)) if filters else ""
-        query = (
-            f"SELECT atcf_id, valid_time, wind_speed_kt, geometry"
-            f" FROM storms.nhc_tracks_obsv_buffers {where}"
-        )
+        join = ""
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    query = (
+        "SELECT b.atcf_id, b.valid_time, b.wind_speed_kt, b.geometry"
+        " FROM storms.nhc_tracks_obsv_buffers b"
+        f"{join} {where}"
+    )
 
     with engine.connect() as conn:
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_tracks_obsv_exp(engine) -> pd.DataFrame:
+def _load_done_nhc_tracks_obsv_exp(engine, admin_level: int) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, valid_time, wind_speed_kt, admin_level, pcode"
                     " FROM storms.nhc_tracks_obsv_exposure"
-                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                    " WHERE admin_level = :al"
                 ),
                 conn,
+                params={"al": admin_level},
             )
     except Exception:
         return pd.DataFrame(columns=_OBSV_EXP_KEY_COLS)
@@ -1637,87 +1734,80 @@ def run_nhc_tracks_obsv_exp(
     overwrite: bool = False,
     mode: str = "dev",
     valid_time=None,
+    admin_levels: list[int] | None = None,
+    final_only: bool = False,
 ) -> None:
     import warnings
     from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
     engine = stratus.get_engine(stage=mode, write=True)
+
+    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
 
     logger.info("Loading NHC observed track buffers for exposure calculation...")
     gdf_buffers = _load_nhc_tracks_obsv_exp_buffers(engine, since=since, basin=basin, valid_time=valid_time)
     if gdf_buffers.empty:
         logger.info("No observed track buffers found for the given filters. Skipping.")
         return
-    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
 
-    gdf_adm1 = load_adm1(countries)
-    country_list = sorted(gdf_adm1["iso_3"].unique())
-    logger.info(f"Processing {len(country_list)} countries...")
+    if final_only:
+        before = len(gdf_buffers)
+        idx = gdf_buffers.groupby(["atcf_id", "wind_speed_kt"])["valid_time"].idxmax()
+        gdf_buffers = gdf_buffers.loc[idx].reset_index(drop=True)
+        logger.info(
+            f"final_only: trimmed {before:,} buffers → {len(gdf_buffers):,} "
+            f"(one per atcf_id × wind_speed_kt at max(valid_time))"
+        )
+
+    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
+    buffers_sindex = gdf_buffers.sindex
 
     da_wp_global, da_wp_wrapped = load_pop()
 
-    done_df = pd.DataFrame(columns=_OBSV_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_obsv_exp(engine)
+    for admin_level in admin_levels:
+        gdf_units = load_adm_units(countries, admin_level)
+        country_groups = list(gdf_units.groupby("iso3"))
+        logger.info(
+            f"admin_level={admin_level}: {len(country_groups)} countries, "
+            f"{len(gdf_units)} units"
+        )
 
-    buffers_sindex = gdf_buffers.sindex
-    processed = skipped = 0
-    for i, iso3 in enumerate(country_list, 1):
-        prefix = f"[{i}/{len(country_list)}] {iso3}"
+        done_df = (
+            pd.DataFrame(columns=_OBSV_EXP_KEY_COLS) if overwrite
+            else _load_done_nhc_tracks_obsv_exp(engine, admin_level)
+        )
 
-        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        minx, _, maxx, _ = adm_geom.bounds
-        wrap = maxx > 160 or minx < -160
-
-        if wrap:
-            da_wp = da_wp_wrapped
-            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buf_in = gdf_buffers_anti[gdf_buffers_anti.intersects(adm_geom)]
-        else:
-            da_wp = da_wp_global
-            candidate_idx = list(buffers_sindex.intersection(adm_geom.bounds))
-            if not candidate_idx:
-                skipped += 1
-                continue
-            candidates = gdf_buffers.iloc[candidate_idx]
-            buf_in = candidates[candidates.intersects(adm_geom)]
-
-        if buf_in.empty:
-            skipped += 1
-            continue
-
-        if not overwrite and not done_df.empty:
-            done_country = done_df[done_df["pcode"] == iso3]
-            if not done_country.empty:
-                buf_in = _filter_done_nhc_tracks_obsv(buf_in, done_country)
-                if buf_in.empty:
-                    skipped += 1
-                    logger.info(f"{prefix} — all done, skipping")
-                    continue
-
-        logger.info(f"{prefix} — {len(buf_in)} intersecting")
-
-        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-        df = calculate_exposure(buf_in, da_wp_country)
-        df["iso3"] = iso3
-        df["pcode"] = iso3
-        df["admin_level"] = _EXP_ADMIN_LEVEL
-        del da_wp_country
-
-        out = df.drop_duplicates(subset=_OBSV_EXP_KEY_COLS, keep="last")
-        with engine.connect() as conn:
-            out.to_sql(
-                "nhc_tracks_obsv_exposure",
-                conn,
-                schema="storms",
-                if_exists="append",
-                index=False,
-                method=stratus.postgres_upsert,
+        processed = skipped = 0
+        for i, (iso3, country_units) in enumerate(country_groups, 1):
+            prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
+            n = _process_buffer_exposure_country(
+                iso3=iso3,
+                country_units=country_units,
+                admin_level=admin_level,
+                gdf_buffers=gdf_buffers,
+                gdf_buffers_anti=gdf_buffers_anti,
+                buffers_sindex=buffers_sindex,
+                da_wp_global=da_wp_global,
+                da_wp_wrapped=da_wp_wrapped,
+                done_df=done_df,
+                overwrite=overwrite,
+                key_cols=_OBSV_EXP_KEY_COLS,
+                done_filter=_filter_done_nhc_tracks_obsv,
+                out_table="nhc_tracks_obsv_exposure",
+                engine=engine,
             )
-            conn.commit()
-        processed += 1
+            if n:
+                processed += 1
+                logger.info(f"{prefix} — {n} unit writes")
+            else:
+                skipped += 1
 
-    logger.info(f"NHC observed track exposure done: {processed} written, {skipped} skipped.")
+        logger.info(
+            f"admin_level={admin_level} obsv exposure done: {processed} countries "
+            f"written, {skipped} skipped."
+        )
     engine.dispose()
 
 
@@ -1743,34 +1833,31 @@ def _load_nhc_tracks_fcastonly_exp_buffers(
         filters.append(f"b.issued_time = '{issued_time}'")
 
     if basin:
-        where = "WHERE " + " AND ".join(filters)
-        query = (
-            f"SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
-            f" FROM storms.nhc_tracks_fcastonly_buffers b"
-            f" JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
-            f" {where}"
-        )
+        join = " JOIN storms.nhc_storms s ON b.atcf_id = s.atcf_id"
     else:
-        where = ("WHERE " + " AND ".join(filters)) if filters else ""
-        query = (
-            f"SELECT atcf_id, issued_time, wind_speed_kt, geometry"
-            f" FROM storms.nhc_tracks_fcastonly_buffers {where}"
-        )
+        join = ""
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    query = (
+        "SELECT b.atcf_id, b.issued_time, b.wind_speed_kt, b.geometry"
+        " FROM storms.nhc_tracks_fcastonly_buffers b"
+        f"{join} {where}"
+    )
 
     with engine.connect() as conn:
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_tracks_fcastonly_exp(engine) -> pd.DataFrame:
+def _load_done_nhc_tracks_fcastonly_exp(engine, admin_level: int) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT atcf_id, issued_time, wind_speed_kt, admin_level, pcode"
                     " FROM storms.nhc_tracks_fcastonly_exposure"
-                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                    " WHERE admin_level = :al"
                 ),
                 conn,
+                params={"al": admin_level},
             )
     except Exception:
         return pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS)
@@ -1793,13 +1880,16 @@ def run_nhc_tracks_fcastonly_exp(
     overwrite: bool = False,
     mode: str = "dev",
     issued_time=None,
+    admin_levels: list[int] | None = None,
 ) -> None:
     import warnings
     from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
     engine = stratus.get_engine(stage=mode, write=True)
+
+    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
 
     logger.info("Loading NHC forecast-only track buffers for exposure calculation...")
     gdf_buffers = _load_nhc_tracks_fcastonly_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
@@ -1807,73 +1897,52 @@ def run_nhc_tracks_fcastonly_exp(
         logger.info("No forecast-only track buffers found for the given filters. Skipping.")
         return
     gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
-
-    gdf_adm1 = load_adm1(countries)
-    country_list = sorted(gdf_adm1["iso_3"].unique())
-    logger.info(f"Processing {len(country_list)} countries...")
+    buffers_sindex = gdf_buffers.sindex
 
     da_wp_global, da_wp_wrapped = load_pop()
 
-    done_df = pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS) if overwrite else _load_done_nhc_tracks_fcastonly_exp(engine)
+    for admin_level in admin_levels:
+        gdf_units = load_adm_units(countries, admin_level)
+        country_groups = list(gdf_units.groupby("iso3"))
+        logger.info(
+            f"admin_level={admin_level}: {len(country_groups)} countries, "
+            f"{len(gdf_units)} units"
+        )
 
-    buffers_sindex = gdf_buffers.sindex
-    processed = skipped = 0
-    for i, iso3 in enumerate(country_list, 1):
-        prefix = f"[{i}/{len(country_list)}] {iso3}"
+        done_df = (
+            pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS) if overwrite
+            else _load_done_nhc_tracks_fcastonly_exp(engine, admin_level)
+        )
 
-        adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        minx, _, maxx, _ = adm_geom.bounds
-        wrap = maxx > 160 or minx < -160
-
-        if wrap:
-            da_wp = da_wp_wrapped
-            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buf_in = gdf_buffers_anti[gdf_buffers_anti.intersects(adm_geom)]
-        else:
-            da_wp = da_wp_global
-            candidate_idx = list(buffers_sindex.intersection(adm_geom.bounds))
-            if not candidate_idx:
-                skipped += 1
-                continue
-            candidates = gdf_buffers.iloc[candidate_idx]
-            buf_in = candidates[candidates.intersects(adm_geom)]
-
-        if buf_in.empty:
-            skipped += 1
-            continue
-
-        if not overwrite and not done_df.empty:
-            done_country = done_df[done_df["pcode"] == iso3]
-            if not done_country.empty:
-                buf_in = _filter_done_nhc_tracks_fcastonly(buf_in, done_country)
-                if buf_in.empty:
-                    skipped += 1
-                    logger.info(f"{prefix} — all done, skipping")
-                    continue
-
-        logger.info(f"{prefix} — {len(buf_in)} intersecting")
-
-        da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-        df = calculate_exposure(buf_in, da_wp_country)
-        df["iso3"] = iso3
-        df["pcode"] = iso3
-        df["admin_level"] = _EXP_ADMIN_LEVEL
-        del da_wp_country
-
-        out = df.drop_duplicates(subset=_FCASTONLY_EXP_KEY_COLS, keep="last")
-        with engine.connect() as conn:
-            out.to_sql(
-                "nhc_tracks_fcastonly_exposure",
-                conn,
-                schema="storms",
-                if_exists="append",
-                index=False,
-                method=stratus.postgres_upsert,
+        processed = skipped = 0
+        for i, (iso3, country_units) in enumerate(country_groups, 1):
+            prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
+            n = _process_buffer_exposure_country(
+                iso3=iso3,
+                country_units=country_units,
+                admin_level=admin_level,
+                gdf_buffers=gdf_buffers,
+                gdf_buffers_anti=gdf_buffers_anti,
+                buffers_sindex=buffers_sindex,
+                da_wp_global=da_wp_global,
+                da_wp_wrapped=da_wp_wrapped,
+                done_df=done_df,
+                overwrite=overwrite,
+                key_cols=_FCASTONLY_EXP_KEY_COLS,
+                done_filter=_filter_done_nhc_tracks_fcastonly,
+                out_table="nhc_tracks_fcastonly_exposure",
+                engine=engine,
             )
-            conn.commit()
-        processed += 1
+            if n:
+                processed += 1
+                logger.info(f"{prefix} — {n} unit writes")
+            else:
+                skipped += 1
 
-    logger.info(f"NHC forecast-only track exposure done: {processed} written, {skipped} skipped.")
+        logger.info(
+            f"admin_level={admin_level} fcastonly exposure done: {processed} "
+            f"countries written, {skipped} skipped."
+        )
     engine.dispose()
 
 
@@ -1938,16 +2007,17 @@ def _load_wsp_for_exposure(
     return gdf_wsp
 
 
-def _load_done_nhc_wsp_exp(engine) -> pd.DataFrame:
+def _load_done_nhc_wsp_exp(engine, admin_level: int) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
                     " FROM storms.nhc_wsp_exposure"
-                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                    " WHERE admin_level = :al"
                 ),
                 conn,
+                params={"al": admin_level},
             )
     except Exception:
         return pd.DataFrame(columns=_WSP_EXP_KEY_COLS)
@@ -2025,7 +2095,7 @@ def _run_exp_year_chunk(
     table_label: str,
     load_chunk,                    # callable(engine, year) -> gpd.GeoDataFrame
     out_table: str,
-    done_loader,                   # callable(engine) -> done_df
+    done_loader,                   # callable(engine, admin_level) -> done_df
     done_filter,                   # callable(wsp_in, done_country) -> wsp_in
     countries,
     since: str | None,
@@ -2035,22 +2105,23 @@ def _run_exp_year_chunk(
     issued_time,
     chunk_source_table: str,
     single_year: int | None = None,
+    admin_levels: list[int] | None = None,
 ) -> None:
     """Shared year-chunked WSP exposure loop.
 
     Loads one calendar year of WSP polygons at a time, builds a spatial
-    index across that year, then iterates countries (tqdm). adm/pop are
+    index across that year, then iterates admin units (tqdm). adm/pop are
     loaded once and reused across all years.
     """
     import warnings
     from rasterio.errors import ShapeSkipWarning
     from tqdm import tqdm
-    from src.utils.exposure import (
-        GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop,
-    )
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
     engine = stratus.get_engine(stage=mode, write=True)
+
+    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
 
     if single_year is not None:
         years = [int(single_year)]
@@ -2072,19 +2143,20 @@ def _run_exp_year_chunk(
         return
     logger.info(f"{table_label}: {len(years)} year chunks: {years}")
 
-    gdf_adm1 = load_adm1(countries)
-    country_list = sorted(gdf_adm1["iso_3"].unique())
-    # Pre-dissolve country geometries once — avoids redoing dissolve per year.
-    country_geoms = {
-        iso3: gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        for iso3 in country_list
+    # Pre-load admin units per level once — reused across all years.
+    units_by_level = {al: load_adm_units(countries, al) for al in admin_levels}
+    country_groups_by_level = {
+        al: list(units_by_level[al].groupby("iso3")) for al in admin_levels
     }
     da_wp_global, da_wp_wrapped = load_pop()
 
-    done_df = (
-        pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
-        else done_loader(engine)
-    )
+    done_by_level = {
+        al: (
+            pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
+            else done_loader(engine, al)
+        )
+        for al in admin_levels
+    }
 
     total_processed = 0
     for year in years:
@@ -2099,77 +2171,48 @@ def _run_exp_year_chunk(
                 continue
         logger.info(
             f"{table_label}: year {year} → {len(gdf_wsp)} polygons; "
-            f"running country loop"
+            f"running per-admin-level country loop"
         )
         gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
         wsp_sindex = gdf_wsp.sindex
 
-        year_writes = 0
-        pbar = tqdm(
-            country_list, desc=f"{table_label} {year}", unit="country",
-            leave=False,
-        )
-        for iso3 in pbar:
-            adm_geom = country_geoms[iso3]
-            minx, _, maxx, _ = adm_geom.bounds
-            wrap = maxx > 160 or minx < -160
-
-            if wrap:
-                da_wp = da_wp_wrapped
-                adm_geom_local = (
-                    gpd.GeoSeries([adm_geom], crs=4326)
-                    .to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-                )
-                wsp_in = gdf_wsp_anti[gdf_wsp_anti.intersects(adm_geom_local)]
-            else:
-                adm_geom_local = adm_geom
-                da_wp = da_wp_global
-                candidate_idx = list(wsp_sindex.intersection(adm_geom.bounds))
-                if not candidate_idx:
-                    continue
-                candidates = gdf_wsp.iloc[candidate_idx]
-                wsp_in = candidates[candidates.intersects(adm_geom)]
-
-            if wsp_in.empty:
-                continue
-
-            if not overwrite and not done_df.empty:
-                done_country = done_df[done_df["pcode"] == iso3]
-                if not done_country.empty:
-                    wsp_in = done_filter(wsp_in, done_country)
-                    if wsp_in.empty:
-                        continue
-
-            da_wp_country = da_wp.rio.clip([adm_geom_local], all_touched=True)
-            df = calculate_exposure(wsp_in, da_wp_country)
-            df["iso3"] = iso3
-            df["pcode"] = iso3
-            df["admin_level"] = _EXP_ADMIN_LEVEL
-            del da_wp_country
-
-            out = df.drop(columns=["id"], errors="ignore")
-            dups = out[out.duplicated(subset=_WSP_EXP_KEY_COLS, keep=False)]
-            assert dups.empty, (
-                f"Duplicate keys reached {out_table} writer: "
-                f"{dups[_WSP_EXP_KEY_COLS].to_dict('records')}"
+        for admin_level in admin_levels:
+            country_groups = country_groups_by_level[admin_level]
+            done_df = done_by_level[admin_level]
+            year_writes = 0
+            pbar = tqdm(
+                country_groups,
+                desc=f"{table_label} {year} adm{admin_level}",
+                unit="country",
+                leave=False,
             )
-            with engine.connect() as conn:
-                out.to_sql(
-                    out_table, conn,
-                    schema="storms",
-                    if_exists="append",
-                    index=False,
-                    method=stratus.postgres_upsert,
+            for iso3, country_units in pbar:
+                n = _process_buffer_exposure_country(
+                    iso3=iso3,
+                    country_units=country_units,
+                    admin_level=admin_level,
+                    gdf_buffers=gdf_wsp,
+                    gdf_buffers_anti=gdf_wsp_anti,
+                    buffers_sindex=wsp_sindex,
+                    da_wp_global=da_wp_global,
+                    da_wp_wrapped=da_wp_wrapped,
+                    done_df=done_df,
+                    overwrite=overwrite,
+                    key_cols=_WSP_EXP_KEY_COLS,
+                    done_filter=done_filter,
+                    out_table=out_table,
+                    engine=engine,
+                    drop_cols=["id"],
                 )
-                conn.commit()
-            year_writes += 1
-            total_processed += 1
-            pbar.set_postfix(writes=year_writes)
-        pbar.close()
-        logger.info(
-            f"{table_label}: year {year} done — {year_writes} country writes "
-            f"({total_processed} cumulative)"
-        )
+                if n:
+                    year_writes += 1
+                    total_processed += 1
+                    pbar.set_postfix(writes=year_writes)
+            pbar.close()
+            logger.info(
+                f"{table_label}: year {year} adm{admin_level} done — "
+                f"{year_writes} country writes ({total_processed} cumulative)"
+            )
         del gdf_wsp, gdf_wsp_anti, wsp_sindex
 
     logger.info(f"{table_label}: all years done; {total_processed} writes.")
@@ -2183,6 +2226,7 @@ def run_nhc_wsp_exp(
     overwrite: bool = False,
     mode: str = "dev",
     issued_time=None,
+    admin_levels: list[int] | None = None,
 ) -> None:
     """WSP exposure, chunked by year so peak memory stays bounded."""
     _run_exp_year_chunk(
@@ -2200,6 +2244,7 @@ def run_nhc_wsp_exp(
         mode=mode,
         issued_time=issued_time,
         chunk_source_table="nhc_wsp_polygon_matched",
+        admin_levels=admin_levels,
     )
 
 
@@ -2496,16 +2541,17 @@ def _load_wsp_fcastonly_for_exposure(
         return gpd.read_postgis(query, conn, geom_col="geometry")
 
 
-def _load_done_nhc_wsp_fcastonly_exp(engine) -> pd.DataFrame:
+def _load_done_nhc_wsp_fcastonly_exp(engine, admin_level: int) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             return pd.read_sql(
                 text(
                     "SELECT issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, pcode"
                     " FROM storms.nhc_wsp_fcastonly_exposure"
-                    f" WHERE admin_level = {_EXP_ADMIN_LEVEL}"
+                    " WHERE admin_level = :al"
                 ),
                 conn,
+                params={"al": admin_level},
             )
     except Exception:
         return pd.DataFrame(columns=_WSP_EXP_KEY_COLS)
@@ -2557,6 +2603,7 @@ def run_nhc_wsp_fcastonly_exp(
     mode: str = "dev",
     issued_time=None,
     year: int | None = None,
+    admin_levels: list[int] | None = None,
 ) -> None:
     """WSP fcastonly exposure, chunked by year.
 
@@ -2579,6 +2626,7 @@ def run_nhc_wsp_fcastonly_exp(
         issued_time=issued_time,
         chunk_source_table="nhc_wsp_fcastonly_polygon",
         single_year=year,
+        admin_levels=admin_levels,
     )
 
 
