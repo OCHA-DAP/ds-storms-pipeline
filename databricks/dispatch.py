@@ -164,7 +164,9 @@ def build_cmd(sub: str, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
         cmd += ["--since", SINCE]
     if YEAR:
         cmd += ["--year", YEAR]
-    if OVERWRITE.lower() == "true":
+    # Same story for --overwrite: the etl subcommand doesn't expose it
+    # (always upserts). Skip the append to avoid "unrecognized arguments".
+    if OVERWRITE.lower() == "true" and sub != "nhc":
         cmd += ["--overwrite"]
     if FILL_NULLS.lower() == "true":
         cmd += ["--fill-nulls"]
