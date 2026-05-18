@@ -154,7 +154,11 @@ def build_cmd(sub: str, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
         MODE,
     ]
     cmd.extend(extra)
-    if ISSUED_TIME:
+    # The etl subcommand has no --issued-time flag (it always fetches whatever
+    # NHC currently has); skip the append so an explicit job-level issued_time
+    # doesn't crash etl with `unrecognized arguments`. Downstream tasks still
+    # receive --issued-time as usual.
+    if ISSUED_TIME and sub != "nhc":
         cmd += ["--issued-time", ISSUED_TIME]
     if SINCE:
         cmd += ["--since", SINCE]
