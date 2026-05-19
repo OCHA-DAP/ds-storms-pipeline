@@ -379,6 +379,7 @@ def _to_multipolygon(g):
 def _list_wsp_issued_times(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
 ) -> list:
@@ -398,6 +399,9 @@ def _list_wsp_issued_times(
     if since:
         filters.append("r.issued_time >= :since")
         params["since"] = since
+    if until:
+        filters.append("r.issued_time < :until")
+        params["until"] = until
     if basin:
         filters.append("t.basin = :basin")
         params["basin"] = basin
@@ -488,6 +492,7 @@ def _build_matched_for_issued_time(engine, it, chunksize: int = 500) -> int:
 def process_nhc_wsp_polygon_matched(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
     overwrite: bool = False,
@@ -499,7 +504,7 @@ def process_nhc_wsp_polygon_matched(
     memory bounded by the largest single issuance.
     """
     issued_times = _list_wsp_issued_times(
-        engine, since=since, basin=basin, issued_time=issued_time,
+        engine, since=since, until=until, basin=basin, issued_time=issued_time,
     )
     if not issued_times:
         logger.info("No raw WSP issued_times match filters. Skipping.")
@@ -537,6 +542,7 @@ def process_nhc_wsp_polygon_matched(
 def run_nhc_wsp_polygon_matched(
     mode: str = "dev",
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
     overwrite: bool = False,
@@ -547,6 +553,7 @@ def run_nhc_wsp_polygon_matched(
     process_nhc_wsp_polygon_matched(
         engine=engine,
         since=since,
+        until=until,
         basin=basin,
         issued_time=issued_time,
         overwrite=overwrite,
@@ -557,6 +564,7 @@ def run_nhc_wsp_polygon_matched(
 def _list_null_issued_times(
     engine,
     since: str | None = None,
+    until: str | None = None,
     issued_time=None,
 ) -> list:
     """Return issued_times in nhc_wsp_polygon_matched that have at least one
@@ -566,6 +574,9 @@ def _list_null_issued_times(
     if since:
         filters.append("issued_time >= :since")
         params["since"] = since
+    if until:
+        filters.append("issued_time < :until")
+        params["until"] = until
     if issued_time is not None:
         filters.append("issued_time = :issued_time")
         params["issued_time"] = issued_time
@@ -737,6 +748,7 @@ def _fill_nulls_for_issued_time(engine, it) -> tuple[int, int, int]:
 def fill_null_wsp_polygon_matched(
     engine,
     since: str | None = None,
+    until: str | None = None,
     issued_time=None,
 ) -> None:
     """Re-match the NULL parts in storms.nhc_wsp_polygon_matched using the
@@ -750,7 +762,7 @@ def fill_null_wsp_polygon_matched(
     The work is per-issued_time, each in its own transaction.
     """
     issued_times = _list_null_issued_times(
-        engine, since=since, issued_time=issued_time,
+        engine, since=since, until=until, issued_time=issued_time,
     )
     if not issued_times:
         logger.info(
@@ -783,12 +795,13 @@ def fill_null_wsp_polygon_matched(
 def run_fill_null_wsp_polygon_matched(
     mode: str = "dev",
     since: str | None = None,
+    until: str | None = None,
     issued_time=None,
 ) -> None:
     """CLI wrapper for fill_null_wsp_polygon_matched."""
     engine = stratus.get_engine(stage=mode, write=True)
     fill_null_wsp_polygon_matched(
-        engine=engine, since=since, issued_time=issued_time,
+        engine=engine, since=since, until=until, issued_time=issued_time,
     )
 
 
@@ -1097,7 +1110,8 @@ def run_nhc_archive(
 def _load_nhc_tracks_fcast_buffer_tracks(
     engine,
     basin: str | None = None,
-    start_year: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
     issued_time=None,
 ) -> gpd.GeoDataFrame:
     filters = [
@@ -1107,8 +1121,10 @@ def _load_nhc_tracks_fcast_buffer_tracks(
     ]
     if basin:
         filters.append(f"basin = '{basin}'")
-    if start_year:
-        filters.append(f"EXTRACT(YEAR FROM issued_time) >= {start_year}")
+    if since:
+        filters.append(f"issued_time >= '{since}'")
+    if until:
+        filters.append(f"issued_time < '{until}'")
     if issued_time is not None:
         filters.append(f"issued_time = '{issued_time}'")
 
@@ -1163,13 +1179,14 @@ def process_nhc_tracks_fcast_buffers(
     write_engine,
     chunksize,
     basin=None,
-    start_year=None,
+    since=None,
+    until=None,
     overwrite=False,
     issued_time=None,
 ):
     logger.info("Loading NHC tracks with wind radii...")
     gdf_tracks = _load_nhc_tracks_fcast_buffer_tracks(
-        read_engine, basin=basin, start_year=start_year, issued_time=issued_time
+        read_engine, basin=basin, since=since, until=until, issued_time=issued_time
     )
     n_issuances = gdf_tracks.groupby(["atcf_id", "issued_time"]).ngroups
     logger.info(
@@ -1232,7 +1249,8 @@ def run_nhc_tracks_fcast_buffers(
     write_mode="dev",
     chunksize=1000,
     basin=None,
-    start_year=None,
+    since=None,
+    until=None,
     overwrite=False,
     issued_time=None,
 ):
@@ -1249,7 +1267,8 @@ def run_nhc_tracks_fcast_buffers(
             write_engine=write_engine,
             chunksize=chunksize,
             basin=basin,
-            start_year=start_year,
+            since=since,
+            until=until,
             overwrite=overwrite,
             issued_time=issued_time,
         )
@@ -1267,7 +1286,8 @@ def run_nhc_tracks_fcast_buffers(
 def _load_nhc_tracks_obsv_buffer_tracks(
     engine,
     basin: str | None = None,
-    start_year: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
     issued_time=None,
 ) -> gpd.GeoDataFrame:
     base_filters = [
@@ -1286,8 +1306,10 @@ def _load_nhc_tracks_obsv_buffer_tracks(
         filters = base_filters[:]
         if basin:
             filters.append(f"basin = '{basin}'")
-        if start_year:
-            filters.append(f"EXTRACT(YEAR FROM issued_time) >= {start_year}")
+        if since:
+            filters.append(f"issued_time >= '{since}'")
+        if until:
+            filters.append(f"issued_time < '{until}'")
 
     where = " AND ".join(filters)
     query = f"""
@@ -1338,13 +1360,14 @@ def process_nhc_tracks_obsv_buffers(
     write_engine,
     chunksize,
     basin=None,
-    start_year=None,
+    since=None,
+    until=None,
     overwrite=False,
     issued_time=None,
 ):
     logger.info("Loading NHC observational (leadtime=0) track points...")
     gdf_obsv = _load_nhc_tracks_obsv_buffer_tracks(
-        read_engine, basin=basin, start_year=start_year, issued_time=issued_time
+        read_engine, basin=basin, since=since, until=until, issued_time=issued_time
     )
     if gdf_obsv.empty:
         logger.info("No observational track points found. Nothing to do.")
@@ -1396,7 +1419,8 @@ def run_nhc_tracks_obsv_buffers(
     write_mode="dev",
     chunksize=1000,
     basin=None,
-    start_year=None,
+    since=None,
+    until=None,
     overwrite=False,
     issued_time=None,
 ):
@@ -1413,7 +1437,8 @@ def run_nhc_tracks_obsv_buffers(
             write_engine=write_engine,
             chunksize=chunksize,
             basin=basin,
-            start_year=start_year,
+            since=since,
+            until=until,
             overwrite=overwrite,
             issued_time=issued_time,
         )
@@ -1433,7 +1458,8 @@ _FCASTONLY_BATCH_SIZE = _WIND_BUFFER_BATCH_SIZE * 3
 def _load_nhc_fcastonly_inputs(
     engine,
     basin: str | None = None,
-    start_year: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
     issued_time=None,
 ) -> pd.DataFrame:
     filters = []
@@ -1444,8 +1470,10 @@ def _load_nhc_fcastonly_inputs(
         if basin:
             joins = " JOIN storms.nhc_storms s ON f.atcf_id = s.atcf_id"
             filters.append(f"s.genesis_basin = '{basin}'")
-        if start_year:
-            filters.append(f"EXTRACT(YEAR FROM f.issued_time) >= {start_year}")
+        if since:
+            filters.append(f"f.issued_time >= '{since}'")
+        if until:
+            filters.append(f"f.issued_time < '{until}'")
 
     where = ("WHERE " + " AND ".join(filters)) if filters else ""
     query = f"""
@@ -1491,7 +1519,8 @@ def process_nhc_tracks_fcastonly_buffers(
     write_engine,
     chunksize,
     basin=None,
-    start_year=None,
+    since=None,
+    until=None,
     overwrite=False,
     issued_time=None,
 ):
@@ -1499,7 +1528,7 @@ def process_nhc_tracks_fcastonly_buffers(
 
     logger.info("Loading fcast and obsv buffer inputs...")
     df = _load_nhc_fcastonly_inputs(
-        read_engine, basin=basin, start_year=start_year, issued_time=issued_time
+        read_engine, basin=basin, since=since, until=until, issued_time=issued_time
     )
     if df.empty:
         logger.info("No forecast buffers found. Nothing to do.")
@@ -1552,7 +1581,8 @@ def run_nhc_tracks_fcastonly_buffers(
     write_mode="dev",
     chunksize=1000,
     basin=None,
-    start_year=None,
+    since=None,
+    until=None,
     overwrite=False,
     issued_time=None,
 ):
@@ -1569,7 +1599,8 @@ def run_nhc_tracks_fcastonly_buffers(
             write_engine=engine,
             chunksize=chunksize,
             basin=basin,
-            start_year=start_year,
+            since=since,
+            until=until,
             overwrite=overwrite,
             issued_time=issued_time,
         )
@@ -1774,12 +1805,15 @@ def _process_buffer_exposure_country(
 def _load_nhc_tracks_fcast_exp_buffers(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
 ) -> gpd.GeoDataFrame:
     filters = []
     if since:
         filters.append(f"b.issued_time >= '{since}'")
+    if until:
+        filters.append(f"b.issued_time < '{until}'")
     if basin:
         filters.append(f"s.genesis_basin = '{basin}'")
     if issued_time is not None:
@@ -1801,13 +1835,20 @@ def _load_nhc_tracks_fcast_exp_buffers(
 
 
 def _load_done_nhc_tracks_fcast_exp(
-    engine, admin_level: int, issued_time=None
+    engine, admin_level: int, issued_time=None,
+    since: str | None = None, until: str | None = None,
 ) -> pd.DataFrame:
     filters = ["admin_level = :al"]
     params: dict = {"al": admin_level}
     if issued_time is not None:
         filters.append("issued_time = :it")
         params["it"] = issued_time
+    if since:
+        filters.append("issued_time >= :since")
+        params["since"] = since
+    if until:
+        filters.append("issued_time < :until")
+        params["until"] = until
     where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
@@ -1932,6 +1973,7 @@ def _run_track_exp(
 def run_nhc_tracks_fcast_exp(
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     mode: str = "dev",
@@ -1941,12 +1983,12 @@ def run_nhc_tracks_fcast_exp(
 ) -> None:
     _run_track_exp(
         load_buffers=lambda eng: _load_nhc_tracks_fcast_exp_buffers(
-            eng, since=since, basin=basin, issued_time=issued_time,
+            eng, since=since, until=until, basin=basin, issued_time=issued_time,
         ),
         out_table="nhc_tracks_fcast_exposure",
         key_cols=_TRACK_EXP_KEY_COLS,
         done_loader=lambda eng, al: _load_done_nhc_tracks_fcast_exp(
-            eng, al, issued_time=issued_time,
+            eng, al, issued_time=issued_time, since=since, until=until,
         ),
         done_filter=_filter_done_nhc_tracks_fcast,
         countries=countries, overwrite=overwrite, mode=mode,
@@ -1965,12 +2007,15 @@ _OBSV_EXP_KEY_COLS = ["atcf_id", "valid_time", "wind_speed_kt", "admin_level", "
 def _load_nhc_tracks_obsv_exp_buffers(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     valid_time=None,
 ) -> gpd.GeoDataFrame:
     filters = []
     if since:
         filters.append(f"b.valid_time >= '{since}'")
+    if until:
+        filters.append(f"b.valid_time < '{until}'")
     if basin:
         filters.append(f"s.genesis_basin = '{basin}'")
     if valid_time is not None:
@@ -1992,13 +2037,20 @@ def _load_nhc_tracks_obsv_exp_buffers(
 
 
 def _load_done_nhc_tracks_obsv_exp(
-    engine, admin_level: int, valid_time=None
+    engine, admin_level: int, valid_time=None,
+    since: str | None = None, until: str | None = None,
 ) -> pd.DataFrame:
     filters = ["admin_level = :al"]
     params: dict = {"al": admin_level}
     if valid_time is not None:
         filters.append("valid_time = :vt")
         params["vt"] = valid_time
+    if since:
+        filters.append("valid_time >= :since")
+        params["since"] = since
+    if until:
+        filters.append("valid_time < :until")
+        params["until"] = until
     where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
@@ -2027,6 +2079,7 @@ def _filter_done_nhc_tracks_obsv(buffers: gpd.GeoDataFrame, done_country: pd.Dat
 def run_nhc_tracks_obsv_exp(
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     mode: str = "dev",
@@ -2037,7 +2090,7 @@ def run_nhc_tracks_obsv_exp(
 ) -> None:
     def _load(engine):
         gdf = _load_nhc_tracks_obsv_exp_buffers(
-            engine, since=since, basin=basin, valid_time=valid_time,
+            engine, since=since, until=until, basin=basin, valid_time=valid_time,
         )
         if final_only and not gdf.empty:
             before = len(gdf)
@@ -2054,7 +2107,7 @@ def run_nhc_tracks_obsv_exp(
         out_table="nhc_tracks_obsv_exposure",
         key_cols=_OBSV_EXP_KEY_COLS,
         done_loader=lambda eng, al: _load_done_nhc_tracks_obsv_exp(
-            eng, al, valid_time=valid_time,
+            eng, al, valid_time=valid_time, since=since, until=until,
         ),
         done_filter=_filter_done_nhc_tracks_obsv,
         countries=countries, overwrite=overwrite, mode=mode,
@@ -2073,12 +2126,15 @@ _FCASTONLY_EXP_KEY_COLS = ["atcf_id", "issued_time", "wind_speed_kt", "admin_lev
 def _load_nhc_tracks_fcastonly_exp_buffers(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
 ) -> gpd.GeoDataFrame:
     filters = []
     if since:
         filters.append(f"b.issued_time >= '{since}'")
+    if until:
+        filters.append(f"b.issued_time < '{until}'")
     if basin:
         filters.append(f"s.genesis_basin = '{basin}'")
     if issued_time is not None:
@@ -2100,13 +2156,20 @@ def _load_nhc_tracks_fcastonly_exp_buffers(
 
 
 def _load_done_nhc_tracks_fcastonly_exp(
-    engine, admin_level: int, issued_time=None
+    engine, admin_level: int, issued_time=None,
+    since: str | None = None, until: str | None = None,
 ) -> pd.DataFrame:
     filters = ["admin_level = :al"]
     params: dict = {"al": admin_level}
     if issued_time is not None:
         filters.append("issued_time = :it")
         params["it"] = issued_time
+    if since:
+        filters.append("issued_time >= :since")
+        params["since"] = since
+    if until:
+        filters.append("issued_time < :until")
+        params["until"] = until
     where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
@@ -2135,6 +2198,7 @@ def _filter_done_nhc_tracks_fcastonly(buffers: gpd.GeoDataFrame, done_country: p
 def run_nhc_tracks_fcastonly_exp(
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     mode: str = "dev",
@@ -2144,12 +2208,12 @@ def run_nhc_tracks_fcastonly_exp(
 ) -> None:
     _run_track_exp(
         load_buffers=lambda eng: _load_nhc_tracks_fcastonly_exp_buffers(
-            eng, since=since, basin=basin, issued_time=issued_time,
+            eng, since=since, until=until, basin=basin, issued_time=issued_time,
         ),
         out_table="nhc_tracks_fcastonly_exposure",
         key_cols=_FCASTONLY_EXP_KEY_COLS,
         done_loader=lambda eng, al: _load_done_nhc_tracks_fcastonly_exp(
-            eng, al, issued_time=issued_time,
+            eng, al, issued_time=issued_time, since=since, until=until,
         ),
         done_filter=_filter_done_nhc_tracks_fcastonly,
         countries=countries, overwrite=overwrite, mode=mode,
@@ -2166,6 +2230,7 @@ def run_nhc_tracks_fcastonly_exp(
 def _load_wsp_for_exposure(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
     year: int | None = None,
@@ -2177,14 +2242,17 @@ def _load_wsp_for_exposure(
     match_wsp_to_tracks call or post-load dissolve is needed here. To filter
     by basin, joins on storms.nhc_storms.genesis_basin.
 
-    Pass ``year=YYYY`` to restrict the load to one calendar year — useful
-    for chunking large historical scans.
+    Pass ``year=YYYY`` to restrict the load to one calendar year — used
+    internally by _run_exp_year_chunk for chunked historical scans.
     """
     filters: list[str] = []
     params: dict = {}
     if since:
         filters.append("m.issued_time >= :since")
         params["since"] = since
+    if until:
+        filters.append("m.issued_time < :until")
+        params["until"] = until
     if issued_time is not None:
         filters.append("m.issued_time = :issued_time")
         params["issued_time"] = issued_time
@@ -2220,13 +2288,20 @@ def _load_wsp_for_exposure(
 
 
 def _load_done_nhc_wsp_exp(
-    engine, admin_level: int, issued_time=None
+    engine, admin_level: int, issued_time=None,
+    since: str | None = None, until: str | None = None,
 ) -> pd.DataFrame:
     filters = ["admin_level = :al"]
     params: dict = {"al": admin_level}
     if issued_time is not None:
         filters.append("issued_time = :it")
         params["it"] = issued_time
+    if since:
+        filters.append("issued_time >= :since")
+        params["since"] = since
+    if until:
+        filters.append("issued_time < :until")
+        params["until"] = until
     where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
@@ -2285,7 +2360,10 @@ def _list_years(
 
 
 def _list_matched_issued_times(
-    engine, since: str | None = None, basin: str | None = None,
+    engine,
+    since: str | None = None,
+    until: str | None = None,
+    basin: str | None = None,
 ) -> list:
     """List distinct issued_times in nhc_wsp_polygon_matched, filtered."""
     filters = []
@@ -2293,6 +2371,9 @@ def _list_matched_issued_times(
     if since:
         filters.append("m.issued_time >= :since")
         params["since"] = since
+    if until:
+        filters.append("m.issued_time < :until")
+        params["until"] = until
     if basin:
         filters.append("s.genesis_basin = :basin")
         params["basin"] = basin
@@ -2314,10 +2395,11 @@ def _run_exp_year_chunk(
     table_label: str,
     load_chunk,                    # callable(engine, year) -> gpd.GeoDataFrame
     out_table: str,
-    done_loader,                   # callable(engine, admin_level, issued_time=) -> done_df
+    done_loader,                   # callable(engine, admin_level, issued_time=, since=, until=) -> done_df
     done_filter,                   # callable(wsp_in, done_country) -> wsp_in
     countries,
     since: str | None,
+    until: str | None,
     basin: str | None,
     overwrite: bool,
     mode: str,
@@ -2373,7 +2455,10 @@ def _run_exp_year_chunk(
         done_by_level = {
             al: (
                 pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
-                else done_loader(engine, al, issued_time=issued_time)
+                else done_loader(
+                    engine, al, issued_time=issued_time,
+                    since=since, until=until,
+                )
             )
             for al in admin_levels
         }
@@ -2449,6 +2534,7 @@ def _run_exp_year_chunk(
 def run_nhc_wsp_exp(
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     mode: str = "dev",
@@ -2460,13 +2546,15 @@ def run_nhc_wsp_exp(
     _run_exp_year_chunk(
         table_label="WSP exposure",
         load_chunk=lambda eng, year: _load_wsp_for_exposure(
-            eng, basin=basin, year=year, issued_time=issued_time,
+            eng, basin=basin, year=year,
+            since=since, until=until, issued_time=issued_time,
         ),
         out_table="nhc_wsp_exposure",
         done_loader=_load_done_nhc_wsp_exp,
         done_filter=_filter_done_nhc_wsp,
         countries=countries,
         since=since,
+        until=until,
         basin=basin,
         overwrite=overwrite,
         mode=mode,
@@ -2513,6 +2601,7 @@ def _load_obsv_buffer_lookup(engine, atcf_ids: list[str]) -> dict:
 def process_nhc_wsp_fcastonly_polygons(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
     overwrite: bool = False,
@@ -2528,7 +2617,7 @@ def process_nhc_wsp_fcastonly_polygons(
     # itself for each issued_time when none is specified.
     if issued_time is None:
         issued_times = _list_matched_issued_times(
-            engine, since=since, basin=basin,
+            engine, since=since, until=until, basin=basin,
         )
         if not issued_times:
             logger.info(
@@ -2702,6 +2791,7 @@ def _write_wsp_fcastonly_batch(batch: list[dict], engine, chunksize: int) -> Non
 def run_nhc_wsp_fcastonly_polygons(
     mode: str = "dev",
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
     overwrite: bool = False,
@@ -2717,6 +2807,7 @@ def run_nhc_wsp_fcastonly_polygons(
         process_nhc_wsp_fcastonly_polygons(
             engine=engine,
             since=since,
+            until=until,
             basin=basin,
             issued_time=issued_time,
             overwrite=overwrite,
@@ -2736,6 +2827,7 @@ def run_nhc_wsp_fcastonly_polygons(
 def _load_wsp_fcastonly_for_exposure(
     engine,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     issued_time=None,
     year: int | None = None,
@@ -2743,6 +2835,8 @@ def _load_wsp_fcastonly_for_exposure(
     filters = []
     if since:
         filters.append(f"p.issued_time >= '{since}'")
+    if until:
+        filters.append(f"p.issued_time < '{until}'")
     if basin:
         filters.append(f"s.genesis_basin = '{basin}'")
     if issued_time is not None:
@@ -2771,13 +2865,20 @@ def _load_wsp_fcastonly_for_exposure(
 
 
 def _load_done_nhc_wsp_fcastonly_exp(
-    engine, admin_level: int, issued_time=None
+    engine, admin_level: int, issued_time=None,
+    since: str | None = None, until: str | None = None,
 ) -> pd.DataFrame:
     filters = ["admin_level = :al"]
     params: dict = {"al": admin_level}
     if issued_time is not None:
         filters.append("issued_time = :it")
         params["it"] = issued_time
+    if since:
+        filters.append("issued_time >= :since")
+        params["since"] = since
+    if until:
+        filters.append("issued_time < :until")
+        params["until"] = until
     where = " AND ".join(filters)
     try:
         with engine.connect() as conn:
@@ -2834,35 +2935,32 @@ def _list_fcastonly_issued_times(
 def run_nhc_wsp_fcastonly_exp(
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     mode: str = "dev",
     issued_time=None,
-    year: int | None = None,
     admin_levels: list[int] | None = None,
     session: _ExposureSession | None = None,
 ) -> None:
-    """WSP fcastonly exposure, chunked by year.
-
-    Pass year=YYYY to restrict to a single calendar year — useful for
-    parallelizing across years from the shell.
-    """
+    """WSP fcastonly exposure, chunked by year so peak memory stays bounded."""
     _run_exp_year_chunk(
         table_label="WSP fcastonly exposure",
         load_chunk=lambda eng, y: _load_wsp_fcastonly_for_exposure(
-            eng, basin=basin, year=y, issued_time=issued_time,
+            eng, basin=basin, year=y,
+            since=since, until=until, issued_time=issued_time,
         ),
         out_table="nhc_wsp_fcastonly_exposure",
         done_loader=_load_done_nhc_wsp_fcastonly_exp,
         done_filter=_filter_done_nhc_wsp_fcastonly,
         countries=countries,
         since=since,
+        until=until,
         basin=basin,
         overwrite=overwrite,
         mode=mode,
         issued_time=issued_time,
         chunk_source_table="nhc_wsp_fcastonly_polygon",
-        single_year=year,
         admin_levels=admin_levels,
         session=session,
     )
