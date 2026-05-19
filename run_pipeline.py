@@ -658,8 +658,8 @@ def main():
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
             countries=countries,
-            since=args.since,
-            basin=args.basin,
+            since=getattr(args, "since", None),
+            basin=getattr(args, "basin", None),
             overwrite=args.overwrite,
             admin_levels=getattr(args, "admin_level", None),
         )
@@ -669,8 +669,8 @@ def main():
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
             countries=countries,
-            since=args.since,
-            basin=args.basin,
+            since=getattr(args, "since", None),
+            basin=getattr(args, "basin", None),
             overwrite=args.overwrite,
             admin_levels=getattr(args, "admin_level", None),
         )
