@@ -19,8 +19,8 @@ databricks.yml):
                                  # or a "realtime-…" composite (see below)
     sys.argv[2] = mode           # "dev" | "prod"
     sys.argv[3] = issued_time    # YYYY-MM-DDTHH or ""
-    sys.argv[4] = since          # YYYY-MM-DD or ""
-    sys.argv[5] = year           # YYYY or ""
+    sys.argv[4] = since          # YYYY-MM-DD or "" (inclusive lower)
+    sys.argv[5] = until          # YYYY-MM-DD or "" (exclusive upper)
     sys.argv[6] = overwrite      # "true" or ""
     sys.argv[7] = fill_nulls     # "true" or ""
     sys.argv[8] = subcommand_override  # non-empty overrides argv[1]
@@ -63,7 +63,7 @@ SUBCOMMAND_DEFAULT = _arg(1, "nhc-realtime")
 MODE = _arg(2, "prod")
 ISSUED_TIME = _arg(3)
 SINCE = _arg(4)
-YEAR = _arg(5)
+UNTIL = _arg(5)
 OVERWRITE = _arg(6)
 FILL_NULLS = _arg(7)
 SUBCOMMAND_OVERRIDE = _arg(8)
@@ -157,10 +157,15 @@ def build_cmd(sub: str, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
     # receive --issued-time as usual.
     if ISSUED_TIME and sub != "nhc":
         cmd += ["--issued-time", ISSUED_TIME]
-    if SINCE:
+    # --since and --until are accepted by every backfillable subcommand
+    # (buffers, WSP processing, all exposure variants). The etl subcommand
+    # ignores them; argparse rejects unknown flags, so gate to the etl
+    # case. --year was retired — use --since/--until on year boundaries
+    # instead.
+    if SINCE and sub != "nhc":
         cmd += ["--since", SINCE]
-    if YEAR:
-        cmd += ["--year", YEAR]
+    if UNTIL and sub != "nhc":
+        cmd += ["--until", UNTIL]
     # Same story for --overwrite: the etl subcommand doesn't expose it
     # (always upserts). Skip the append to avoid "unrecognized arguments".
     if OVERWRITE.lower() == "true" and sub != "nhc":

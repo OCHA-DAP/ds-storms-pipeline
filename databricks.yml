@@ -80,9 +80,9 @@ resources:
           default: ${var.mode}
         - name: issued_time    # YYYY-MM-DDTHH; backfill override for a single advisory
           default: ""
-        - name: since          # YYYY-MM-DD
+        - name: since          # YYYY-MM-DD; inclusive lower bound on issued_time
           default: ""
-        - name: year           # YYYY (year-chunked exposure pipelines)
+        - name: until          # YYYY-MM-DD; exclusive upper bound on issued_time
           default: ""
         - name: overwrite      # "true" / ""
           default: ""
@@ -114,7 +114,7 @@ resources:
               - "{{job.parameters.mode}}"
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.since}}"
-              - "{{job.parameters.year}}"
+              - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
@@ -144,7 +144,7 @@ resources:
               - "{{job.parameters.mode}}"
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.since}}"
-              - "{{job.parameters.year}}"
+              - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
@@ -163,7 +163,7 @@ resources:
               - "{{job.parameters.mode}}"
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.since}}"
-              - "{{job.parameters.year}}"
+              - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
@@ -182,7 +182,7 @@ resources:
               - "{{job.parameters.mode}}"
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.since}}"
-              - "{{job.parameters.year}}"
+              - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
@@ -201,7 +201,7 @@ resources:
               - "{{job.parameters.mode}}"
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.since}}"
-              - "{{job.parameters.year}}"
+              - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
