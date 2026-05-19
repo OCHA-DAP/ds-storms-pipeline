@@ -153,6 +153,15 @@ def main():
         default="NOAA",
         help="ADAM source filter (default: NOAA)",
     )
+    adam_parser.add_argument(
+        "--all-episodes",
+        action="store_true",
+        help=(
+            "Fetch exposure for every episode of each event (full ADAM "
+            "history), not just the latest. ~Nx more CSV downloads per "
+            "event; per-episode skip via existing rows keeps re-runs cheap."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -223,6 +232,7 @@ def main():
                 source=args.source,
                 mode=args.mode,
                 chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
             )
         else:
             run_adam_current(
@@ -230,6 +240,7 @@ def main():
                 days_back=args.days_back,
                 source=args.source,
                 chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
             )
 
 

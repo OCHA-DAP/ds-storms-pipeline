@@ -85,17 +85,31 @@ def _ingest_event_range(
     source: Optional[str],
     mode: str,
     chunksize: int,
+    all_episodes: bool = False,
 ) -> None:
     """Shared core: walk ADAM events in a date window, write exposure rows
-    + storm_id_lookup linkage."""
+    + storm_id_lookup linkage.
+
+    When ``all_episodes`` is True, fetch every episode of each event
+    rather than only the latest. The per-event loop already keys on
+    ``(event_id, episode_id)`` and the skip-set ensures re-runs only
+    pull missing episodes.
+    """
     logger.info(
-        "Fetching ADAM events %s -> %s (source=%s)",
-        from_date, to_date, source,
+        "Fetching ADAM events %s -> %s (source=%s, all_episodes=%s)",
+        from_date, to_date, source, all_episodes,
     )
     events = adam_api.get_events(
-        from_date=from_date, to_date=to_date, source=source,
+        from_date=from_date,
+        to_date=to_date,
+        source=source,
+        all_episodes=all_episodes,
     )
-    logger.info("Got %d events (latest episode per event_id)", len(events))
+    logger.info(
+        "Got %d %s",
+        len(events),
+        "episode-features" if all_episodes else "events (latest episode per event_id)",
+    )
 
     engine = stratus.get_engine(mode, write=True)
     already_ingested = _load_ingested_episodes(engine)
@@ -120,6 +134,13 @@ def _ingest_event_range(
         if (event_id, episode_id) in already_ingested:
             logger.info("  already ingested, skipping CSV download")
             n_skipped += 1
+            # Still record the linkage — a prior run could have written
+            # exposure rows but failed before the storm_id_lookup upsert
+            # (orphan case). Re-running repairs it via dedupe at upsert.
+            storm_links.append({
+                "gdacs_eventid": event_id,
+                "adam_eventid": event_id,
+            })
             continue
 
         try:
@@ -187,7 +208,12 @@ def _ingest_event_range(
         logger.info("Wrote %d rows", len(df))
 
     if storm_links:
-        df_links = pd.DataFrame(storm_links)
+        # In all-episodes mode the same (gdacs_eventid, adam_eventid)
+        # appears once per episode of each event. The upsert batch can't
+        # have duplicate constrained-column values, so dedup first.
+        df_links = pd.DataFrame(storm_links).drop_duplicates(
+            subset="gdacs_eventid",
+        )
         upsert = partial(
             stratus.postgres_upsert, constraint="storm_id_lookup_pkey",
         )
@@ -205,6 +231,7 @@ def run_adam_current(
     days_back: int = 14,
     source: Optional[str] = "NOAA",
     chunksize: int = 1000,
+    all_episodes: bool = False,
 ) -> None:
     """Real-time ADAM events from the last ``days_back`` days.
 
@@ -221,7 +248,10 @@ def run_adam_current(
     now = datetime.now(timezone.utc)
     from_date = (now - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
-    _ingest_event_range(from_date, to_date, source, mode, chunksize)
+    _ingest_event_range(
+        from_date, to_date, source, mode, chunksize,
+        all_episodes=all_episodes,
+    )
     logger.info("Pipeline successfully finished!")
 
 
@@ -231,6 +261,7 @@ def run_adam_archive(
     source: Optional[str] = "NOAA",
     mode: str = "dev",
     chunksize: int = 1000,
+    all_episodes: bool = False,
 ) -> None:
     """Historical ADAM backfill across a date range. Idempotent: re-runs
     only download CSVs for events whose latest episode isn't already in
@@ -243,5 +274,8 @@ def run_adam_archive(
 
     if to_date is None:
         to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    _ingest_event_range(from_date, to_date, source, mode, chunksize)
+    _ingest_event_range(
+        from_date, to_date, source, mode, chunksize,
+        all_episodes=all_episodes,
+    )
     logger.info("Pipeline successfully finished!")
