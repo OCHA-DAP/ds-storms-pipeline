@@ -19,6 +19,7 @@ import coloredlogs
 import fsspec
 import geopandas as gpd
 import ocha_stratus as stratus
+from shapely.validation import make_valid
 from tqdm import tqdm
 
 FIELDMAPS_URL = (
@@ -47,9 +48,13 @@ def mirror(stage: str) -> None:
 
     for iso3, sub in tqdm(gdf.groupby("iso_3"), unit="country"):
         sub = sub.copy()
+        # simplify() with preserve_topology=True can still emit polygons
+        # that aren't OGC-valid (self-intersections, free holes, etc.),
+        # which trips downstream dissolve / union_all with a GEOS
+        # TopologyException. make_valid() fixes those.
         sub["geometry"] = sub.geometry.simplify(
             SIMPLIFY_TOL_DEG, preserve_topology=True
-        )
+        ).apply(make_valid)
         buf = BytesIO()
         sub.reset_index(drop=True).to_parquet(buf)
         stratus.upload_blob_data(
