@@ -114,6 +114,15 @@ def main():
         default="NOAA",
         help="GDACS source filter (default: NOAA)",
     )
+    gdacs_parser.add_argument(
+        "--all-episodes",
+        action="store_true",
+        help=(
+            "Fetch exposure for every episode of each event (full GDACS "
+            "history), not just the latest. ~Nx more HTTP calls per "
+            "event; per-episode skip via existing rows keeps re-runs cheap."
+        ),
+    )
 
     # Match subparser (GDACS -> NHC atcf_id, writes storm_id_lookup)
     subparsers.add_parser(
@@ -193,6 +202,7 @@ def main():
                 source=args.source,
                 mode=args.mode,
                 chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
             )
         else:
             # Current mode: rolling window from today
@@ -201,6 +211,7 @@ def main():
                 days_back=args.days_back,
                 source=args.source,
                 chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
             )
     elif args.pipeline == "match":
         run_match(mode=args.mode)

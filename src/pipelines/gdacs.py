@@ -158,15 +158,41 @@ def _load_skip_info(
     return db_max_vt, matched_only
 
 
+def _load_existing_episode_pairs(engine) -> Set[Tuple[int, int]]:
+    """``{(gdacs_eventid, gdacs_episodeid)}`` already in
+    gdacs_exposure. Used by all-episodes mode to skip episodes
+    already on file so re-runs only fetch new ones."""
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(
+                "SELECT DISTINCT gdacs_eventid, gdacs_episodeid "
+                "FROM storms.gdacs_exposure"
+            ),
+            conn,
+        )
+    return {
+        (int(r.gdacs_eventid), int(r.gdacs_episodeid))
+        for r in df.itertuples()
+    }
+
+
 def _ingest_event_range(
     from_date: str,
     to_date: str,
     source: Optional[str],
     mode: str,
     chunksize: int,
+    all_episodes: bool = False,
 ) -> None:
     """Shared core: walk events in a date range, write exposure rows.
-    Called by both run_gdacs_archive and run_gdacs_current."""
+    Called by both run_gdacs_archive and run_gdacs_current.
+
+    When ``all_episodes`` is True, fetch exposure for every episode
+    of each event (using the timeline's ``actual=True`` rows for
+    per-episode valid_times) rather than only the latest. Per-event
+    cost rises from 2 to ~2×N_advisories HTTP calls; per-episode
+    skip via existing-pairs lookup keeps re-runs cheap.
+    """
     logger.info(
         "Fetching GDACS events %s -> %s (source=%s)",
         from_date, to_date, source,
@@ -183,11 +209,15 @@ def _ingest_event_range(
     nhc_tracks = load_freshest_nhc_tracks(engine)
     already_matched = load_matched_eventids(engine)
     db_max_vt, matched_only_eventids = _load_skip_info(engine)
+    existing_pairs = (
+        _load_existing_episode_pairs(engine) if all_episodes else set()
+    )
     logger.info(
         "Loaded %d NHC track rows; %d events already matched; "
-        "%d events with exposure on file; %d zero-exposure-matched",
+        "%d events with exposure on file; %d zero-exposure-matched; "
+        "%d (eventid,episodeid) pairs already in db (all-episodes mode)",
         len(nhc_tracks), len(already_matched),
-        len(db_max_vt), len(matched_only_eventids),
+        len(db_max_vt), len(matched_only_eventids), len(existing_pairs),
     )
 
     exposure_upsert = partial(
@@ -201,16 +231,33 @@ def _ingest_event_range(
     n_rows_written = 0
     n_matches = 0
 
+    def _upsert_rows(rows):
+        if not rows:
+            return 0
+        pd.DataFrame(rows).to_sql(
+            "gdacs_exposure",
+            engine,
+            schema="storms",
+            if_exists="append",
+            index=False,
+            method=exposure_upsert,
+            chunksize=chunksize,
+        )
+        return len(rows)
+
     for i, ev in events.iterrows():
         eventid = int(ev["eventid"])
         api_to_date = pd.to_datetime(ev["to_date"])
 
-        # Skip checks (cheap, no HTTP). A failed event from a previous run
-        # is neither in db_max_vt nor matched_only_eventids → falls through
-        # to processing, which auto-retries.
-        if eventid in db_max_vt and api_to_date <= db_max_vt[eventid]:
-            n_skipped_fresh += 1
-            continue
+        # Skip checks (cheap, no HTTP). The latest-only db_max_vt skip
+        # doesn't apply in all-episodes mode — we want missing historical
+        # episodes filled in even when the latest snapshot is on file.
+        # matched_only still applies: those events have no exposure data
+        # at any episode (weak-storm pattern), so re-fetching is wasteful.
+        if not all_episodes:
+            if eventid in db_max_vt and api_to_date <= db_max_vt[eventid]:
+                n_skipped_fresh += 1
+                continue
         if eventid in matched_only_eventids:
             n_skipped_zero += 1
             continue
@@ -221,41 +268,85 @@ def _ingest_event_range(
         )
         try:
             detail = gdacs_api.get_event_detail(eventid)
-            episode_id = gdacs_api.latest_episode_id(detail)
-            valid_time = pd.to_datetime(ev["to_date"])
-            adm0 = gdacs_api.get_exposure_adm0(eventid, detail=detail)
-            adm1 = gdacs_api.get_exposure_adm1(eventid, detail=detail)
-        except gdacs_api.NoEpisodesError:
-            # Legitimate "event has no episodes yet" — skip, retry next run.
-            logger.info("  no episodes yet for %s, skipping", eventid)
-            n_skipped_error += 1
-            continue
         except requests.exceptions.RequestException as e:
-            # Transient network failure — skip, retry next run. Other
-            # exceptions (KeyError / pandera ValidationError) propagate.
             logger.warning("  network error for %s: %s", eventid, e)
             n_skipped_error += 1
             continue
 
-        rows = _emit_rows(eventid, episode_id, valid_time, adm0, adm1)
-        logger.info("  +%d rows", len(rows))
-
-        # Per-event upsert — durable as soon as the event is processed.
-        # Lets us crash anywhere in the loop without losing prior work,
-        # and progress is visible mid-run via DB queries. Cost is one
-        # extra round-trip per event over batched-at-end (~0.5% overhead
-        # vs. a multi-hour run; well worth the resilience).
-        if rows:
-            pd.DataFrame(rows).to_sql(
-                "gdacs_exposure",
-                engine,
-                schema="storms",
-                if_exists="append",
-                index=False,
-                method=exposure_upsert,
-                chunksize=chunksize,
+        if all_episodes:
+            # Per-episode fetch. Timeline gives us {advisory_number:
+            # advisory_datetime} on actual=True rows — advisory_number is
+            # the episodeid and advisory_datetime is the snapshot
+            # valid_time. Latest-only path uses ev.to_date because it's
+            # implicitly the latest advisory's time; here we need the
+            # actual per-snapshot value.
+            try:
+                timeline = gdacs_api.get_timeline(eventid, detail=detail)
+            except gdacs_api.NoTimelineError:
+                logger.info("  no timeline for %s, skipping", eventid)
+                n_skipped_error += 1
+                continue
+            except requests.exceptions.RequestException as e:
+                logger.warning("  timeline fetch failed for %s: %s", eventid, e)
+                n_skipped_error += 1
+                continue
+            actuals = timeline[
+                timeline["actual"].astype(str).str.lower() == "true"
+            ]
+            ev_rows_written = 0
+            ev_episodes_fetched = 0
+            ev_episodes_skipped = 0
+            for _, ar in actuals.sort_values("advisory_number").iterrows():
+                ep_id = int(ar["advisory_number"])
+                if (eventid, ep_id) in existing_pairs:
+                    ev_episodes_skipped += 1
+                    continue
+                valid_time = ar["advisory_datetime"]
+                try:
+                    adm0 = gdacs_api.get_exposure_adm0(
+                        eventid, episodeid=ep_id,
+                    )
+                    adm1 = gdacs_api.get_exposure_adm1(
+                        eventid, episodeid=ep_id,
+                    )
+                except requests.exceptions.RequestException as e:
+                    # Individual episode fetch can 403/404 if GDACS
+                    # pruned per-episode data; don't fail the event.
+                    logger.warning(
+                        "  episode %s/%s fetch failed: %s",
+                        eventid, ep_id, e,
+                    )
+                    continue
+                episode_rows = _emit_rows(
+                    eventid, ep_id, valid_time, adm0, adm1,
+                )
+                ev_episodes_fetched += 1
+                ev_rows_written += _upsert_rows(episode_rows)
+                existing_pairs.add((eventid, ep_id))
+            n_rows_written += ev_rows_written
+            logger.info(
+                "  episodes fetched=%d skipped=%d (+%d rows)",
+                ev_episodes_fetched, ev_episodes_skipped, ev_rows_written,
             )
-            n_rows_written += len(rows)
+        else:
+            try:
+                episode_id = gdacs_api.latest_episode_id(detail)
+                valid_time = pd.to_datetime(ev["to_date"])
+                adm0 = gdacs_api.get_exposure_adm0(eventid, detail=detail)
+                adm1 = gdacs_api.get_exposure_adm1(eventid, detail=detail)
+            except gdacs_api.NoEpisodesError:
+                logger.info("  no episodes yet for %s, skipping", eventid)
+                n_skipped_error += 1
+                continue
+            except requests.exceptions.RequestException as e:
+                logger.warning("  network error for %s: %s", eventid, e)
+                n_skipped_error += 1
+                continue
+            rows = _emit_rows(eventid, episode_id, valid_time, adm0, adm1)
+            logger.info("  +%d rows", len(rows))
+            # Per-event upsert: durable as soon as the event is processed;
+            # a crash mid-loop keeps prior events' work.
+            n_rows_written += _upsert_rows(rows)
 
         if eventid not in already_matched:
             atcf_id = attempt_match(eventid, nhc_tracks, detail=detail)
@@ -282,6 +373,7 @@ def run_gdacs_current(
     days_back: int = 7,
     source: Optional[str] = "NOAA",
     chunksize: int = 1000,
+    all_episodes: bool = False,
 ) -> None:
     """Real-time GDACS events from the last ``days_back`` days.
 
@@ -298,7 +390,10 @@ def run_gdacs_current(
     now = datetime.now(timezone.utc)
     from_date = (now - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
-    _ingest_event_range(from_date, to_date, source, mode, chunksize)
+    _ingest_event_range(
+        from_date, to_date, source, mode, chunksize,
+        all_episodes=all_episodes,
+    )
     logger.info("Pipeline successfully finished!")
 
 
@@ -308,6 +403,7 @@ def run_gdacs_archive(
     source: Optional[str] = "NOAA",
     mode: str = "dev",
     chunksize: int = 1000,
+    all_episodes: bool = False,
 ) -> None:
     """Historical GDACS backfill across a date range.
 
@@ -322,5 +418,8 @@ def run_gdacs_archive(
 
     if to_date is None:
         to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    _ingest_event_range(from_date, to_date, source, mode, chunksize)
+    _ingest_event_range(
+        from_date, to_date, source, mode, chunksize,
+        all_episodes=all_episodes,
+    )
     logger.info("Pipeline successfully finished!")
