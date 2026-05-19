@@ -49,25 +49,22 @@ logger = logging.getLogger(__name__)
 
 
 def _fix_antimeridian(geom):
-    """Split a polygon crossing the antimeridian into a proper MultiPolygon.
+    """Defensive: split a polygon crossing the antimeridian into a proper
+    MultiPolygon. Mostly redundant now that ocha-lens does this internally
+    via calculate_wind_buffers_gdf; kept as a safety net for the
+    fcast.difference(obsv) path which can also produce wraparounds.
 
-    ocha-lens's `calculate_wind_buffers_gdf` reprojects buffers through a
-    `lon_wrap=180` CRS for continuous-longitude tracks, then naively clips
-    back with `intersection(box(-180, -90, 180, 90))`. For storms whose
-    cone crosses the dateline, the resulting polygon has vertices near
-    both ±180 and shapely interprets it as the long-way-around polygon
-    that wraps the entire globe. Downstream `.intersects()` then matches
-    far-away countries (Bangladesh, Afghanistan, …) → ridiculous exposure
-    values.
-
-    `antimeridian.fix_polygon` detects this case and splits the polygon
-    into the two correct parts (one near -180, one near +180). No-op for
-    polygons that don't cross the dateline.
+    Type-aware: fix_polygon for Polygon, fix_multi_polygon for MultiPolygon,
+    pass-through for other types or empty.
     """
     import antimeridian
     if geom is None or geom.is_empty:
         return geom
-    return antimeridian.fix_polygon(geom)
+    if geom.geom_type == "Polygon":
+        return antimeridian.fix_polygon(geom)
+    if geom.geom_type == "MultiPolygon":
+        return antimeridian.fix_multi_polygon(geom)
+    return geom
 
 
 NHC_SAMPLE_JSON_URL = (
