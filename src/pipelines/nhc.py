@@ -2334,6 +2334,7 @@ def _list_years(
     engine,
     table: str,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
 ) -> list[int]:
     """List distinct years in a WSP-shaped table (issued_time TIMESTAMP)."""
@@ -2342,6 +2343,9 @@ def _list_years(
     if since:
         filters.append("t.issued_time >= :since")
         params["since"] = since
+    if until:
+        filters.append("t.issued_time < :until")
+        params["until"] = until
     if basin:
         filters.append("s.genesis_basin = :basin")
         params["basin"] = basin
@@ -2440,11 +2444,13 @@ def _run_exp_year_chunk(
                 years = [int(it_dt.year)]
             except Exception:
                 years = _list_years(
-                    engine, chunk_source_table, since=since, basin=basin,
+                    engine, chunk_source_table,
+                    since=since, until=until, basin=basin,
                 )
         else:
             years = _list_years(
-                engine, chunk_source_table, since=since, basin=basin,
+                engine, chunk_source_table,
+                since=since, until=until, basin=basin,
             )
 
         if not years:
