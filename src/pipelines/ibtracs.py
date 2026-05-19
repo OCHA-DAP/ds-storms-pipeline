@@ -406,7 +406,7 @@ def run_ibtracs_exp(
 ) -> None:
     import warnings
     from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure, load_adm1, load_pop
+    from src.utils.exposure import calculate_exposure, load_adm1, load_pop
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
     engine = stratus.get_engine(stage=mode, write=True)
@@ -416,13 +416,12 @@ def run_ibtracs_exp(
     if gdf_buffers.empty:
         logger.info("No wind buffers found for the given filters. Skipping.")
         return
-    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
 
     gdf_adm1 = load_adm1(countries, stage=mode)
     country_list = sorted(gdf_adm1["iso_3"].unique())
     logger.info(f"Processing {len(country_list)} countries...")
 
-    da_wp_global, da_wp_wrapped = load_pop()
+    da_wp = load_pop()
 
     done_df = pd.DataFrame(columns=_EXP_KEY_COLS) if overwrite else _load_done_ibtracs_exp(engine)
     if not done_df.empty:
@@ -433,18 +432,8 @@ def run_ibtracs_exp(
         prefix = f"[{i}/{len(country_list)}] {iso3}"
 
         adm_geom = gdf_adm1[gdf_adm1["iso_3"] == iso3][["geometry"]].dissolve().iloc[0].geometry
-        minx, _, maxx, _ = adm_geom.bounds
-        wrap = maxx > 160 or minx < -160
-
-        if wrap:
-            da_wp = da_wp_wrapped
-            adm_geom = gpd.GeoSeries([adm_geom], crs=4326).to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-            buffers = gdf_buffers_anti
-        else:
-            da_wp = da_wp_global
-            buffers = gdf_buffers
-
-        intersects_mask = buffers.intersects(adm_geom)
+        intersects_mask = gdf_buffers.intersects(adm_geom)
+        buffers = gdf_buffers
         buf_in = buffers[intersects_mask]
         buf_zero = buffers[~intersects_mask]
 

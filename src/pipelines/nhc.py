@@ -1660,8 +1660,7 @@ from dataclasses import dataclass
 @dataclass
 class _ExposureSession:
     engine: object
-    da_wp_global: object
-    da_wp_wrapped: object
+    da_wp: object
     units_by_level: dict          # admin_level → GeoDataFrame
     country_groups_by_level: dict  # admin_level → [(iso3, units_gdf, bbox_tuple)]
     admin_levels: list[int]
@@ -1684,7 +1683,7 @@ def build_exposure_session(
     from src.utils.exposure import load_adm_units, load_pop
     admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
     engine = stratus.get_engine(stage=mode, write=True)
-    da_wp_global, da_wp_wrapped = load_pop()
+    da_wp = load_pop()
     units_by_level = {
         al: load_adm_units(countries, al, stage=mode) for al in admin_levels
     }
@@ -1694,8 +1693,7 @@ def build_exposure_session(
     }
     return _ExposureSession(
         engine=engine,
-        da_wp_global=da_wp_global,
-        da_wp_wrapped=da_wp_wrapped,
+        da_wp=da_wp,
         units_by_level=units_by_level,
         country_groups_by_level=country_groups_by_level,
         admin_levels=admin_levels,
@@ -1718,10 +1716,8 @@ def _process_buffer_exposure_country(
     country_units: gpd.GeoDataFrame,    # rows for this iso3, cols [pcode, geometry]
     admin_level: int,
     gdf_buffers,                         # epsg:4326
-    gdf_buffers_anti,                    # antimeridian-wrapped
     buffers_sindex,                      # gdf_buffers.sindex
-    da_wp_global,
-    da_wp_wrapped,
+    da_wp,
     done_df: pd.DataFrame,
     overwrite: bool,
     key_cols: list[str],
@@ -1732,40 +1728,29 @@ def _process_buffer_exposure_country(
 ) -> int:
     """Compute and write per-unit exposure for all admin units in one country.
 
+    Buffers and admin units are expected to be split at the dateline upstream
+    (antimeridian package in buffer pipelines, FieldMaps' native multi-part
+    adm files), so this works entirely in standard EPSG:4326 — no wrap-around
+    CRS reprojection needed.
+
     Country geometry (union of its units) is used to pre-clip WorldPop and
     spatially prefilter buffers; per-unit work then sub-clips that smaller
     raster and intersects against the smaller buffer set.
 
     Returns number of units written (0 if nothing intersected or all done).
     """
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, calculate_exposure
+    from src.utils.exposure import calculate_exposure
 
     country_geom = country_units.geometry.union_all()
-    minx, _, maxx, _ = country_geom.bounds
-    wrap = maxx > 160 or minx < -160
-
-    if wrap:
-        da_wp = da_wp_wrapped
-        country_geom_local = (
-            gpd.GeoSeries([country_geom], crs=4326)
-            .to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-        )
-        country_buffers = gdf_buffers_anti[
-            gdf_buffers_anti.intersects(country_geom_local)
-        ]
-    else:
-        da_wp = da_wp_global
-        country_geom_local = country_geom
-        candidate_idx = list(buffers_sindex.intersection(country_geom.bounds))
-        if not candidate_idx:
-            return 0
-        candidates = gdf_buffers.iloc[candidate_idx]
-        country_buffers = candidates[candidates.intersects(country_geom)]
-
+    candidate_idx = list(buffers_sindex.intersection(country_geom.bounds))
+    if not candidate_idx:
+        return 0
+    candidates = gdf_buffers.iloc[candidate_idx]
+    country_buffers = candidates[candidates.intersects(country_geom)]
     if country_buffers.empty:
         return 0
 
-    da_wp_country = da_wp.rio.clip([country_geom_local], all_touched=True)
+    da_wp_country = da_wp.rio.clip([country_geom], all_touched=True)
 
     # For admin1, build a small sindex over the country-clipped buffers so
     # per-unit intersect is cheap. For admin0 we skip — the only unit IS
@@ -1779,22 +1764,14 @@ def _process_buffer_exposure_country(
         if admin_level == 0:
             # Admin0: country is the unit; reuse country buffers + geom.
             buf_in = country_buffers
-            unit_geom_local = country_geom_local
+            unit_geom = country_geom
         else:
             unit_geom = unit.geometry
-            if wrap:
-                unit_geom_local = (
-                    gpd.GeoSeries([unit_geom], crs=4326)
-                    .to_crs(GEO_CRS_ANTIMERIDIAN).iloc[0]
-                )
-                buf_in = country_buffers[country_buffers.intersects(unit_geom_local)]
-            else:
-                unit_geom_local = unit_geom
-                idx2 = list(unit_sindex.intersection(unit_geom.bounds))
-                if not idx2:
-                    continue
-                unit_candidates = country_buffers.iloc[idx2]
-                buf_in = unit_candidates[unit_candidates.intersects(unit_geom)]
+            idx2 = list(unit_sindex.intersection(unit_geom.bounds))
+            if not idx2:
+                continue
+            unit_candidates = country_buffers.iloc[idx2]
+            buf_in = unit_candidates[unit_candidates.intersects(unit_geom)]
             if buf_in.empty:
                 continue
 
@@ -1808,7 +1785,7 @@ def _process_buffer_exposure_country(
         # exactextract on (unit_geom ∩ buffer_geom). Country-level
         # pre-clip da_wp_country is just a window restriction; exact_extract
         # handles per-pair area-weighted sums.
-        df = calculate_exposure(buf_in, da_wp_country, mask_geom=unit_geom_local)
+        df = calculate_exposure(buf_in, da_wp_country, mask_geom=unit_geom)
         df["iso3"] = iso3
         df["pcode"] = pcode
         df["admin_level"] = admin_level
@@ -1926,7 +1903,6 @@ def _run_track_exp(
     """
     import warnings
     from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
 
@@ -1946,7 +1922,6 @@ def _run_track_exp(
                 f"No {buffers_log_label.lower()} found for the given filters. Skipping."
             )
             return
-        gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
         buffers_sindex = gdf_buffers.sindex
         buffers_bbox = tuple(gdf_buffers.total_bounds)
 
@@ -1974,10 +1949,8 @@ def _run_track_exp(
                     country_units=country_units,
                     admin_level=admin_level,
                     gdf_buffers=gdf_buffers,
-                    gdf_buffers_anti=gdf_buffers_anti,
                     buffers_sindex=buffers_sindex,
-                    da_wp_global=session.da_wp_global,
-                    da_wp_wrapped=session.da_wp_wrapped,
+                    da_wp=session.da_wp,
                     done_df=done_df,
                     overwrite=overwrite,
                     key_cols=key_cols,
@@ -2453,7 +2426,6 @@ def _run_exp_year_chunk(
     import warnings
     from rasterio.errors import ShapeSkipWarning
     from tqdm import tqdm
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
 
@@ -2514,7 +2486,6 @@ def _run_exp_year_chunk(
                 f"{table_label}: year {year} → {len(gdf_wsp)} polygons; "
                 f"running per-admin-level country loop"
             )
-            gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
             wsp_sindex = gdf_wsp.sindex
             buffers_bbox = tuple(gdf_wsp.total_bounds)
 
@@ -2537,10 +2508,8 @@ def _run_exp_year_chunk(
                         country_units=country_units,
                         admin_level=admin_level,
                         gdf_buffers=gdf_wsp,
-                        gdf_buffers_anti=gdf_wsp_anti,
                         buffers_sindex=wsp_sindex,
-                        da_wp_global=session.da_wp_global,
-                        da_wp_wrapped=session.da_wp_wrapped,
+                        da_wp=session.da_wp,
                         done_df=done_df,
                         overwrite=overwrite,
                         key_cols=_WSP_EXP_KEY_COLS,
@@ -2559,7 +2528,7 @@ def _run_exp_year_chunk(
                     f"{year_writes} country writes, {bbox_skipped} bbox-prefiltered "
                     f"({total_processed} cumulative)"
                 )
-            del gdf_wsp, gdf_wsp_anti, wsp_sindex
+            del gdf_wsp, wsp_sindex
 
         logger.info(f"{table_label}: all years done; {total_processed} writes.")
     finally:

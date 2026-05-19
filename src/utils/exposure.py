@@ -104,11 +104,16 @@ def load_adm_units(
     return out[["iso3", "pcode", "geometry"]].reset_index(drop=True)
 
 
-def load_pop() -> tuple[xr.DataArray, xr.DataArray]:
-    """Return (global, antimeridian-wrapped) WorldPop DataArrays."""
-    da = stratus.open_blob_cog(_POP_BLOB, container_name="raster").squeeze(drop=True)
-    da_wrapped = da.assign_coords({"x": ((da.x + 360) % 360)}).sortby("x")
-    return da, da_wrapped
+def load_pop() -> xr.DataArray:
+    """Return the global WorldPop DataArray.
+
+    Standard EPSG:4326, lazy via stratus.open_blob_cog. Buffer and admin
+    geometries are split at the dateline upstream (antimeridian package
+    in the buffer pipelines, FieldMaps' native multi-part adm files), so
+    we can operate entirely in -180/+180 space — no wrap-around CRS
+    needed downstream.
+    """
+    return stratus.open_blob_cog(_POP_BLOB, container_name="raster").squeeze(drop=True)
 
 
 def calculate_exposure(
@@ -125,6 +130,9 @@ def calculate_exposure(
     rather than full-or-nothing, so admin1 sums add up to admin0 totals
     (no boundary double-count, unlike chained ``rio.clip`` with
     ``all_touched=True``).
+
+    Inputs are expected in standard EPSG:4326 with antimeridian-crossing
+    polygons already split into MultiPolygons.
 
     Returns a DataFrame with all non-geometry columns from ``gdf`` plus
     ``result_col`` (int). Buffers that produce an empty intersection
@@ -146,13 +154,6 @@ def calculate_exposure(
 
     if valid.any():
         sub = work.loc[valid]
-        # Antimeridian handling: if ANY remaining geometry crosses near
-        # the dateline, reproject the whole batch (and the raster is
-        # expected to be antimeridian-wrapped — caller's responsibility).
-        if (sub.geometry.bounds["minx"] < -160).any() or (
-            sub.geometry.bounds["maxx"] > 160
-        ).any():
-            sub = sub.to_crs(GEO_CRS_ANTIMERIDIAN)
         result = exact_extract(da, sub, ops=["sum"], output="pandas")
         out.loc[valid, result_col] = (
             result["sum"].fillna(0).round().astype("int64").values
