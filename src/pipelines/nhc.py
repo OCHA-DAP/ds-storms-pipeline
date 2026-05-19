@@ -48,6 +48,28 @@ _WIND_BUFFER_BATCH_SIZE = 50
 logger = logging.getLogger(__name__)
 
 
+def _fix_antimeridian(geom):
+    """Split a polygon crossing the antimeridian into a proper MultiPolygon.
+
+    ocha-lens's `calculate_wind_buffers_gdf` reprojects buffers through a
+    `lon_wrap=180` CRS for continuous-longitude tracks, then naively clips
+    back with `intersection(box(-180, -90, 180, 90))`. For storms whose
+    cone crosses the dateline, the resulting polygon has vertices near
+    both ±180 and shapely interprets it as the long-way-around polygon
+    that wraps the entire globe. Downstream `.intersects()` then matches
+    far-away countries (Bangladesh, Afghanistan, …) → ridiculous exposure
+    values.
+
+    `antimeridian.fix_polygon` detects this case and splits the polygon
+    into the two correct parts (one near -180, one near +180). No-op for
+    polygons that don't cross the dateline.
+    """
+    import antimeridian
+    if geom is None or geom.is_empty:
+        return geom
+    return antimeridian.fix_polygon(geom)
+
+
 NHC_SAMPLE_JSON_URL = (
     "https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json"
 )
@@ -1231,6 +1253,7 @@ def process_nhc_tracks_fcast_buffers(
             gdf_buffers = calculate_wind_buffers_gdf(
                 group, quad_cols_format="quadrant_radius_{speed}_{quad}"
             )
+            gdf_buffers["geometry"] = gdf_buffers.geometry.apply(_fix_antimeridian)
             gdf_buffers["atcf_id"] = atcf_id
             gdf_buffers["issued_time"] = it
             batch.append(gdf_buffers)
@@ -1401,6 +1424,7 @@ def process_nhc_tracks_obsv_buffers(
                 gdf_buffers = calculate_wind_buffers_gdf(
                     cumulative, quad_cols_format="quadrant_radius_{speed}_{quad}"
                 )
+                gdf_buffers["geometry"] = gdf_buffers.geometry.apply(_fix_antimeridian)
                 gdf_buffers["atcf_id"] = atcf_id
                 gdf_buffers["valid_time"] = t
                 batch.append(gdf_buffers)
@@ -1559,6 +1583,12 @@ def process_nhc_tracks_fcastonly_buffers(
                 obsv_geom = shapely_wkt.loads(row["obsv_geom"])
                 diff = fcast_geom.difference(obsv_geom)
                 result_geom = None if diff.is_empty else diff
+
+            # Defensive: if fcast had a wraparound that snuck past, or the
+            # difference produced one, split at the dateline so downstream
+            # exposure intersections don't false-match far-away countries.
+            if result_geom is not None:
+                result_geom = _fix_antimeridian(result_geom)
 
             batch.append({
                 "atcf_id": row["atcf_id"],

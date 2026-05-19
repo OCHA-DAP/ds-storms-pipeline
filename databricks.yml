@@ -128,6 +128,7 @@ resources:
             - pypi: { package: "rasterio" }
             - pypi: { package: "rioxarray" }
             - pypi: { package: "exactextract" }
+            - pypi: { package: "antimeridian" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
             - pypi: { package: "geoalchemy2" }
