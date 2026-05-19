@@ -127,6 +127,7 @@ resources:
             - pypi: { package: "geopandas" }
             - pypi: { package: "rasterio" }
             - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
             - pypi: { package: "geoalchemy2" }
