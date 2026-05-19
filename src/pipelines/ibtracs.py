@@ -461,8 +461,10 @@ def run_ibtracs_exp(
         logger.info(f"{prefix} — {len(buf_in)} intersecting, {len(buf_zero)} zeros")
 
         if not buf_in.empty:
+            # Country-level pre-clip is just a raster window restriction;
+            # exact_extract handles area-weighted sums over (country ∩ buffer).
             da_wp_country = da_wp.rio.clip([adm_geom], all_touched=True)
-            df = calculate_exposure(buf_in, da_wp_country)
+            df = calculate_exposure(buf_in, da_wp_country, mask_geom=adm_geom)
             df["iso3"] = iso3
             df["pcode"] = iso3
             df["admin_level"] = _EXP_ADMIN_LEVEL

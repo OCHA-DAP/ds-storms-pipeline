@@ -1716,9 +1716,9 @@ def _process_buffer_exposure_country(
         pcode = unit["pcode"]
 
         if admin_level == 0:
+            # Admin0: country is the unit; reuse country buffers + geom.
             buf_in = country_buffers
             unit_geom_local = country_geom_local
-            da_wp_unit = da_wp_country
         else:
             unit_geom = unit.geometry
             if wrap:
@@ -1736,10 +1736,6 @@ def _process_buffer_exposure_country(
                 buf_in = unit_candidates[unit_candidates.intersects(unit_geom)]
             if buf_in.empty:
                 continue
-            try:
-                da_wp_unit = da_wp_country.rio.clip([unit_geom_local], all_touched=True)
-            except Exception:
-                continue
 
         if not overwrite and not done_df.empty:
             done_unit = done_df[done_df["pcode"] == pcode]
@@ -1748,7 +1744,10 @@ def _process_buffer_exposure_country(
                 if buf_in.empty:
                     continue
 
-        df = calculate_exposure(buf_in, da_wp_unit)
+        # exactextract on (unit_geom ∩ buffer_geom). Country-level
+        # pre-clip da_wp_country is just a window restriction; exact_extract
+        # handles per-pair area-weighted sums.
+        df = calculate_exposure(buf_in, da_wp_country, mask_geom=unit_geom_local)
         df["iso3"] = iso3
         df["pcode"] = pcode
         df["admin_level"] = admin_level

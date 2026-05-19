@@ -28,7 +28,8 @@ FIELDMAPS_URL = (
 ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
 SIMPLIFY_TOL_DEG = 0.001  # ~100 m; matches ds-storms-alerts
 BLOB_CONTAINER = "raster"
-BLOB_PATH_TPL = "fieldmaps/adm1/{iso3}.parquet"
+BLOB_PATH_TPL_ADM1 = "fieldmaps/adm1/{iso3}.parquet"
+BLOB_PATH_TPL_ADM0 = "fieldmaps/adm0/{iso3}.parquet"
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +56,40 @@ def mirror(stage: str) -> None:
         sub["geometry"] = sub.geometry.simplify(
             SIMPLIFY_TOL_DEG, preserve_topology=True
         ).apply(make_valid)
-        buf = BytesIO()
-        sub.reset_index(drop=True).to_parquet(buf)
+
+        # adm1 blob: per-polygon admin1 rows
+        buf_adm1 = BytesIO()
+        sub.reset_index(drop=True).to_parquet(buf_adm1)
         stratus.upload_blob_data(
-            data=buf.getvalue(),
-            blob_name=BLOB_PATH_TPL.format(iso3=iso3),
+            data=buf_adm1.getvalue(),
+            blob_name=BLOB_PATH_TPL_ADM1.format(iso3=iso3),
+            stage=stage,
+            container_name=BLOB_CONTAINER,
+        )
+
+        # adm0 blob: one row per iso3, dissolved country geometry. Some
+        # iso3s have multiple disjoint adm0 features (e.g. UMI's separate
+        # Pacific islands, VEN's Bird Island + mainland) — collapse them
+        # into a single MultiPolygon so downstream consumers can treat
+        # admin_level=0 as "one unit per iso3". adm0_name is dropped at
+        # this point (multiple names per iso3 don't survive the union).
+        adm0 = (
+            sub[["iso_3", "geometry"]]
+            .dissolve(by="iso_3", as_index=False)
+        )
+        adm0["geometry"] = adm0.geometry.apply(make_valid)
+        buf_adm0 = BytesIO()
+        adm0.to_parquet(buf_adm0)
+        stratus.upload_blob_data(
+            data=buf_adm0.getvalue(),
+            blob_name=BLOB_PATH_TPL_ADM0.format(iso3=iso3),
             stage=stage,
             container_name=BLOB_CONTAINER,
         )
 
     logger.info(
         f"Mirrored {gdf['iso_3'].nunique()} country blobs to "
-        f"{stage}://{BLOB_CONTAINER}/fieldmaps/adm1/."
+        f"{stage}://{BLOB_CONTAINER}/fieldmaps/{{adm0,adm1}}/."
     )
 
 
