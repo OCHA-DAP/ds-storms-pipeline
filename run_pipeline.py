@@ -347,32 +347,19 @@ def main():
     # WorldPop + FieldMaps + engine across the inner pipelines. Used by
     # the DBX realtime-tracks-exposure / realtime-wsp-exposure tasks.
     # ------------------------------------------------------------------ #
+    # Composite runners — accept the same time filters as their inner
+    # pipelines so they can drive both realtime (one issuance) and
+    # backfill (since/until range) flows with one DBX task.
     nhc_rt_tracks_exp_parser = subparsers.add_parser(
         "nhc-realtime-tracks-exp",
-        parents=[common, exp_common, basin_common],
-        help="Realtime tracks exposure cascade: fcast + obsv + fcastonly, shared setup",
-    )
-    nhc_rt_tracks_exp_parser.add_argument(
-        "--issued-time", metavar="YYYY-MM-DDTHH",
-        help="Single issued_time to process (required for realtime)",
-    )
-    nhc_rt_tracks_exp_parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Recompute and upsert even if results already exist",
+        parents=[common, exp_common, time_filter_common, basin_common],
+        help="Composite tracks exposure cascade: fcast + obsv + fcastonly, shared setup",
     )
 
     nhc_rt_wsp_exp_parser = subparsers.add_parser(
         "nhc-realtime-wsp-exp",
-        parents=[common, exp_common, basin_common],
-        help="Realtime WSP exposure cascade: wsp + wsp-fcastonly, shared setup",
-    )
-    nhc_rt_wsp_exp_parser.add_argument(
-        "--issued-time", metavar="YYYY-MM-DDTHH",
-        help="Single issued_time to process (required for realtime)",
-    )
-    nhc_rt_wsp_exp_parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Recompute and upsert even if results already exist",
+        parents=[common, exp_common, time_filter_common, basin_common],
+        help="Composite WSP exposure cascade: wsp + wsp-fcastonly, shared setup",
     )
 
     # ------------------------------------------------------------------ #
@@ -614,8 +601,9 @@ def main():
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
             countries=countries,
-            since=getattr(args, "since", None),
-            basin=getattr(args, "basin", None),
+            since=args.since,
+            until=args.until,
+            basin=args.basin,
             overwrite=args.overwrite,
             admin_levels=getattr(args, "admin_level", None),
         )
@@ -625,8 +613,9 @@ def main():
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
             countries=countries,
-            since=getattr(args, "since", None),
-            basin=getattr(args, "basin", None),
+            since=args.since,
+            until=args.until,
+            basin=args.basin,
             overwrite=args.overwrite,
             admin_levels=getattr(args, "admin_level", None),
         )

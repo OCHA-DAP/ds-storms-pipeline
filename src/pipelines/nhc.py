@@ -2984,12 +2984,16 @@ def run_nhc_tracks_exp_realtime(
     issued_time=None,
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     admin_levels: list[int] | None = None,
 ) -> None:
-    """Single-process realtime tracks-exposure cascade: fcast + obsv + fcastonly.
+    """Single-process tracks-exposure cascade: fcast + obsv + fcastonly.
 
+    Realtime use: pass ``issued_time`` (single advisory).
+    Backfill use: pass ``since``/``until`` (range); inner runners scan
+    over their respective buffer tables.
     obsv keys on valid_time which in realtime equals track_issued_time.
     """
     session = build_exposure_session(
@@ -2998,19 +3002,22 @@ def run_nhc_tracks_exp_realtime(
     try:
         logger.info("=== nhc-track-exp ===")
         run_nhc_tracks_fcast_exp(
-            session=session, countries=countries, since=since, basin=basin,
+            session=session, countries=countries,
+            since=since, until=until, basin=basin,
             overwrite=overwrite, mode=mode, issued_time=issued_time,
             admin_levels=admin_levels,
         )
         logger.info("=== nhc-obsv-exp ===")
         run_nhc_tracks_obsv_exp(
-            session=session, countries=countries, since=since, basin=basin,
+            session=session, countries=countries,
+            since=since, until=until, basin=basin,
             overwrite=overwrite, mode=mode, valid_time=issued_time,
             admin_levels=admin_levels,
         )
         logger.info("=== nhc-fcastonly-exp ===")
         run_nhc_tracks_fcastonly_exp(
-            session=session, countries=countries, since=since, basin=basin,
+            session=session, countries=countries,
+            since=since, until=until, basin=basin,
             overwrite=overwrite, mode=mode, issued_time=issued_time,
             admin_levels=admin_levels,
         )
@@ -3024,24 +3031,30 @@ def run_nhc_wsp_exp_realtime(
     issued_time=None,
     countries: list[str] | None = None,
     since: str | None = None,
+    until: str | None = None,
     basin: str | None = None,
     overwrite: bool = False,
     admin_levels: list[int] | None = None,
 ) -> None:
-    """Single-process realtime WSP-exposure cascade: wsp + wsp-fcastonly."""
+    """Single-process WSP-exposure cascade: wsp + wsp-fcastonly.
+
+    Realtime: pass ``issued_time``. Backfill: pass ``since``/``until``.
+    """
     session = build_exposure_session(
         mode=mode, countries=countries, admin_levels=admin_levels,
     )
     try:
         logger.info("=== nhc-wsp-exp ===")
         run_nhc_wsp_exp(
-            session=session, countries=countries, since=since, basin=basin,
+            session=session, countries=countries,
+            since=since, until=until, basin=basin,
             overwrite=overwrite, mode=mode, issued_time=issued_time,
             admin_levels=admin_levels,
         )
         logger.info("=== nhc-wsp-fcastonly-exp ===")
         run_nhc_wsp_fcastonly_exp(
-            session=session, countries=countries, since=since, basin=basin,
+            session=session, countries=countries,
+            since=since, until=until, basin=basin,
             overwrite=overwrite, mode=mode, issued_time=issued_time,
             admin_levels=admin_levels,
         )

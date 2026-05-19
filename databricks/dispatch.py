@@ -232,12 +232,16 @@ if __name__ == "__main__":
         f"issued_time={ISSUED_TIME!r} cwd={REPO_ROOT}",
         flush=True,
     )
-    # Realtime composites need an issued_time from the ETL stage. If the
-    # ETL emitted "" (no active storms), there's nothing for downstream
-    # to do — return successfully so the DAG continues / completes
-    # without firing a backfill.
-    if SUBCOMMAND in COMPOSITES and not ISSUED_TIME:
-        print(f"(no issued_time supplied for {SUBCOMMAND} — nothing to do)")
+    # Realtime composites typically need an issued_time from the ETL stage.
+    # No-op only when ALL time filters are empty (the realtime-cron / no-
+    # active-storms case). If the user passed a range (since/until) or an
+    # explicit issued_time, run the composite normally — its inner subcommand
+    # now accepts --since/--until and treats this as a backfill.
+    no_time_filter = not (ISSUED_TIME or SINCE or UNTIL)
+    if SUBCOMMAND in COMPOSITES and no_time_filter:
+        print(
+            f"(no issued_time/since/until supplied for {SUBCOMMAND} — nothing to do)"
+        )
     elif SUBCOMMAND in COMPOSITES:
         for parts in COMPOSITES[SUBCOMMAND]:
             run_one(parts[0], parts[1:])
