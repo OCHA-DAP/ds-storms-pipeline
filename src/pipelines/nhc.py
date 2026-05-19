@@ -54,16 +54,31 @@ def _fix_antimeridian(geom):
     via calculate_wind_buffers_gdf; kept as a safety net for the
     fcast.difference(obsv) path which can also produce wraparounds.
 
-    Type-aware: fix_polygon for Polygon, fix_multi_polygon for MultiPolygon,
-    pass-through for other types or empty.
+    Per-part handling tolerates degenerate sub-polygons (<4 unique vertices
+    after dedup) that would otherwise blow up antimeridian.fix_polygon.
     """
     import antimeridian
+    from shapely.geometry import MultiPolygon
     if geom is None or geom.is_empty:
         return geom
+
+    def _fix_one(p):
+        try:
+            return antimeridian.fix_polygon(p, fix_winding=True)
+        except ValueError:
+            return p
+
     if geom.geom_type == "Polygon":
-        return antimeridian.fix_polygon(geom)
+        return _fix_one(geom)
     if geom.geom_type == "MultiPolygon":
-        return antimeridian.fix_multi_polygon(geom)
+        parts = []
+        for p in geom.geoms:
+            fixed = _fix_one(p)
+            if fixed.geom_type == "Polygon":
+                parts.append(fixed)
+            elif fixed.geom_type == "MultiPolygon":
+                parts.extend(list(fixed.geoms))
+        return MultiPolygon(parts) if parts else geom
     return geom
 
 
