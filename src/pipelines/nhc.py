@@ -1588,6 +1588,69 @@ _WSP_EXP_KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"
 _DEFAULT_ADMIN_LEVELS = [0, 1]
 
 
+# ---------------------------------------------------------------------------
+# Shared exposure session — load WorldPop / FieldMaps / engine ONCE and
+# reuse across the realtime exposure cascade's 5 sub-pipelines instead of
+# paying ~5 minutes of cold setup per subprocess.
+# ---------------------------------------------------------------------------
+from dataclasses import dataclass
+
+
+@dataclass
+class _ExposureSession:
+    engine: object
+    da_wp_global: object
+    da_wp_wrapped: object
+    units_by_level: dict          # admin_level → GeoDataFrame
+    country_groups_by_level: dict  # admin_level → [(iso3, units_gdf, bbox_tuple)]
+    admin_levels: list[int]
+
+
+def _build_country_groups_with_bbox(units):
+    """[(iso3, units_gdf, (minx, miny, maxx, maxy))] for cheap bbox prefilter."""
+    return [
+        (iso3, sub, tuple(sub.total_bounds))
+        for iso3, sub in units.groupby("iso3")
+    ]
+
+
+def build_exposure_session(
+    mode: str = "dev",
+    countries: list[str] | None = None,
+    admin_levels: list[int] | None = None,
+) -> _ExposureSession:
+    """Load all the per-run-invariant state: engine, WorldPop, FieldMaps adm units."""
+    from src.utils.exposure import load_adm_units, load_pop
+    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
+    engine = stratus.get_engine(stage=mode, write=True)
+    da_wp_global, da_wp_wrapped = load_pop()
+    units_by_level = {
+        al: load_adm_units(countries, al, stage=mode) for al in admin_levels
+    }
+    country_groups_by_level = {
+        al: _build_country_groups_with_bbox(units_by_level[al])
+        for al in admin_levels
+    }
+    return _ExposureSession(
+        engine=engine,
+        da_wp_global=da_wp_global,
+        da_wp_wrapped=da_wp_wrapped,
+        units_by_level=units_by_level,
+        country_groups_by_level=country_groups_by_level,
+        admin_levels=admin_levels,
+    )
+
+
+def _bbox_overlaps(country_bbox, buffers_bbox) -> bool:
+    """True if (minx, miny, maxx, maxy) tuples overlap."""
+    return not (
+        country_bbox[2] < buffers_bbox[0]
+        or country_bbox[0] > buffers_bbox[2]
+        or country_bbox[3] < buffers_bbox[1]
+        or country_bbox[1] > buffers_bbox[3]
+    )
+
+
 def _process_buffer_exposure_country(
     *,
     iso3: str,
@@ -1771,6 +1834,102 @@ def _filter_done_nhc_tracks_fcast(buffers: gpd.GeoDataFrame, done_country: pd.Da
     return buffers[merged["_done"].isna().values].reset_index(drop=True)
 
 
+def _run_track_exp(
+    *,
+    load_buffers,            # callable(engine) -> gpd.GeoDataFrame
+    out_table: str,
+    key_cols: list[str],
+    done_loader,             # callable(engine, admin_level) -> done_df
+    done_filter,             # callable(buffers, done_country) -> buffers
+    countries,
+    overwrite: bool,
+    mode: str,
+    admin_levels,
+    session: _ExposureSession | None,
+    buffers_log_label: str,
+) -> None:
+    """Shared body for the 3 inline track-exposure runners.
+
+    Builds (or borrows) a session, loads the per-pipeline buffer set, and
+    iterates countries with a cheap bbox prefilter before the heavy
+    union_all in `_process_buffer_exposure_country`.
+    """
+    import warnings
+    from rasterio.errors import ShapeSkipWarning
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN
+
+    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
+
+    own_session = session is None
+    if own_session:
+        session = build_exposure_session(
+            mode=mode, countries=countries, admin_levels=admin_levels,
+        )
+    engine = session.engine
+    admin_levels = session.admin_levels
+
+    try:
+        logger.info(f"Loading {buffers_log_label} for exposure calculation...")
+        gdf_buffers = load_buffers(engine)
+        if gdf_buffers.empty:
+            logger.info(
+                f"No {buffers_log_label.lower()} found for the given filters. Skipping."
+            )
+            return
+        gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
+        buffers_sindex = gdf_buffers.sindex
+        buffers_bbox = tuple(gdf_buffers.total_bounds)
+
+        for admin_level in admin_levels:
+            country_groups = session.country_groups_by_level[admin_level]
+            n_units = len(session.units_by_level[admin_level])
+            logger.info(
+                f"admin_level={admin_level}: {len(country_groups)} countries, "
+                f"{n_units} units"
+            )
+
+            done_df = (
+                pd.DataFrame(columns=key_cols) if overwrite
+                else done_loader(engine, admin_level)
+            )
+
+            processed = no_intersect = bbox_skipped = 0
+            for i, (iso3, country_units, cb) in enumerate(country_groups, 1):
+                if not _bbox_overlaps(cb, buffers_bbox):
+                    bbox_skipped += 1
+                    continue
+                prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
+                n = _process_buffer_exposure_country(
+                    iso3=iso3,
+                    country_units=country_units,
+                    admin_level=admin_level,
+                    gdf_buffers=gdf_buffers,
+                    gdf_buffers_anti=gdf_buffers_anti,
+                    buffers_sindex=buffers_sindex,
+                    da_wp_global=session.da_wp_global,
+                    da_wp_wrapped=session.da_wp_wrapped,
+                    done_df=done_df,
+                    overwrite=overwrite,
+                    key_cols=key_cols,
+                    done_filter=done_filter,
+                    out_table=out_table,
+                    engine=engine,
+                )
+                if n:
+                    processed += 1
+                    logger.info(f"{prefix} — {n} unit writes")
+                else:
+                    no_intersect += 1
+
+            logger.info(
+                f"admin_level={admin_level} done: {processed} written, "
+                f"{no_intersect} no-intersect, {bbox_skipped} bbox-prefiltered"
+            )
+    finally:
+        if own_session:
+            engine.dispose()
+
+
 def run_nhc_tracks_fcast_exp(
     countries: list[str] | None = None,
     since: str | None = None,
@@ -1779,71 +1938,22 @@ def run_nhc_tracks_fcast_exp(
     mode: str = "dev",
     issued_time=None,
     admin_levels: list[int] | None = None,
+    session: _ExposureSession | None = None,
 ) -> None:
-    import warnings
-    from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
-
-    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
-    engine = stratus.get_engine(stage=mode, write=True)
-
-    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
-
-    logger.info("Loading NHC wind buffers for exposure calculation...")
-    gdf_buffers = _load_nhc_tracks_fcast_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
-    if gdf_buffers.empty:
-        logger.info("No wind buffers found for the given filters. Skipping.")
-        return
-    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
-    buffers_sindex = gdf_buffers.sindex
-
-    da_wp_global, da_wp_wrapped = load_pop()
-
-    for admin_level in admin_levels:
-        gdf_units = load_adm_units(countries, admin_level, stage=mode)
-        country_groups = list(gdf_units.groupby("iso3"))
-        logger.info(
-            f"admin_level={admin_level}: {len(country_groups)} countries, "
-            f"{len(gdf_units)} units"
-        )
-
-        done_df = (
-            pd.DataFrame(columns=_TRACK_EXP_KEY_COLS) if overwrite
-            else _load_done_nhc_tracks_fcast_exp(
-                engine, admin_level, issued_time=issued_time,
-            )
-        )
-
-        processed = skipped = 0
-        for i, (iso3, country_units) in enumerate(country_groups, 1):
-            prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
-            n = _process_buffer_exposure_country(
-                iso3=iso3,
-                country_units=country_units,
-                admin_level=admin_level,
-                gdf_buffers=gdf_buffers,
-                gdf_buffers_anti=gdf_buffers_anti,
-                buffers_sindex=buffers_sindex,
-                da_wp_global=da_wp_global,
-                da_wp_wrapped=da_wp_wrapped,
-                done_df=done_df,
-                overwrite=overwrite,
-                key_cols=_TRACK_EXP_KEY_COLS,
-                done_filter=_filter_done_nhc_tracks_fcast,
-                out_table="nhc_tracks_fcast_exposure",
-                engine=engine,
-            )
-            if n:
-                processed += 1
-                logger.info(f"{prefix} — {n} unit writes")
-            else:
-                skipped += 1
-
-        logger.info(
-            f"admin_level={admin_level} done: {processed} countries written, "
-            f"{skipped} skipped."
-        )
-    engine.dispose()
+    _run_track_exp(
+        load_buffers=lambda eng: _load_nhc_tracks_fcast_exp_buffers(
+            eng, since=since, basin=basin, issued_time=issued_time,
+        ),
+        out_table="nhc_tracks_fcast_exposure",
+        key_cols=_TRACK_EXP_KEY_COLS,
+        done_loader=lambda eng, al: _load_done_nhc_tracks_fcast_exp(
+            eng, al, issued_time=issued_time,
+        ),
+        done_filter=_filter_done_nhc_tracks_fcast,
+        countries=countries, overwrite=overwrite, mode=mode,
+        admin_levels=admin_levels, session=session,
+        buffers_log_label="NHC wind buffers",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1924,81 +2034,34 @@ def run_nhc_tracks_obsv_exp(
     valid_time=None,
     admin_levels: list[int] | None = None,
     final_only: bool = False,
+    session: _ExposureSession | None = None,
 ) -> None:
-    import warnings
-    from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
-
-    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
-    engine = stratus.get_engine(stage=mode, write=True)
-
-    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
-
-    logger.info("Loading NHC observed track buffers for exposure calculation...")
-    gdf_buffers = _load_nhc_tracks_obsv_exp_buffers(engine, since=since, basin=basin, valid_time=valid_time)
-    if gdf_buffers.empty:
-        logger.info("No observed track buffers found for the given filters. Skipping.")
-        return
-
-    if final_only:
-        before = len(gdf_buffers)
-        idx = gdf_buffers.groupby(["atcf_id", "wind_speed_kt"])["valid_time"].idxmax()
-        gdf_buffers = gdf_buffers.loc[idx].reset_index(drop=True)
-        logger.info(
-            f"final_only: trimmed {before:,} buffers → {len(gdf_buffers):,} "
-            f"(one per atcf_id × wind_speed_kt at max(valid_time))"
+    def _load(engine):
+        gdf = _load_nhc_tracks_obsv_exp_buffers(
+            engine, since=since, basin=basin, valid_time=valid_time,
         )
-
-    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
-    buffers_sindex = gdf_buffers.sindex
-
-    da_wp_global, da_wp_wrapped = load_pop()
-
-    for admin_level in admin_levels:
-        gdf_units = load_adm_units(countries, admin_level, stage=mode)
-        country_groups = list(gdf_units.groupby("iso3"))
-        logger.info(
-            f"admin_level={admin_level}: {len(country_groups)} countries, "
-            f"{len(gdf_units)} units"
-        )
-
-        done_df = (
-            pd.DataFrame(columns=_OBSV_EXP_KEY_COLS) if overwrite
-            else _load_done_nhc_tracks_obsv_exp(
-                engine, admin_level, valid_time=valid_time,
+        if final_only and not gdf.empty:
+            before = len(gdf)
+            idx = gdf.groupby(["atcf_id", "wind_speed_kt"])["valid_time"].idxmax()
+            gdf = gdf.loc[idx].reset_index(drop=True)
+            logger.info(
+                f"final_only: trimmed {before:,} buffers → {len(gdf):,} "
+                f"(one per atcf_id × wind_speed_kt at max(valid_time))"
             )
-        )
+        return gdf
 
-        processed = skipped = 0
-        for i, (iso3, country_units) in enumerate(country_groups, 1):
-            prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
-            n = _process_buffer_exposure_country(
-                iso3=iso3,
-                country_units=country_units,
-                admin_level=admin_level,
-                gdf_buffers=gdf_buffers,
-                gdf_buffers_anti=gdf_buffers_anti,
-                buffers_sindex=buffers_sindex,
-                da_wp_global=da_wp_global,
-                da_wp_wrapped=da_wp_wrapped,
-                done_df=done_df,
-                overwrite=overwrite,
-                key_cols=_OBSV_EXP_KEY_COLS,
-                done_filter=_filter_done_nhc_tracks_obsv,
-                out_table="nhc_tracks_obsv_exposure",
-                engine=engine,
-            )
-            if n:
-                processed += 1
-                logger.info(f"{prefix} — {n} unit writes")
-            else:
-                skipped += 1
-
-        logger.info(
-            f"admin_level={admin_level} obsv exposure done: {processed} countries "
-            f"written, {skipped} skipped."
-        )
-    engine.dispose()
+    _run_track_exp(
+        load_buffers=_load,
+        out_table="nhc_tracks_obsv_exposure",
+        key_cols=_OBSV_EXP_KEY_COLS,
+        done_loader=lambda eng, al: _load_done_nhc_tracks_obsv_exp(
+            eng, al, valid_time=valid_time,
+        ),
+        done_filter=_filter_done_nhc_tracks_obsv,
+        countries=countries, overwrite=overwrite, mode=mode,
+        admin_levels=admin_levels, session=session,
+        buffers_log_label="NHC observed track buffers",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2078,71 +2141,22 @@ def run_nhc_tracks_fcastonly_exp(
     mode: str = "dev",
     issued_time=None,
     admin_levels: list[int] | None = None,
+    session: _ExposureSession | None = None,
 ) -> None:
-    import warnings
-    from rasterio.errors import ShapeSkipWarning
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
-
-    warnings.filterwarnings("ignore", category=ShapeSkipWarning)
-    engine = stratus.get_engine(stage=mode, write=True)
-
-    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
-
-    logger.info("Loading NHC forecast-only track buffers for exposure calculation...")
-    gdf_buffers = _load_nhc_tracks_fcastonly_exp_buffers(engine, since=since, basin=basin, issued_time=issued_time)
-    if gdf_buffers.empty:
-        logger.info("No forecast-only track buffers found for the given filters. Skipping.")
-        return
-    gdf_buffers_anti = gdf_buffers.to_crs(GEO_CRS_ANTIMERIDIAN)
-    buffers_sindex = gdf_buffers.sindex
-
-    da_wp_global, da_wp_wrapped = load_pop()
-
-    for admin_level in admin_levels:
-        gdf_units = load_adm_units(countries, admin_level, stage=mode)
-        country_groups = list(gdf_units.groupby("iso3"))
-        logger.info(
-            f"admin_level={admin_level}: {len(country_groups)} countries, "
-            f"{len(gdf_units)} units"
-        )
-
-        done_df = (
-            pd.DataFrame(columns=_FCASTONLY_EXP_KEY_COLS) if overwrite
-            else _load_done_nhc_tracks_fcastonly_exp(
-                engine, admin_level, issued_time=issued_time,
-            )
-        )
-
-        processed = skipped = 0
-        for i, (iso3, country_units) in enumerate(country_groups, 1):
-            prefix = f"[adm{admin_level}][{i}/{len(country_groups)}] {iso3}"
-            n = _process_buffer_exposure_country(
-                iso3=iso3,
-                country_units=country_units,
-                admin_level=admin_level,
-                gdf_buffers=gdf_buffers,
-                gdf_buffers_anti=gdf_buffers_anti,
-                buffers_sindex=buffers_sindex,
-                da_wp_global=da_wp_global,
-                da_wp_wrapped=da_wp_wrapped,
-                done_df=done_df,
-                overwrite=overwrite,
-                key_cols=_FCASTONLY_EXP_KEY_COLS,
-                done_filter=_filter_done_nhc_tracks_fcastonly,
-                out_table="nhc_tracks_fcastonly_exposure",
-                engine=engine,
-            )
-            if n:
-                processed += 1
-                logger.info(f"{prefix} — {n} unit writes")
-            else:
-                skipped += 1
-
-        logger.info(
-            f"admin_level={admin_level} fcastonly exposure done: {processed} "
-            f"countries written, {skipped} skipped."
-        )
-    engine.dispose()
+    _run_track_exp(
+        load_buffers=lambda eng: _load_nhc_tracks_fcastonly_exp_buffers(
+            eng, since=since, basin=basin, issued_time=issued_time,
+        ),
+        out_table="nhc_tracks_fcastonly_exposure",
+        key_cols=_FCASTONLY_EXP_KEY_COLS,
+        done_loader=lambda eng, al: _load_done_nhc_tracks_fcastonly_exp(
+            eng, al, issued_time=issued_time,
+        ),
+        done_filter=_filter_done_nhc_tracks_fcastonly,
+        countries=countries, overwrite=overwrite, mode=mode,
+        admin_levels=admin_levels, session=session,
+        buffers_log_label="NHC forecast-only track buffers",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2301,7 +2315,7 @@ def _run_exp_year_chunk(
     table_label: str,
     load_chunk,                    # callable(engine, year) -> gpd.GeoDataFrame
     out_table: str,
-    done_loader,                   # callable(engine, admin_level) -> done_df
+    done_loader,                   # callable(engine, admin_level, issued_time=) -> done_df
     done_filter,                   # callable(wsp_in, done_country) -> wsp_in
     countries,
     since: str | None,
@@ -2312,117 +2326,125 @@ def _run_exp_year_chunk(
     chunk_source_table: str,
     single_year: int | None = None,
     admin_levels: list[int] | None = None,
+    session: _ExposureSession | None = None,
 ) -> None:
     """Shared year-chunked WSP exposure loop.
 
     Loads one calendar year of WSP polygons at a time, builds a spatial
-    index across that year, then iterates admin units (tqdm). adm/pop are
-    loaded once and reused across all years.
+    index across that year, then iterates admin units. Adm/pop are loaded
+    once via the shared exposure session (or built if not provided) and
+    reused across all years.
     """
     import warnings
     from rasterio.errors import ShapeSkipWarning
     from tqdm import tqdm
-    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN, load_adm_units, load_pop
+    from src.utils.exposure import GEO_CRS_ANTIMERIDIAN
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
-    engine = stratus.get_engine(stage=mode, write=True)
 
-    admin_levels = admin_levels or _DEFAULT_ADMIN_LEVELS
+    own_session = session is None
+    if own_session:
+        session = build_exposure_session(
+            mode=mode, countries=countries, admin_levels=admin_levels,
+        )
+    engine = session.engine
+    admin_levels = session.admin_levels
 
-    if single_year is not None:
-        years = [int(single_year)]
-    elif issued_time is not None:
-        try:
-            it_dt = pd.Timestamp(issued_time)
-            years = [int(it_dt.year)]
-        except Exception:
+    try:
+        if single_year is not None:
+            years = [int(single_year)]
+        elif issued_time is not None:
+            try:
+                it_dt = pd.Timestamp(issued_time)
+                years = [int(it_dt.year)]
+            except Exception:
+                years = _list_years(
+                    engine, chunk_source_table, since=since, basin=basin,
+                )
+        else:
             years = _list_years(
                 engine, chunk_source_table, since=since, basin=basin,
             )
-    else:
-        years = _list_years(
-            engine, chunk_source_table, since=since, basin=basin,
-        )
 
-    if not years:
-        logger.info(f"{table_label}: no years match filters. Skipping.")
-        return
-    logger.info(f"{table_label}: {len(years)} year chunks: {years}")
+        if not years:
+            logger.info(f"{table_label}: no years match filters. Skipping.")
+            return
+        logger.info(f"{table_label}: {len(years)} year chunks: {years}")
 
-    # Pre-load admin units per level once — reused across all years.
-    units_by_level = {al: load_adm_units(countries, al, stage=mode) for al in admin_levels}
-    country_groups_by_level = {
-        al: list(units_by_level[al].groupby("iso3")) for al in admin_levels
-    }
-    da_wp_global, da_wp_wrapped = load_pop()
+        done_by_level = {
+            al: (
+                pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
+                else done_loader(engine, al, issued_time=issued_time)
+            )
+            for al in admin_levels
+        }
 
-    done_by_level = {
-        al: (
-            pd.DataFrame(columns=_WSP_EXP_KEY_COLS) if overwrite
-            else done_loader(engine, al, issued_time=issued_time)
-        )
-        for al in admin_levels
-    }
-
-    total_processed = 0
-    for year in years:
-        logger.info(f"{table_label}: loading year {year}…")
-        gdf_wsp = load_chunk(engine, year)
-        if gdf_wsp.empty:
-            logger.info(f"{table_label}: year {year} has no polygons; skipping")
-            continue
-        if issued_time is not None:
-            gdf_wsp = gdf_wsp[gdf_wsp["issued_time"] == pd.Timestamp(issued_time)]
+        total_processed = 0
+        for year in years:
+            logger.info(f"{table_label}: loading year {year}…")
+            gdf_wsp = load_chunk(engine, year)
             if gdf_wsp.empty:
+                logger.info(f"{table_label}: year {year} has no polygons; skipping")
                 continue
-        logger.info(
-            f"{table_label}: year {year} → {len(gdf_wsp)} polygons; "
-            f"running per-admin-level country loop"
-        )
-        gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
-        wsp_sindex = gdf_wsp.sindex
-
-        for admin_level in admin_levels:
-            country_groups = country_groups_by_level[admin_level]
-            done_df = done_by_level[admin_level]
-            year_writes = 0
-            pbar = tqdm(
-                country_groups,
-                desc=f"{table_label} {year} adm{admin_level}",
-                unit="country",
-                leave=False,
-            )
-            for iso3, country_units in pbar:
-                n = _process_buffer_exposure_country(
-                    iso3=iso3,
-                    country_units=country_units,
-                    admin_level=admin_level,
-                    gdf_buffers=gdf_wsp,
-                    gdf_buffers_anti=gdf_wsp_anti,
-                    buffers_sindex=wsp_sindex,
-                    da_wp_global=da_wp_global,
-                    da_wp_wrapped=da_wp_wrapped,
-                    done_df=done_df,
-                    overwrite=overwrite,
-                    key_cols=_WSP_EXP_KEY_COLS,
-                    done_filter=done_filter,
-                    out_table=out_table,
-                    engine=engine,
-                    drop_cols=["id"],
-                )
-                if n:
-                    year_writes += 1
-                    total_processed += 1
-                    pbar.set_postfix(writes=year_writes)
-            pbar.close()
+            if issued_time is not None:
+                gdf_wsp = gdf_wsp[gdf_wsp["issued_time"] == pd.Timestamp(issued_time)]
+                if gdf_wsp.empty:
+                    continue
             logger.info(
-                f"{table_label}: year {year} adm{admin_level} done — "
-                f"{year_writes} country writes ({total_processed} cumulative)"
+                f"{table_label}: year {year} → {len(gdf_wsp)} polygons; "
+                f"running per-admin-level country loop"
             )
-        del gdf_wsp, gdf_wsp_anti, wsp_sindex
+            gdf_wsp_anti = gdf_wsp.to_crs(GEO_CRS_ANTIMERIDIAN)
+            wsp_sindex = gdf_wsp.sindex
+            buffers_bbox = tuple(gdf_wsp.total_bounds)
 
-    logger.info(f"{table_label}: all years done; {total_processed} writes.")
-    engine.dispose()
+            for admin_level in admin_levels:
+                country_groups = session.country_groups_by_level[admin_level]
+                done_df = done_by_level[admin_level]
+                year_writes = bbox_skipped = 0
+                pbar = tqdm(
+                    country_groups,
+                    desc=f"{table_label} {year} adm{admin_level}",
+                    unit="country",
+                    leave=False,
+                )
+                for iso3, country_units, cb in pbar:
+                    if not _bbox_overlaps(cb, buffers_bbox):
+                        bbox_skipped += 1
+                        continue
+                    n = _process_buffer_exposure_country(
+                        iso3=iso3,
+                        country_units=country_units,
+                        admin_level=admin_level,
+                        gdf_buffers=gdf_wsp,
+                        gdf_buffers_anti=gdf_wsp_anti,
+                        buffers_sindex=wsp_sindex,
+                        da_wp_global=session.da_wp_global,
+                        da_wp_wrapped=session.da_wp_wrapped,
+                        done_df=done_df,
+                        overwrite=overwrite,
+                        key_cols=_WSP_EXP_KEY_COLS,
+                        done_filter=done_filter,
+                        out_table=out_table,
+                        engine=engine,
+                        drop_cols=["id"],
+                    )
+                    if n:
+                        year_writes += 1
+                        total_processed += 1
+                        pbar.set_postfix(writes=year_writes)
+                pbar.close()
+                logger.info(
+                    f"{table_label}: year {year} adm{admin_level} done — "
+                    f"{year_writes} country writes, {bbox_skipped} bbox-prefiltered "
+                    f"({total_processed} cumulative)"
+                )
+            del gdf_wsp, gdf_wsp_anti, wsp_sindex
+
+        logger.info(f"{table_label}: all years done; {total_processed} writes.")
+    finally:
+        if own_session:
+            engine.dispose()
 
 
 def run_nhc_wsp_exp(
@@ -2433,6 +2455,7 @@ def run_nhc_wsp_exp(
     mode: str = "dev",
     issued_time=None,
     admin_levels: list[int] | None = None,
+    session: _ExposureSession | None = None,
 ) -> None:
     """WSP exposure, chunked by year so peak memory stays bounded."""
     _run_exp_year_chunk(
@@ -2451,6 +2474,7 @@ def run_nhc_wsp_exp(
         issued_time=issued_time,
         chunk_source_table="nhc_wsp_polygon_matched",
         admin_levels=admin_levels,
+        session=session,
     )
 
 
@@ -2817,6 +2841,7 @@ def run_nhc_wsp_fcastonly_exp(
     issued_time=None,
     year: int | None = None,
     admin_levels: list[int] | None = None,
+    session: _ExposureSession | None = None,
 ) -> None:
     """WSP fcastonly exposure, chunked by year.
 
@@ -2840,7 +2865,85 @@ def run_nhc_wsp_fcastonly_exp(
         chunk_source_table="nhc_wsp_fcastonly_polygon",
         single_year=year,
         admin_levels=admin_levels,
+        session=session,
     )
+
+
+# ---------------------------------------------------------------------------
+# Realtime exposure composites — one process for 3 (tracks) / 2 (wsp)
+# pipelines, sharing WorldPop + FieldMaps + engine via _ExposureSession.
+# ---------------------------------------------------------------------------
+
+
+def run_nhc_tracks_exp_realtime(
+    *,
+    mode: str = "dev",
+    issued_time=None,
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    admin_levels: list[int] | None = None,
+) -> None:
+    """Single-process realtime tracks-exposure cascade: fcast + obsv + fcastonly.
+
+    obsv keys on valid_time which in realtime equals track_issued_time.
+    """
+    session = build_exposure_session(
+        mode=mode, countries=countries, admin_levels=admin_levels,
+    )
+    try:
+        logger.info("=== nhc-track-exp ===")
+        run_nhc_tracks_fcast_exp(
+            session=session, countries=countries, since=since, basin=basin,
+            overwrite=overwrite, mode=mode, issued_time=issued_time,
+            admin_levels=admin_levels,
+        )
+        logger.info("=== nhc-obsv-exp ===")
+        run_nhc_tracks_obsv_exp(
+            session=session, countries=countries, since=since, basin=basin,
+            overwrite=overwrite, mode=mode, valid_time=issued_time,
+            admin_levels=admin_levels,
+        )
+        logger.info("=== nhc-fcastonly-exp ===")
+        run_nhc_tracks_fcastonly_exp(
+            session=session, countries=countries, since=since, basin=basin,
+            overwrite=overwrite, mode=mode, issued_time=issued_time,
+            admin_levels=admin_levels,
+        )
+    finally:
+        session.engine.dispose()
+
+
+def run_nhc_wsp_exp_realtime(
+    *,
+    mode: str = "dev",
+    issued_time=None,
+    countries: list[str] | None = None,
+    since: str | None = None,
+    basin: str | None = None,
+    overwrite: bool = False,
+    admin_levels: list[int] | None = None,
+) -> None:
+    """Single-process realtime WSP-exposure cascade: wsp + wsp-fcastonly."""
+    session = build_exposure_session(
+        mode=mode, countries=countries, admin_levels=admin_levels,
+    )
+    try:
+        logger.info("=== nhc-wsp-exp ===")
+        run_nhc_wsp_exp(
+            session=session, countries=countries, since=since, basin=basin,
+            overwrite=overwrite, mode=mode, issued_time=issued_time,
+            admin_levels=admin_levels,
+        )
+        logger.info("=== nhc-wsp-fcastonly-exp ===")
+        run_nhc_wsp_fcastonly_exp(
+            session=session, countries=countries, since=since, basin=basin,
+            overwrite=overwrite, mode=mode, issued_time=issued_time,
+            admin_levels=admin_levels,
+        )
+    finally:
+        session.engine.dispose()
 
 
 # ---------------------------------------------------------------------------

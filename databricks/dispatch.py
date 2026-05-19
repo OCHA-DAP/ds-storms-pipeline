@@ -125,17 +125,14 @@ COMPOSITES: dict[str, list[list[str]]] = {
         ["nhc-tracks-fcastonly-buffers"],
     ],
     "realtime-tracks-exposure": [
-        ["nhc-track-exp"],
-        ["nhc-obsv-exp"],
-        ["nhc-fcastonly-exp"],
+        ["nhc-realtime-tracks-exp"],
     ],
     "realtime-wsp-processing": [
         ["nhc-wsp-polygon-matched", "--overwrite"],
         ["nhc-wsp-fcastonly-polygons", "--overwrite"],
     ],
     "realtime-wsp-exposure": [
-        ["nhc-wsp-exp"],
-        ["nhc-wsp-fcastonly-exp"],
+        ["nhc-realtime-wsp-exp"],
     ],
 }
 

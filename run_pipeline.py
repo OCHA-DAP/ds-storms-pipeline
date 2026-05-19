@@ -52,7 +52,9 @@ from src.pipelines.nhc import (
     run_nhc_tracks_obsv_exp,
     run_nhc_tracks_fcastonly_buffers,
     run_nhc_tracks_fcastonly_exp,
+    run_nhc_tracks_exp_realtime,
     run_nhc_wsp_exp,
+    run_nhc_wsp_exp_realtime,
     run_nhc_wsp_fcastonly_polygons,
     run_nhc_wsp_fcastonly_exp,
     run_nhc_wsp_polygon_matched,
@@ -403,6 +405,31 @@ def main():
     )
 
     # ------------------------------------------------------------------ #
+    # NHC realtime exposure composites — one process per cascade, sharing
+    # WorldPop + FieldMaps + engine across the inner pipelines. Used by
+    # the DBX realtime-tracks-exposure / realtime-wsp-exposure tasks.
+    # ------------------------------------------------------------------ #
+    nhc_rt_tracks_exp_parser = subparsers.add_parser(
+        "nhc-realtime-tracks-exp",
+        parents=[common, exp_common],
+        help="Realtime tracks exposure cascade: fcast + obsv + fcastonly, shared setup",
+    )
+    nhc_rt_tracks_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Single issued_time to process (required for realtime)",
+    )
+
+    nhc_rt_wsp_exp_parser = subparsers.add_parser(
+        "nhc-realtime-wsp-exp",
+        parents=[common, exp_common],
+        help="Realtime WSP exposure cascade: wsp + wsp-fcastonly, shared setup",
+    )
+    nhc_rt_wsp_exp_parser.add_argument(
+        "--issued-time", metavar="YYYY-MM-DDTHH",
+        help="Single issued_time to process (required for realtime)",
+    )
+
+    # ------------------------------------------------------------------ #
     # NHC scrub (cleanup test / sample rows from every NHC table)
     # ------------------------------------------------------------------ #
     nhc_scrub_parser = subparsers.add_parser(
@@ -623,6 +650,28 @@ def main():
             mode=args.mode,
             year=args.year,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
+            admin_levels=getattr(args, "admin_level", None),
+        )
+    elif args.pipeline == "nhc-realtime-tracks-exp":
+        countries = [c.upper() for c in args.countries] if args.countries else None
+        run_nhc_tracks_exp_realtime(
+            mode=args.mode,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
+            countries=countries,
+            since=args.since,
+            basin=args.basin,
+            overwrite=args.overwrite,
+            admin_levels=getattr(args, "admin_level", None),
+        )
+    elif args.pipeline == "nhc-realtime-wsp-exp":
+        countries = [c.upper() for c in args.countries] if args.countries else None
+        run_nhc_wsp_exp_realtime(
+            mode=args.mode,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
+            countries=countries,
+            since=args.since,
+            basin=args.basin,
+            overwrite=args.overwrite,
             admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-scrub":
