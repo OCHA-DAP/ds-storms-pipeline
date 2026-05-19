@@ -122,7 +122,9 @@ resources:
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
             - pypi:
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@wsp-exp-calc"
+                # Pinned to commit; bump when ocha-lens@wsp-exp-calc moves
+                # so DBX's library cache forces a reinstall.
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@c984716"
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "rasterio" }
