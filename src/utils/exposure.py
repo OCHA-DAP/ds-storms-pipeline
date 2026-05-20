@@ -19,8 +19,11 @@ _POP_BLOB = "worldpop/pop_count/global_pop_2026_CN_1km_R2025A_UA_v1.tif"
 # fsspec-ing the 1.4 GB upstream parquet from data.fieldmaps.io over
 # DBX's egress link, and the adm0 mirror saves the ~75 s cold dissolve.
 _FIELDMAPS_BLOB_CONTAINER = "global"
-_FIELDMAPS_ADM1_PREFIX = "fieldmaps/adm1/"
-_FIELDMAPS_ADM0_PREFIX = "fieldmaps/adm0/"
+# Path mirrors the upstream FieldMaps URL structure:
+# https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet
+_FIELDMAPS_BLOB_BASE = "fieldmaps/edge-matched/humanitarian/intl/"
+_FIELDMAPS_ADM1_PREFIX = _FIELDMAPS_BLOB_BASE + "adm1/"
+_FIELDMAPS_ADM0_PREFIX = _FIELDMAPS_BLOB_BASE + "adm0/"
 _FIELDMAPS_PARALLEL_WORKERS = 16
 
 

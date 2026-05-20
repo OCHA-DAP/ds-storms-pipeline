@@ -15,9 +15,12 @@ import coloredlogs
 import ocha_stratus as stratus
 from tqdm import tqdm
 
-PREFIX = "fieldmaps/"
 SRC_CONTAINER = "raster"
+SRC_PREFIX = "fieldmaps/"  # old off-convention path in raster
 DST_CONTAINER = "global"
+# New path in global mirrors the upstream FieldMaps URL structure:
+# https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet
+DST_PREFIX = "fieldmaps/edge-matched/humanitarian/intl/"
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +31,12 @@ def copy(stage: str) -> None:
         fmt="%(asctime)s %(levelname)s %(message)s",
     )
     logger.info(
-        f"Listing blobs in {stage}://{SRC_CONTAINER}/{PREFIX}..."
+        f"Listing blobs in {stage}://{SRC_CONTAINER}/{SRC_PREFIX}..."
     )
     names = stratus.list_container_blobs(
         stage=stage,
         container_name=SRC_CONTAINER,
-        name_starts_with=PREFIX,
+        name_starts_with=SRC_PREFIX,
     )
     # The dst container is HNS-enabled, so a zero-byte blob at
     # `fieldmaps/adm0` would block creation of `fieldmaps/adm0/*.parquet`
@@ -42,19 +45,22 @@ def copy(stage: str) -> None:
     names = [n for n in names if n.endswith(".parquet")]
     logger.info(f"Found {len(names)} blobs to copy.")
 
-    for name in tqdm(names, unit="blob"):
+    for src_name in tqdm(names, unit="blob"):
+        # Reshape path: fieldmaps/{adm0|adm1}/{iso3}.parquet
+        #            →  fieldmaps/edge-matched/humanitarian/intl/{adm0|adm1}/{iso3}.parquet
+        dst_name = src_name.replace(SRC_PREFIX, DST_PREFIX, 1)
         data = stratus.load_blob_data(
-            name, stage=stage, container_name=SRC_CONTAINER,
+            src_name, stage=stage, container_name=SRC_CONTAINER,
         )
         stratus.upload_blob_data(
             data=data,
-            blob_name=name,
+            blob_name=dst_name,
             stage=stage,
             container_name=DST_CONTAINER,
         )
 
     logger.info(
-        f"Copied {len(names)} blobs to {stage}://{DST_CONTAINER}/{PREFIX}."
+        f"Copied {len(names)} blobs to {stage}://{DST_CONTAINER}/{DST_PREFIX}."
     )
 
 

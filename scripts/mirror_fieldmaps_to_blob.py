@@ -28,8 +28,10 @@ FIELDMAPS_URL = (
 ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
 SIMPLIFY_TOL_DEG = 0.001  # ~100 m; matches ds-storms-alerts
 BLOB_CONTAINER = "global"
-BLOB_PATH_TPL_ADM1 = "fieldmaps/adm1/{iso3}.parquet"
-BLOB_PATH_TPL_ADM0 = "fieldmaps/adm0/{iso3}.parquet"
+# Blob path mirrors the upstream FieldMaps URL structure.
+BLOB_BASE = "fieldmaps/edge-matched/humanitarian/intl/"
+BLOB_PATH_TPL_ADM1 = BLOB_BASE + "adm1/{iso3}.parquet"
+BLOB_PATH_TPL_ADM0 = BLOB_BASE + "adm0/{iso3}.parquet"
 
 logger = logging.getLogger(__name__)
 
