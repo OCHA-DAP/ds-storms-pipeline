@@ -318,3 +318,5 @@ One row per (storm, forecast issuance, wind speed threshold). The forecast wind 
 
 ### `storms.nhc_wsp_polygon` *(pending — `add-wsp-data` PR)*
 Basin-wide NHC wind speed probability polygons. One row per (issued_time, wind_threshold_kt, percentage band).
+
+**TODO:** the ingested WSP polygons are currently truncated at longitude -180. The upstream NHC shapefiles (e.g. `https://www.nhc.noaa.gov/gis/forecast/archive/{YYYYMMDDhh}_wsp_120hr5km.zip`) actually extend past -180 into the western Pacific; our raw-download step lops that wraparound off. Not blocking today because it only matters for storms whose probability footprint crosses the dateline, which is beyond the CP basin coverage we care about right now. Revisit if/when we extend to WP or otherwise need full dateline-aware polygons.
