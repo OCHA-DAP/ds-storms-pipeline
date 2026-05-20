@@ -1913,6 +1913,7 @@ def _run_track_exp(
     iterates countries with a cheap bbox prefilter before the heavy
     union_all in `_process_buffer_exposure_country`.
     """
+    import gc
     import warnings
     from rasterio.errors import ShapeSkipWarning
 
@@ -1975,6 +1976,11 @@ def _run_track_exp(
                     logger.info(f"{prefix} — {n} unit writes")
                 else:
                     no_intersect += 1
+                # rasterio's per-clip buffers and intermediate xarray
+                # arrays aren't cheap; without an explicit collect they
+                # can sit around long enough for cgroup OOM to fire on
+                # long backfills (see the May 2026 adm1 SIGKILL incident).
+                gc.collect()
 
             logger.info(
                 f"admin_level={admin_level} done: {processed} written, "

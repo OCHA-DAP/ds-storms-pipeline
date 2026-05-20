@@ -102,6 +102,12 @@ resources:
         # Pair with `subcommand=nhc-scrub` to clean up the test rows after.
         - name: sample_json
           default: ""
+        # Exposure-only filter: limit to admin level(s) 0 and/or 1.
+        # "" → both (default). "0" or "1" → just that level. "0,1" or
+        # "0 1" → both, explicitly. Used to resume an exposure backfill
+        # after one half (e.g. adm0) already wrote rows.
+        - name: admin_level
+          default: ""
 
       tasks:
         - task_key: etl
@@ -119,6 +125,7 @@ resources:
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
             - pypi:
@@ -153,6 +160,7 @@ resources:
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
           libraries: *storm_libs
 
         - task_key: tracks_exposure
@@ -172,6 +180,7 @@ resources:
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
           libraries: *storm_libs
 
         - task_key: wsp_processing
@@ -191,6 +200,7 @@ resources:
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
           libraries: *storm_libs
 
         - task_key: wsp_exposure
@@ -210,4 +220,5 @@ resources:
               - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
           libraries: *storm_libs

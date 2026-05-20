@@ -25,6 +25,7 @@ databricks.yml):
     sys.argv[7] = fill_nulls     # "true" or ""
     sys.argv[8] = subcommand_override  # non-empty overrides argv[1]
     sys.argv[9] = sample_json    # URL for test-mode CurrentStorms JSON, or ""
+    sys.argv[10] = admin_level   # "0", "1", "0,1", or "" — exposure subcmds only
 
 Composite ``realtime-…`` subcommands expand to multiple
 run_pipeline.py invocations — used by the DBX task chain so each task
@@ -68,6 +69,7 @@ OVERWRITE = _arg(6)
 FILL_NULLS = _arg(7)
 SUBCOMMAND_OVERRIDE = _arg(8)
 SAMPLE_JSON = _arg(9)
+ADMIN_LEVEL = _arg(10)
 
 # A non-empty override (from job.parameters.subcommand) trumps the task's
 # hardcoded default. Lets you pick a specific CLI subcommand at run-time
@@ -177,6 +179,14 @@ def build_cmd(sub: str, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
     # the etl task value, no different from a realtime run.
     if SAMPLE_JSON and sub == "nhc":
         cmd += ["--sample-json", SAMPLE_JSON]
+    # --admin-level: exposure subcommands only. Accepts "0", "1", or
+    # "0,1" / "0 1" — split on comma/whitespace and pass each as its own
+    # repeated --admin-level flag (run_pipeline.py uses action="append").
+    # Used to resume just adm1 after the adm0 half already wrote rows,
+    # without redoing the cheap-but-not-free adm0 sweep.
+    if ADMIN_LEVEL and "-exp" in sub:
+        for lvl in ADMIN_LEVEL.replace(",", " ").split():
+            cmd += ["--admin-level", lvl]
     # Cleanup: from DBX, the only realistic scrub is the sample one.
     # For ad-hoc atcf_id scrubs, invoke run_pipeline.py locally.
     if sub == "nhc-scrub":

@@ -42,8 +42,11 @@ def _list_iso3s_in_blob(stage: str) -> tuple[str, ...]:
     ))
 
 
-@lru_cache(maxsize=1024)
 def _load_country_blob(prefix: str, iso3: str, stage: str) -> gpd.GeoDataFrame:
+    # No lru_cache: callers (build_exposure_session) already hold every
+    # loaded country in session.units_by_level. A cache here just double-
+    # stored ~570 GeoDataFrames in RAM, which materially shifted the
+    # admin1 exposure worker into OOM territory.
     data = stratus.load_blob_data(
         f"{prefix}{iso3}.parquet",
         stage=stage,
