@@ -18,7 +18,7 @@ _POP_BLOB = "worldpop/pop_count/global_pop_2026_CN_1km_R2025A_UA_v1.tif"
 # Reading from blob (same Azure region as DBX) is ~50x faster than
 # fsspec-ing the 1.4 GB upstream parquet from data.fieldmaps.io over
 # DBX's egress link, and the adm0 mirror saves the ~75 s cold dissolve.
-_FIELDMAPS_BLOB_CONTAINER = "raster"
+_FIELDMAPS_BLOB_CONTAINER = "global"
 _FIELDMAPS_ADM1_PREFIX = "fieldmaps/adm1/"
 _FIELDMAPS_ADM0_PREFIX = "fieldmaps/adm0/"
 _FIELDMAPS_PARALLEL_WORKERS = 16

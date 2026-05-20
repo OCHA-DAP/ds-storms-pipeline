@@ -27,7 +27,7 @@ FIELDMAPS_URL = (
 )
 ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
 SIMPLIFY_TOL_DEG = 0.001  # ~100 m; matches ds-storms-alerts
-BLOB_CONTAINER = "raster"
+BLOB_CONTAINER = "global"
 BLOB_PATH_TPL_ADM1 = "fieldmaps/adm1/{iso3}.parquet"
 BLOB_PATH_TPL_ADM0 = "fieldmaps/adm0/{iso3}.parquet"
 
