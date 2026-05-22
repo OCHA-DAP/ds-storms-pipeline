@@ -145,6 +145,29 @@ def calculate_exposure(
     (or have an empty geometry) get ``result_col=0``.
     """
     from exactextract import exact_extract
+    from shapely.geometry import MultiPolygon, Polygon
+
+    def _to_multipolygon(geom):
+        # exactextract refuses a batch of mixed geometry types
+        # ("Mixed-type geometries not supported.") which trips fcastonly
+        # exposure: fcastonly_buffer = fcast - obsv_swath can leave a
+        # Polygon for some buffers and a MultiPolygon for others, and
+        # .intersection(unit_geom) doesn't normalize that. Cast every
+        # row to MultiPolygon, drop non-polygonal slivers (lines/points
+        # from numerical noise on the difference).
+        if geom is None or geom.is_empty:
+            return geom
+        if isinstance(geom, MultiPolygon):
+            return geom
+        if isinstance(geom, Polygon):
+            return MultiPolygon([geom])
+        polys = []
+        for g in getattr(geom, "geoms", []):
+            if isinstance(g, Polygon):
+                polys.append(g)
+            elif isinstance(g, MultiPolygon):
+                polys.extend(g.geoms)
+        return MultiPolygon(polys) if polys else None
 
     cols_out = [c for c in gdf.columns if c != gdf.geometry.name]
     if gdf.empty:
@@ -153,6 +176,7 @@ def calculate_exposure(
     work = gdf.reset_index(drop=True).copy()
     if mask_geom is not None and not mask_geom.is_empty:
         work["geometry"] = work.geometry.intersection(mask_geom)
+    work["geometry"] = work.geometry.apply(_to_multipolygon)
 
     valid = ~(work.geometry.is_empty | work.geometry.isna())
     out = work.loc[:, cols_out].copy()
