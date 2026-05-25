@@ -48,12 +48,14 @@ def _gdacs_to_iso3():
     return ll_to_iso3
 
 
-def load_full_gdacs(stage: str = "dev") -> gpd.GeoDataFrame:
-    """Load the entire GDACS admin layer from blob and add a canonical
+def load_gdacs_admin(stage: str = "dev") -> gpd.GeoDataFrame:
+    """Load the GDACS admin layer from blob and add a canonical
     ``_iso3`` column derived from ``GMI_CNTRY``.
 
     Streams directly via ``stratus.load_shp_from_blob`` — no local
     cache. ~5 MB zipped → fast enough for a build-once workflow.
+    Returns the whole ~2,586-polygon layer; filter per-country with
+    :func:`filter_gdacs_country`.
     """
     logger.info(
         "Loading GDACS admin shapefile from blob %s/%s (stage=%s)",

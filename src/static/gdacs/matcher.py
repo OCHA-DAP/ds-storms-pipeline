@@ -22,6 +22,8 @@ import geopandas as gpd
 
 from src.static.gdacs.admin import filter_gdacs_country
 from src.static.gdacs.inputs import (
+    FM_ADM1_NAME_FALLBACK_ISOS,
+    fallback_fm_name_from_adm0,
     fm_id_and_name_cols,
     load_fieldmaps_adm,
 )
@@ -84,6 +86,18 @@ def match_country(
             return placeholder(
                 "fm_unknown_schema",
                 detail=f"columns={list(fm.columns)}",
+            )
+        # Narrow fallback: a couple of iso3s (UMI, SJM) have NULL
+        # adm1_name in FM and put the real subdivision name in
+        # adm0_name (e.g. "Baker Island (USA)"). Fill nulls from
+        # adm0_name ONLY for those iso3s — strict opt-in so this
+        # doesn't accidentally paper over real FM data gaps elsewhere.
+        if (iso3 in FM_ADM1_NAME_FALLBACK_ISOS
+                and "adm0_name" in fm.columns
+                and fm[fm_name_col].isna().any()):
+            fm = fm.copy()
+            fm[fm_name_col] = fm[fm_name_col].fillna(
+                fm["adm0_name"].map(fallback_fm_name_from_adm0)
             )
 
     g = filter_gdacs_country(gdacs, iso3)

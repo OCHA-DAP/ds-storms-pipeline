@@ -13,7 +13,7 @@ Inputs
   (``global/fieldmaps/edge-matched/humanitarian/intl/adm{0,1}/<ISO3>.parquet``)
 - GDACS admin shapefile on blob
   (``global/gdacs/admin/W_ADM_ADMIN2010_V2021.zip``) — streamed
-  directly each build via ``load_full_gdacs``; no local cache
+  directly each build via ``load_gdacs_admin``; no local cache
 
 The expensive FM↔GDACS IoU overlay is run inline per country here via
 :func:`src.static.gdacs.matcher.match_country` — no pre-step required.
@@ -51,6 +51,25 @@ aggregate_gdacs_to_fm               1 per ctry  N per FM adm1 (one per
                                                   reverse spatial join)
 needs_manual_mapping                1 per ctry  1 per FM adm1, with
                                                   caveat_note populated
+fm_adm1_only                        1 per ctry  1 per FM adm1 with
+                                                  gmi_admin=NULL — surfaces
+                                                  FM units in the lookup so
+                                                  other sources (NHC, ADAM)
+                                                  can attach via fm_pcode,
+                                                  while GDACS adm1 stays
+                                                  deliberately unmatched
+                                                  (1 GDACS whole-country
+                                                  poly would otherwise be
+                                                  fanned out across N FM
+                                                  units and replicated)
+no_fm_source                        none        none — iso3 is GDACS-known
+                                                  but FM has no parquet
+                                                  (defunct, e.g. ANT post-
+                                                  2010; or just unavailable,
+                                                  e.g. XIM). Build skips
+                                                  entirely; downstream
+                                                  consumers read the policy
+                                                  to filter exposure rows.
 ==================================  ==========  ===========================
 
 Single-polygon FM countries (ABW, AIA, BLM, CUW, JEY, MAF, PRI) normally
@@ -88,11 +107,13 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.static.gdacs.admin import (  # noqa: E402
     filter_gdacs_country,
-    load_full_gdacs,
+    load_gdacs_admin,
 )
 from src.static.gdacs.inputs import (  # noqa: E402
     ATLANTIC_ISO3,
     DEFAULT_CONFIG,
+    FM_ADM1_NAME_FALLBACK_ISOS,
+    fallback_fm_name_from_adm0,
     load_fieldmaps_adm,
     load_level_config,
     resolve_gdacs_fm_level,
@@ -156,7 +177,7 @@ def build_adm0_row(
 def build_accept_adm1_rows(
     iso3: str,
     fm_level: int,
-    gdacs_full: gpd.GeoDataFrame,
+    gdacs_admin: gpd.GeoDataFrame,
     per_row_notes: list[dict],
     low_iou: float = 0.5,
 ) -> list[dict]:
@@ -168,7 +189,7 @@ def build_accept_adm1_rows(
     `caveat_note`.
     """
     match_rows = match_country(
-        iso3, gdacs_full, low_iou=low_iou, fm_level=fm_level,
+        iso3, gdacs_admin, low_iou=low_iou, fm_level=fm_level,
     )
     # Drop unmatched / placeholder rows (no_overlap orphans like JAM
     # offshore cays, fm_load_error, gdacs_empty, etc.).
@@ -199,7 +220,7 @@ def build_accept_adm1_rows(
 
 
 def build_aggregate_adm1_rows(
-    iso3: str, gdacs_full: gpd.GeoDataFrame,
+    iso3: str, gdacs_admin: gpd.GeoDataFrame,
 ) -> list[dict]:
     """For aggregate_gdacs_to_fm countries: reverse spatial join.
 
@@ -209,7 +230,7 @@ def build_aggregate_adm1_rows(
     (handles edge cases where GDACS and FM coastlines disagree slightly).
     """
     fm = load_fieldmaps_adm(iso3, 1)
-    g = filter_gdacs_country(gdacs_full, iso3)
+    g = filter_gdacs_country(gdacs_admin, iso3)
     if fm is None or len(fm) == 0 or len(g) == 0:
         logger.warning(
             "Aggregate build for %s missing inputs (fm=%d, g=%d)",
@@ -262,18 +283,82 @@ def build_aggregate_adm1_rows(
     return rows
 
 
+def build_fm_only_adm1_rows(
+    iso3: str, fm_level: int = 1,
+) -> list[dict]:
+    """For ``fm_adm1_only`` countries: emit FM adm1 rows with
+    ``gmi_admin = NULL`` so GDACS adm1 exposure deliberately does NOT
+    attach at runtime.
+
+    Use case: GDACS treats the country as a single whole-country
+    polygon (no adm1 subdivision) but FM has real adm1 units AND a
+    different source (NHC, ADAM) provides per-unit numbers we DO
+    want to surface. Fanning the GDACS whole-country number out to
+    each FM unit would be misleading (each unit would inherit the
+    full country total). Leaving ``gmi_admin = NULL`` keeps the FM
+    rows present in the lookup so NHC's per-unit data can attach
+    via ``fm_pcode``, while the GDACS adm1 row lands as a
+    by-design-unmatched orphan downstream.
+
+    Example: BMU. GDACS has 1 whole-island polygon; FM has 9
+    parishes; NHC publishes per-parish exposure.
+    """
+    fm = load_fieldmaps_adm(iso3, fm_level)
+    if fm is None or len(fm) == 0:
+        logger.warning("fm_adm1_only %s: FM empty at adm%d", iso3, fm_level)
+        return []
+    pcode_col, name_col = (
+        next((c for c in (f"adm{fm_level}_pcode",
+                          f"adm{fm_level}_id",
+                          f"adm{fm_level}_src") if c in fm.columns), None),
+        next((c for c in (f"adm{fm_level}_name",
+                          f"name_{fm_level}") if c in fm.columns), None),
+    )
+    if pcode_col is None or name_col is None:
+        logger.error(
+            "Can't resolve FM adm%d columns for %s — got %s",
+            fm_level, iso3, list(fm.columns),
+        )
+        return []
+
+    # Narrow fallback for the two iso3s where FM has NULL adm1_name
+    # and the real subdivision name sits in adm0_name. See
+    # FM_ADM1_NAME_FALLBACK_ISOS in src/static/gdacs/inputs.py.
+    def _name(row) -> str | None:
+        v = row[name_col]
+        if v is None or (isinstance(v, float) and v != v):
+            if (iso3 in FM_ADM1_NAME_FALLBACK_ISOS
+                    and "adm0_name" in row):
+                return fallback_fm_name_from_adm0(row["adm0_name"])
+            return None
+        return v
+
+    return [
+        {
+            "iso3": iso3,
+            "admin_level": 1,
+            "fm_pcode": r[pcode_col],
+            "fm_name": _name(r),
+            "gmi_admin": None,
+            "gdacs_admin_name": None,
+            "caveat_note": None,
+        }
+        for _, r in fm.iterrows()
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Driver
 # ─────────────────────────────────────────────────────────────────────
 
-def build_lookup(cfg: dict, gdacs_full: gpd.GeoDataFrame) -> pd.DataFrame:
+def build_lookup(cfg: dict, gdacs_admin: gpd.GeoDataFrame) -> pd.DataFrame:
     """Produce the full lookup DataFrame in one pass."""
     per_row_notes = cfg.get("per_row_notes", [])
     policies = cfg.get("gdacs_policy", {})
 
     # Map iso3 → (GMI_CNTRY, CNTRY_NAME) for the adm0 rows
     g_country_meta = (
-        gdacs_full[["_iso3", "GMI_CNTRY", "CNTRY_NAME"]]
+        gdacs_admin[["_iso3", "GMI_CNTRY", "CNTRY_NAME"]]
         .dropna(subset=["_iso3"]).drop_duplicates(subset=["_iso3"])
         .set_index("_iso3")
     )
@@ -282,6 +367,14 @@ def build_lookup(cfg: dict, gdacs_full: gpd.GeoDataFrame) -> pd.DataFrame:
 
     rows: list[dict] = []
     for iso3 in ATLANTIC_ISO3:
+        # Skip iso3s flagged no_fm_source — these are documented as
+        # GDACS-reported but FM-unavailable; the lookup intentionally
+        # has no row for them, and downstream consumers (alert
+        # pipeline, matching demo) read the policy to filter them out.
+        if policies.get(iso3, {}).get("action") == "no_fm_source":
+            logger.info("Skipping %s — policy=no_fm_source", iso3)
+            continue
+
         # ── adm0 ──
         fm_adm0 = load_fieldmaps_adm(iso3, 0)
         gmi_cntry = iso3_to_gmi_cntry.get(iso3, iso3)
@@ -296,24 +389,33 @@ def build_lookup(cfg: dict, gdacs_full: gpd.GeoDataFrame) -> pd.DataFrame:
         if action == "country_only":
             continue
 
-        # `aggregate_gdacs_to_fm` is the one action that's meaningful
-        # even when FM has a single adm1 polygon (e.g. PRI: 1 FM
-        # polygon ← 8 GDACS senatorial districts via reverse spatial
-        # join). For accept/needs_manual_mapping, a single FM polygon
-        # means there's nothing to crosswalk; skip.
+        # `aggregate_gdacs_to_fm` and `fm_adm1_only` are meaningful
+        # even when FM has a single adm1 polygon:
+        #   aggregate_gdacs_to_fm — 1 FM ← N GDACS via reverse spatial
+        #     join (e.g. PRI: 1 FM ← 8 senatorial districts)
+        #   fm_adm1_only          — emits FM rows with no GDACS attach;
+        #     1 FM unit is still a valid (if uninteresting) edge case
+        # For accept/needs_manual_mapping, a single FM polygon means
+        # nothing to crosswalk; skip.
         fm_adm1 = load_fieldmaps_adm(iso3, 1)
         if fm_adm1 is None or len(fm_adm1) == 0:
             continue
-        if len(fm_adm1) == 1 and action != "aggregate_gdacs_to_fm":
+        if (
+            len(fm_adm1) == 1
+            and action not in ("aggregate_gdacs_to_fm", "fm_adm1_only")
+        ):
             continue
 
         if action in ("accept", "needs_manual_mapping"):
             fm_lvl = resolve_gdacs_fm_level(iso3, cfg)
             rows.extend(build_accept_adm1_rows(
-                iso3, fm_lvl, gdacs_full, per_row_notes,
+                iso3, fm_lvl, gdacs_admin, per_row_notes,
             ))
         elif action == "aggregate_gdacs_to_fm":
-            rows.extend(build_aggregate_adm1_rows(iso3, gdacs_full))
+            rows.extend(build_aggregate_adm1_rows(iso3, gdacs_admin))
+        elif action == "fm_adm1_only":
+            fm_lvl = resolve_gdacs_fm_level(iso3, cfg)
+            rows.extend(build_fm_only_adm1_rows(iso3, fm_lvl))
         else:
             logger.warning(
                 "Unknown action '%s' for %s — skipping adm1", action, iso3,
@@ -341,9 +443,15 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
     """
     policies = cfg.get("gdacs_policy", {})
 
-    # 1) Exactly one adm0 row per Atlantic ISO3
+    # 1) Exactly one adm0 row per Atlantic ISO3 (excluding ones we
+    #    deliberately skip via no_fm_source).
+    no_fm = {
+        i for i, p in policies.items()
+        if p.get("action") == "no_fm_source"
+    }
+    expected_iso3 = set(ATLANTIC_ISO3) - no_fm
     adm0 = df[df["admin_level"] == 0]
-    missing = set(ATLANTIC_ISO3) - set(adm0["iso3"])
+    missing = expected_iso3 - set(adm0["iso3"])
     if missing:
         raise AssertionError(f"adm0 rows missing for: {sorted(missing)}")
     dupes = adm0["iso3"].value_counts()
@@ -369,6 +477,22 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
                 raise AssertionError(
                     f"accept {iso3} has 0 adm1 rows but FM has {len(fm)} polygons"
                 )
+        if action == "fm_adm1_only":
+            sub = df[(df["iso3"] == iso3) & (df["admin_level"] == 1)]
+            if sub["gmi_admin"].notna().any():
+                bad = sub[sub["gmi_admin"].notna()]["fm_pcode"].tolist()
+                raise AssertionError(
+                    f"fm_adm1_only {iso3} has adm1 rows with non-NULL "
+                    f"gmi_admin: {bad[:5]}"
+                )
+            # Expect at least one adm1 row (otherwise should be country_only)
+            if n == 0:
+                fm = load_fieldmaps_adm(iso3, 1)
+                if fm is not None and len(fm) > 0:
+                    raise AssertionError(
+                        f"fm_adm1_only {iso3} has 0 adm1 rows but FM has "
+                        f"{len(fm)} polygons"
+                    )
 
     # 3) PK uniqueness on (iso3, admin_level, fm_pcode, gmi_admin)
     pk_dupes = df.duplicated(
@@ -390,12 +514,17 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
 
 
 def validate_gmi_admins(
-    df: pd.DataFrame, gdacs_full: gpd.GeoDataFrame,
+    df: pd.DataFrame, gdacs_admin: gpd.GeoDataFrame,
 ) -> None:
-    """Every adm1 gmi_admin must reference a real GDACS admin polygon."""
-    valid_gmis = set(gdacs_full["GMI_ADMIN"].dropna().unique())
+    """Every non-NULL adm1 gmi_admin must reference a real GDACS admin
+    polygon. NULL gmi_admin is allowed and intentional — it's the
+    fingerprint of the ``fm_adm1_only`` policy (FM unit present in the
+    lookup so other sources can attach via fm_pcode; GDACS adm1
+    deliberately doesn't attach)."""
+    valid_gmis = set(gdacs_admin["GMI_ADMIN"].dropna().unique())
     adm1 = df[df["admin_level"] == 1]
-    unknown = set(adm1["gmi_admin"]) - valid_gmis
+    referenced = set(adm1["gmi_admin"].dropna().unique())
+    unknown = referenced - valid_gmis
     if unknown:
         raise AssertionError(
             f"adm1 references gmi_admin codes not in GDACS layer: "
@@ -445,17 +574,17 @@ def main() -> int:
     )
 
     logger.info("Loading GDACS admin layer from blob (stage=%s)", args.mode)
-    gdacs_full = load_full_gdacs(stage=args.mode)
+    gdacs_admin = load_gdacs_admin(stage=args.mode)
     logger.info(
         "  %d GDACS admin polygons across %d distinct ISO3 codes",
-        len(gdacs_full), gdacs_full["_iso3"].nunique(),
+        len(gdacs_admin), gdacs_admin["_iso3"].nunique(),
     )
 
     logger.info("Building lookup for %d Atlantic countries", len(ATLANTIC_ISO3))
-    df = build_lookup(cfg, gdacs_full)
+    df = build_lookup(cfg, gdacs_admin)
 
     validate(df, cfg)
-    validate_gmi_admins(df, gdacs_full)
+    validate_gmi_admins(df, gdacs_admin)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, index=False)

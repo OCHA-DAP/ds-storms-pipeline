@@ -42,14 +42,37 @@ DEFAULT_FM_LEVEL = 1
 # tolerant of legacy keys.
 DEFAULT_GADM_LEVEL = 1
 
+# Narrow allow-list of iso3s where FieldMaps puts the actual
+# subdivision name in ``adm0_name`` and leaves ``adm1_name`` NULL
+# (e.g. UMI "Baker Island (USA)", SJM "Svalbard Islands (Nor.)").
+# Anywhere else, NULL adm1_name is treated as a real data gap and
+# left as NaN downstream. Strict opt-in by iso3 prevents the fallback
+# from masking unrelated FM data-quality issues.
+FM_ADM1_NAME_FALLBACK_ISOS = {"SJM", "UMI"}
 
-# NHC Atlantic basin scope. Countries that have been or could be
-# affected by an Atlantic tropical cyclone — Caribbean + Central
-# America + Atlantic coasts of N./S. America + Bermuda/Cape Verde,
-# plus the W. European recipients of extra-tropical transitions
-# (matches the ISO3s currently in storms.gdacs_exposure). Used as the
-# default scope when ``--iso3`` is not given on the build CLI.
+
+def fallback_fm_name_from_adm0(adm0_name: str | None) -> str | None:
+    """Strip trailing ' (XYZ)' country annotation from an adm0_name
+    so it reads like a real adm1 name. UMI's ``adm0_name`` looks like
+    'Baker Island (USA)' → returns 'Baker Island'. Only call this for
+    iso3s in :data:`FM_ADM1_NAME_FALLBACK_ISOS`."""
+    import re
+    if adm0_name is None:
+        return None
+    return re.sub(r"\s*\([^)]+\)\s*$", "", str(adm0_name)).strip() or None
+
+
+# Build scope: every ISO3 that ever appears in storms.gdacs_exposure
+# AND has FieldMaps adm0 data available, so the lookup has at least an
+# adm0 row for every country GDACS reports on. Name is historical
+# (``ATLANTIC_ISO3``) — initially the NHC Atlantic basin — but the set
+# has grown to include extratropical-transition recipients (W. Europe,
+# Iceland, Faroes, etc.) plus a handful of edge-case countries that
+# leak in from cross-basin events or upstream GDACS routing quirks
+# (RUS-Kamchatka, UMI/Johnston Atoll, SLV Pacific coast, etc.). The
+# Atlantic-only origin shows in the structure of the groups below.
 ATLANTIC_ISO3 = sorted({
+    # ── Core NHC Atlantic basin ─────────────────────────────────────
     # North America (Atlantic / Gulf coasts)
     "USA", "CAN", "MEX",
     # Central America (Caribbean coasts)
@@ -70,8 +93,31 @@ ATLANTIC_ISO3 = sorted({
     "VEN", "COL", "GUY", "SUR", "GUF",
     # Atlantic islands
     "CPV",
-    # Extratropical transition recipients (W. Europe)
+    # ── Extratropical transition recipients ─────────────────────────
     "IRL", "GBR", "PRT", "ESP", "FRA", "BEL", "NLD", "LUX", "DEU", "JEY",
+    # ── Added to absorb out-of-scope GDACS reports ──────────────────
+    # FieldMaps data confirmed available for each of these. GDACS
+    # reports on them via extratropical transitions, polar-bridge
+    # events, or basin-crossover quirks. Policy decisions for each
+    # are still in the country_only default until per-country review.
+    "FRO",  # Faroe Islands (extratropical)
+    "GIB",  # Gibraltar (Atlantic edge)
+    "GRL",  # Greenland (high-latitude extratropical)
+    "ISL",  # Iceland (extratropical)
+    "MAR",  # Morocco (Atlantic Africa, rare hits)
+    "NOR",  # Norway (extratropical)
+    "RUS",  # Russia (Kamchatka shows up; data-edge quirk)
+    "SJM",  # Svalbard / Jan Mayen (Arctic edge)
+    "SLV",  # El Salvador (Pacific Central America; basin crossover)
+    "SPM",  # St. Pierre & Miquelon (NW Atlantic)
+    "SWE",  # Sweden (extratropical)
+    "UMI",  # US Minor Outlying Islands (Pacific atolls; data quirk)
+    # ── In scope but deliberately skipped (action="no_fm_source") ────
+    # GDACS reports these but FM has no parquet — included here so the
+    # policy is visible in the qmd. The build script skips them on
+    # encountering action=no_fm_source.
+    "ANT",  # Netherlands Antilles (dissolved 2010-10-10)
+    "XIM",  # Isle of Man (no FM parquet)
 })
 
 
