@@ -1,0 +1,476 @@
+# Per-ISO3 admin-level overrides for FieldMaps ↔ GADM crosswalk.
+#
+# Default behavior is FM adm1 ↔ GADM adm1. Use this file only when that
+# default produces a bad crosswalk because FieldMaps and GADM disagree
+# on what "admin 1" means for a particular country.
+#
+# Each [overrides.<ISO3>] block sets `fm_level` and `gadm_level` for
+# that country. The `note` field documents WHY this override exists —
+# add one when you change anything here so future readers can audit.
+
+[defaults]
+fm_level = 1
+gadm_level = 1
+
+# ── FieldMaps data gaps ──────────────────────────────────────────────
+# FieldMaps stores these territories as a single polygon at every level
+# (adm1 and adm2 both have count = 1), so there's no finer FM unit to
+# crosswalk. GADM has subdivisions (18 districts for AIA, 12 parishes
+# for JEY, 2 for BLM) but they're unreachable from the FM side.
+#
+# We match FM adm1 ↔ GADM adm0 here, which gives us a clean 1:1
+# whole-territory crosswalk. The trade-off: sub-territory impact
+# reporting is unavailable for these countries until FieldMaps adds the
+# subdivisions upstream.
+
+[overrides.AIA]
+fm_level = 1
+gadm_level = 0
+note = "FM has 1 polygon for the whole island; GADM has 18 districts. No finer FM unit exists — collapse to whole-country crosswalk."
+
+[overrides.BLM]
+fm_level = 1
+gadm_level = 0
+note = "FM has 1 polygon for the whole territory; GADM has 2 sub-areas. No finer FM unit exists — collapse to whole-country crosswalk."
+
+[overrides.JEY]
+fm_level = 1
+gadm_level = 0
+note = "FM has 1 polygon for the whole island; GADM has 12 parishes. No finer FM unit exists — collapse to whole-country crosswalk."
+
+# ── Admin-level skew ─────────────────────────────────────────────────
+# FieldMaps stores Puerto Rico's 78 municipios at admin LEVEL 2 (with
+# adm1 = the whole territory). GADM stores the same 78 municipios at
+# admin LEVEL 1. So FM adm2 ↔ GADM adm1 lines up cleanly (77/78 match).
+#
+# Without this override the default (1,1) pairs FM's island-wide polygon
+# against random GADM municipios, scoring IoU ~ 0.04 across the board.
+
+[overrides.PRI]
+fm_level = 2
+gadm_level = 1
+note = "FM puts 78 municipios at adm2; GADM puts them at adm1. Swap levels so the units line up. **FieldMaps data-quality issue worth raising upstream**: most authoritative sources (GADM, ISO 3166-2, GDACS, US Census MAF/TIGER) treat municipios as admin-1. FM's adm1 for PRI is a single whole-territory polygon — there is no real adm1 subdivision in FM's data."
+
+# ─────────────────────────────────────────────────────────────────────
+# GDACS bridge overrides
+# ─────────────────────────────────────────────────────────────────────
+# These apply ONLY to the FieldMaps ↔ GDACS crosswalk (the
+# `match_gdacs_fieldmaps.py` script). The GADM script ignores them.
+#
+# The GDACS admin layer (`W_ADM_ADMIN2010_V2021`) was built from 2010
+# boundaries and treats many small countries as a single polygon at
+# admin-1. For those countries the only sensible FM crosswalk is at
+# adm0 (whole-country) — see entries below.
+#
+# Resolution order in the script:
+#   1. `[gdacs_overrides.<ISO3>]` (bridge-specific)
+#   2. `[overrides.<ISO3>]` (shared/GADM defaults)
+#   3. `[defaults]`
+
+[gdacs_overrides.ATG]
+fm_level = 0
+note = "GDACS layer has 1 polygon for ATG; FM has 8. Collapse FM to country level."
+
+[gdacs_overrides.BHS]
+fm_level = 0
+note = "GDACS layer has 1 polygon for BHS; FM has 32 districts. Collapse FM to country level."
+
+[gdacs_overrides.BMU]
+fm_level = 0
+note = "GDACS layer has 1 polygon for BMU; FM has 9 parishes. Collapse FM to country level."
+
+[gdacs_overrides.BRB]
+fm_level = 0
+note = "GDACS layer has 1 polygon for BRB; FM has 11 parishes. Collapse FM to country level."
+
+[gdacs_overrides.CPV]
+fm_level = 0
+note = "GDACS layer has 1 polygon for CPV; FM has 22 concelhos. Collapse FM to country level."
+
+[gdacs_overrides.DMA]
+fm_level = 0
+note = "GDACS layer has 1 polygon for DMA; FM has 10 parishes. Collapse FM to country level."
+
+[gdacs_overrides.GRD]
+fm_level = 0
+note = "GDACS layer has 1 polygon for GRD; FM has 8 parishes. Collapse FM to country level."
+
+[gdacs_overrides.KNA]
+fm_level = 0
+note = "GDACS layer has 1 polygon for KNA; FM has 14 parishes. Collapse FM to country level."
+
+[gdacs_overrides.LCA]
+fm_level = 0
+note = "GDACS layer has 1 polygon for LCA; FM has 10 quarters. Collapse FM to country level."
+
+[gdacs_overrides.TTO]
+fm_level = 0
+note = "GDACS layer has 1 polygon for TTO; FM has 15 regions. Collapse FM to country level."
+
+[gdacs_overrides.VCT]
+fm_level = 0
+note = "GDACS layer has 1 polygon for VCT; FM has 6 parishes. Collapse FM to country level."
+
+# ─────────────────────────────────────────────────────────────────────
+# Known FieldMaps data-quality issues
+# ─────────────────────────────────────────────────────────────────────
+# Not consumed by any script — for human reference and tracking what
+# should be raised upstream with FieldMaps.
+
+[data_quality.PRI]
+issue = "PRI adm1 in FieldMaps is a single whole-territory polygon. The 78 municipios — the actual conventional admin-1 subdivision recognized by ISO 3166-2, GADM, US Census MAF/TIGER — are stored at FM adm2 instead. GDACS in turn uses 8 Senatorial Districts (neither layer matches)."
+implication = "Forces every consumer to special-case PRI with an admin-level offset. Affects FM↔GADM and FM↔GDACS crosswalks here."
+action = "Workaround in place: gdacs_policy.PRI uses aggregate_gdacs_to_fm, mapping all 8 GDACS senatorial districts into the single FM adm1 polygon via reverse spatial join. Still worth raising upstream with FieldMaps maintainers — request they promote the 78 municipios to adm1 to align with other authoritative sources."
+
+[gdacs_overrides.CYM]
+fm_level = 0
+note = "GDACS layer has 1 polygon for CYM; FM has 6 districts. Collapse FM to country level."
+
+[gdacs_overrides.GLP]
+fm_level = 0
+note = "GDACS layer has 1 polygon for GLP; FM has 2 arrondissements. Collapse FM to country level."
+
+[gdacs_overrides.MSR]
+fm_level = 0
+note = "GDACS layer has 1 polygon for MSR; FM has 3 parishes. Collapse FM to country level."
+
+[gdacs_overrides.MTQ]
+fm_level = 0
+note = "GDACS layer has 1 polygon for MTQ; FM has 4 arrondissements. Collapse FM to country level."
+
+[gdacs_overrides.TCA]
+fm_level = 0
+note = "GDACS layer has 1 polygon for TCA; FM has 6 districts. Collapse FM to country level."
+
+[gdacs_overrides.VGB]
+fm_level = 0
+note = "GDACS layer has 1 polygon for VGB; FM has 7 admin units. Collapse FM to country level."
+
+[gdacs_overrides.VIR]
+fm_level = 0
+note = "GDACS layer has 1 polygon for VIR; FM has 3 districts. Collapse FM to country level."
+
+[gdacs_overrides.PRI]
+fm_level = 1
+note = "Override the [overrides.PRI] fm_level=2 (which is for the GADM bridge). For GDACS bridge use FM adm1 (1 polygon = whole island) so the country_only policy collapses 8 senatorial districts to a single PR unit."
+
+# DOM gdacs_overrides removed 2026-05-20: we previously set fm_level=2
+# for DOM (32 FM provinces ↔ 31 GDACS provinces, clean 1:1). Reverted to
+# fm_level=1 (default) for consistency with BEL and FRA, which face the
+# same "GDACS finer than FM adm1" pattern. All three are now handled via
+# the `aggregate_gdacs_to_fm` policy → reverse spatial join + sum at
+# runtime. Trade-off: lose municipio-level resolution in DOM-side reports
+# in exchange for uniform "1 row per FM adm1 unit affected" framing across
+# the basin.
+
+# ─────────────────────────────────────────────────────────────────────
+# Runtime per-country policy for the FieldMaps ↔ GDACS bridge
+# ─────────────────────────────────────────────────────────────────────
+# The pipeline enrichment step reads these to decide what to do with
+# each `storms.gdacs_exposure` admin1 row. Action vocabulary:
+#
+#   accept                 — trust the crosswalk best-match. Apply
+#                            gmi_admin → fm_pcode directly.
+#   country_only           — admin1 not separable. Map all admin1 rows
+#                            for this country to the FM adm0 pcode.
+#                            Used for: gdacs_empty + 1↔1 single-poly.
+#   aggregate_gdacs_to_fm  — GDACS is finer than FM. Run a one-shot
+#                            spatial join (gmi_admin centroid →
+#                            containing FM polygon) to build a
+#                            many-to-one gmi_admin → fm_pcode lookup,
+#                            then aggregate exposure on the fm_pcode.
+#   report_at_gdacs_level  — FM finer than GDACS. Can't subdivide;
+#                            report this country's exposure at the
+#                            GDACS granularity (using gmi_admin as
+#                            the unit identifier downstream).
+#   needs_manual_mapping   — real boundary disagreement or unresolved
+#                            FM-side issue. Flag to user; per-row
+#                            override CSV may be needed.
+
+[gdacs_policy.ABW]
+action = "country_only"
+note = "single-polygon territory, 1:1 with GDACS"
+
+[gdacs_policy.AIA]
+action = "country_only"
+note = "FM has 1 polygon for AIA; GDACS also 1 (whole island)"
+
+[gdacs_policy.ATG]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.BEL]
+action = "aggregate_gdacs_to_fm"
+note = "3 FM regions vs 11 GDACS provinces. Sum GDACS provinces up to FM regions via reverse spatial join (gmi_admin → containing fm_pcode)."
+
+[gdacs_policy.BES]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.BHS]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match (GDACS treats BHS as single polygon)"
+
+[gdacs_policy.BLM]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.BLZ]
+action = "accept"
+note = "all 6 districts align by name; multiple_candidates flags are 2010 vs current boundary noise"
+
+[gdacs_policy.BMU]
+action = "country_only"
+note = "1:1 country match; low IoU is tiny-territory shape noise"
+
+[gdacs_policy.BRB]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.CAN]
+action = "needs_manual_mapping"
+note = "FM-side load error on adm1; FieldMaps likely doesn't include CAN at adm1. Verify and consider country_only."
+
+[gdacs_policy.COL]
+action = "accept"
+note = "33↔33 departments; 91% names align, mean IoU 0.93"
+
+[gdacs_policy.CPV]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.CRI]
+action = "accept"
+note = "7↔7 provinces; 100% names align, mean IoU 0.92"
+
+[gdacs_policy.CUB]
+action = "needs_manual_mapping"
+note = "16 FM vs 15 GDACS provinces. 14 GDACS provinces match cleanly to a single FM province. The 15th — GDACS 'La Habana' (CUB-LHB) — predates the 2011 split into modern Artemisa + Mayabeque, so it maps to BOTH (see per_row_notes). GDACS also uses pre-2011 name 'Ciudad de la Habana' for what FM calls 'La Habana'."
+
+[gdacs_policy.CUW]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.CYM]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.DEU]
+action = "accept"
+note = "16↔16 federal states; 100% names align, mean IoU 0.94"
+
+[gdacs_policy.DMA]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.DOM]
+action = "aggregate_gdacs_to_fm"
+note = "10 FM adm1 regions ↔ 31 GDACS provinces. GDACS reports at what's effectively FM adm2 granularity (the 32 provinces). For consistency with BEL and FRA (same shape), we report at FM adm1 and aggregate GDACS provinces up via reverse spatial join. The fm_level=2 alignment is documented as the alternative path in case the reporting layer ever wants finer DOM granularity."
+
+[gdacs_policy.ESP]
+action = "accept"
+note = "19↔19 autonomous communities; every region matched by name. The 1 flagged row is Ceuta (~18 km² enclave) — pure tiny-territory IoU noise."
+
+[gdacs_policy.FRA]
+action = "aggregate_gdacs_to_fm"
+note = "13 FM regions vs 22 GDACS regions (pre-2016 consolidation). Same shape as BEL — needs reverse spatial join to aggregate GDACS up to current FM regions."
+
+[gdacs_policy.GBR]
+action = "accept"
+note = "4↔4 countries-of-UK; 100% names align, mean IoU 0.96"
+
+[gdacs_policy.GLP]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.GRD]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.GTM]
+action = "accept"
+note = "22↔22 departments; 95% names align, mean IoU 0.84. Boundary edges disagree but identifiers correct."
+
+[gdacs_policy.GUF]
+action = "accept"
+note = "2↔2 admin units; 100% names align, mean IoU 0.95"
+
+[gdacs_policy.GUY]
+action = "accept"
+note = "10↔10 regions; 100% names align, mean IoU 0.95"
+
+[gdacs_policy.HND]
+action = "accept"
+note = "18↔18 departments; 100% names align, mean IoU 0.90. Many multiple_candidates flags but best-match per row is correct."
+
+[gdacs_policy.HTI]
+action = "accept"
+note = "10↔10 departments; heuristic name-match failed on French/English (West/Ouest etc.) but every department matches by ID. All 10 are correct."
+
+[gdacs_policy.IRL]
+action = "accept"
+note = "4↔4 (provinces or country-level groupings); 100% names align"
+
+[gdacs_policy.JAM]
+action = "accept"
+note = "16 FM vs 14 GDACS parishes; 88% names align. Two recent FM parishes likely absorbed into neighbors on GDACS side."
+
+[gdacs_policy.JEY]
+action = "country_only"
+note = "fm_level=1 override (FM only has 1 unit total); 1:1 country match"
+
+[gdacs_policy.KNA]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.LCA]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.LUX]
+action = "country_only"
+note = "12 FM cantons vs 3 GDACS pre-2015 districts (the LUX district level was abolished in 2015 anyway). Can't subdivide GDACS exposure to FM canton level, and reporting at the defunct GDACS-district level isn't useful either. Drop GDACS at admin1 for LUX entirely — use GDACS adm0 (country-level exposure) instead. FM-side canton detail comes from FM directly."
+
+[gdacs_policy.MAF]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.MEX]
+action = "accept"
+note = "32↔32 states; 100% names align, mean IoU 0.92"
+
+[gdacs_policy.MSR]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.MTQ]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.NIC]
+action = "needs_manual_mapping"
+note = "17 FM vs 16 GDACS — 15 GDACS regions match a single FM region cleanly. The 16th — GDACS 'Zelaya' (NIC-ZEL) — predates a 1987 split into RAAN/RAAS (renamed RACCN/RACCS in 2014), so it maps to BOTH modern Caribbean autonomous regions (see per_row_notes). Same pattern as CUB Artemisa/Mayabeque, just older."
+
+[gdacs_policy.NLD]
+action = "accept"
+note = "12↔12 provinces; 92% names align, mean IoU 0.88"
+
+[gdacs_policy.PAN]
+action = "needs_manual_mapping"
+note = "13 FM vs 10 GDACS provinces. 3 FM provinces are post-2010 splits with no clean GDACS partner. Per-row override CSV needed for those 3."
+
+[gdacs_policy.PRI]
+action = "aggregate_gdacs_to_fm"
+note = "GDACS's 8 PRI polygons are Puerto Rico's Senatorial Districts (1917 Jones–Shafroth Act electoral subdivisions, group municipios for state-senate representation). They sit between FM's adm1 (1 whole-territory polygon) and FM's adm2 (78 municipios) — neither layer. Use FM adm1 (the single whole-island polygon) as the target and aggregate all 8 GDACS senatorial-district exposure rows into that one FM unit via reverse spatial join. Each GDACS poly's representative point falls inside the single FM polygon → 8 lookup rows, all pointing to the same fm_pcode. At runtime, summing across rows with the same fm_pcode gives the national PR exposure (equivalent to GDACS admin0 totals). Equivalent in effect to country_only but keeps PR on the adm1 reporting path with the rest of the basin."
+
+[gdacs_policy.PRT]
+action = "accept"
+note = "20↔20 admin units; 70% names align, mean IoU 0.85. Azores/Madeira split slightly differently between sources; mainland districts clean."
+
+[gdacs_policy.SUR]
+action = "accept"
+note = "10↔10 districts; 100% names align, mean IoU 0.88"
+
+[gdacs_policy.SXM]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.TCA]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match; tiny-territory IoU noise"
+
+[gdacs_policy.TTO]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.USA]
+action = "accept"
+note = "51 FM vs 52 GDACS states/DC; 100% names align, mean IoU 0.98. One extra GDACS row absorbed at edges."
+
+[gdacs_policy.VCT]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[gdacs_policy.VEN]
+action = "accept"
+note = "25 FM vs 24 GDACS states; 84% names align, mean IoU 0.92"
+
+[gdacs_policy.VGB]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match; tiny-territory IoU noise"
+
+[gdacs_policy.VIR]
+action = "country_only"
+note = "fm_level=0 override; 1:1 country match"
+
+[data_quality.BEL]
+issue = "FM BEL adm2 has parent-region swap errors: 'Henegouwen' (a Walloon province) is listed under adm1_name='Vlaams Gewest' (Flanders), and 'West-Vlaanderen' (a Flemish province) is listed under adm1_name='Wallonne Gewest' (Wallonia). Each province appears once correctly placed and once incorrectly placed, so the adm2 layer has 13 rows instead of the actual 11 provinces."
+implication = "Tested fm_level=2 for BEL — got 9/13 clean with IoU 0.78, but the 2 bogus duplicates produce IoU ≈ 0.005 (geometry doesn't overlap the wrong-region GDACS counterpart). Doesn't block our chosen policy (aggregate_gdacs_to_fm at fm_level=1) but worth fixing upstream."
+action = "Raise with FieldMaps maintainers — fix the two province-region swap rows in the BEL adm2 layer."
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-row notes
+# ─────────────────────────────────────────────────────────────────────
+# Caveats attached to specific (iso3, fm_pcode) rows in the crosswalk.
+# Used to surface known limitations of the 2010 GDACS boundaries when
+# they intersect admin reforms that happened after 2010.
+#
+# Array-of-tables format so a single country can have multiple notes.
+# The QMD loads these and renders them as visible callouts so colleagues
+# reviewing the report can't miss them.
+#
+# `kind` is one of:
+#   pre_split_boundary  — GDACS unit predates an admin split; same
+#                         GDACS exposure number maps to multiple FM
+#                         units. Do NOT sum across these FM rows.
+#   rename              — pure naming change; same geometry,
+#                         informational only.
+
+[[per_row_notes]]
+iso3 = "CUB"
+fm_pcode = "CUB-20201118-01"
+fm_name = "Artemisa"
+gmi_admin = "CUB-LHB"
+kind = "pre_split_boundary"
+note = "GDACS uses pre-2011 boundary. The 'CUB-LHB / La Habana' GDACS polygon covers BOTH modern Artemisa AND Mayabeque (the province was split in 2011). The same GDACS exposure number will appear under both Artemisa and Mayabeque rows — DO NOT SUM across them, that double-counts the population."
+
+[[per_row_notes]]
+iso3 = "CUB"
+fm_pcode = "CUB-20201118-12"
+fm_name = "Mayabeque"
+gmi_admin = "CUB-LHB"
+kind = "pre_split_boundary"
+note = "GDACS uses pre-2011 boundary. The 'CUB-LHB / La Habana' GDACS polygon covers BOTH modern Mayabeque AND Artemisa (the province was split in 2011). The same GDACS exposure number will appear under both Mayabeque and Artemisa rows — DO NOT SUM across them, that double-counts the population."
+
+
+[[per_row_notes]]
+iso3 = "JAM"
+fm_pcode = "JAM_2-20250729"
+fm_name = "Pedro Bank"
+gmi_admin = ""
+kind = "fm_offshore_orphan"
+note = "FM adm1 record for Pedro Bank — a submerged bank ~80 km SSW of Jamaica with two tiny emerging cays (~33 acres total). Jamaican sovereign territory but not assigned to any parish. FM puts the name in adm0_name ('Pedro Bank (Jam.)') rather than adm1_name. Not represented in GDACS, hence no_overlap. Effectively uninhabited so practical impact on exposure reporting is zero; safe to ignore at runtime."
+
+[[per_row_notes]]
+iso3 = "JAM"
+fm_pcode = "JAM_3-20250729"
+fm_name = "Morant Cays"
+gmi_admin = ""
+kind = "fm_offshore_orphan"
+note = "FM adm1 record for Morant Cays — 4 small islets ~50 km SE of Jamaica. Jamaican sovereign territory but not a parish. FM puts the name in adm0_name ('Morant Cays (Jam.)') rather than adm1_name. Not represented in GDACS, hence no_overlap. Uninhabited; practical impact on exposure reporting is zero."
+
+[[per_row_notes]]
+iso3 = "NIC"
+fm_pcode = "NIC-20231203-16"
+fm_name = "Región Autónoma Costa Caribe Norte"
+gmi_admin = "NIC-ZEL"
+kind = "pre_split_boundary"
+note = "GDACS uses the pre-1987 boundary 'Zelaya' (NIC-ZEL), the historic single department on Nicaragua's Caribbean coast named for President José Santos Zelaya. It was split in 1987 under the Sandinista-era constitution into RAAN (north) and RAAS (south), and renamed in 2014 to RACCN and RACCS. GDACS's Zelaya polygon covers BOTH modern Costa Caribe Norte AND Costa Caribe Sur. The same GDACS exposure number will appear under both FM rows — DO NOT SUM across them, that double-counts the population."
+
+[[per_row_notes]]
+iso3 = "NIC"
+fm_pcode = "NIC-20231203-17"
+fm_name = "Región Autónoma de la Costa Caribe Sur"
+gmi_admin = "NIC-ZEL"
+kind = "pre_split_boundary"
+note = "Same as Costa Caribe Norte — GDACS 'Zelaya' (NIC-ZEL) covers both modern Costa Caribe Norte and Costa Caribe Sur (1987 split, 2014 rename). DO NOT SUM the GDACS exposure across these two FM rows."
