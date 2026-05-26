@@ -155,6 +155,11 @@ data/*
 pipelines/data/*
 pipelines/temp/*
 exploration/temp/*
+
+# Quarto-rendered outputs in exploration/ (regenerable; 10s of MB)
+exploration/*.html
+exploration/*_files/
+exploration/.quarto/
 scratch/*
 .scrap/
 

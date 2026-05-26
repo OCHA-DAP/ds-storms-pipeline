@@ -1,10 +1,16 @@
 """Regenerate the per-country review artifacts the review qmd consumes.
 
-Produces:
-  - artefacts/out/gdacs_fm_summary.csv         per-country match stats
-  - artefacts/out/gdacs_review_countries.txt   ISOs needing per-country review
-  - artefacts/out/gdacs_clean_countries.txt    ISOs that matched cleanly
-  - artefacts/out/gdacs_review_geoms.gpkg      FM + GDACS polys for review ISOs
+Produces (under ``data/review/`` — gitignored, alongside the
+canonical lookup CSV the production builder writes):
+  - gdacs_fm_summary.csv         per-country match stats
+  - gdacs_review_countries.txt   ISOs needing per-country review
+  - gdacs_clean_countries.txt    ISOs that matched cleanly
+  - gdacs_review_geoms.gpkg      FM + GDACS polys for review ISOs
+  - gdacs_per_country/{ISO}.parquet  per-country match parquets
+                                     (cache; reruns reuse them)
+
+The review qmd lives at ``exploration/review_report_gdacs.qmd`` and
+reads these files from ``../data/review/``.
 
 This is a parity rewrite of the historical aggregation that
 ``artefacts/match_gdacs_fieldmaps.py main()`` did. It now uses the
@@ -12,8 +18,7 @@ graduated helpers under ``src/static/gdacs/`` and the canonical
 ATLANTIC_ISO3 scope, so the qmd renders against the same source of
 truth the production lookup builder uses.
 
-Caches per-country match results at ``artefacts/out/per_country/{ISO}.parquet``
-so reruns are fast (delete the cache to force a re-match).
+Delete ``data/review/gdacs_per_country/`` to force a re-match.
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ from src.static.gdacs.inputs import (  # noqa: E402
 from src.static.gdacs.matcher import match_country  # noqa: E402
 
 
-OUT_DIR = REPO_ROOT / "artefacts" / "out"
+OUT_DIR = REPO_ROOT / "data" / "review"
 PER_COUNTRY_DIR = OUT_DIR / "gdacs_per_country"
 GEOMS_PATH = OUT_DIR / "gdacs_review_geoms.gpkg"
 SUMMARY_PATH = OUT_DIR / "gdacs_fm_summary.csv"
