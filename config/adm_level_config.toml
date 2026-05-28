@@ -570,3 +570,57 @@ fm_name = ""
 gmi_admin = "VEN-DFR"
 kind = "orphan_no_fm_unit"
 note = "GDACS VEN-DFR = 'Dependencias Federales' (Venezuelan offshore islands, ~1500 people total). Not in FieldMaps VEN adm1. GDACS exposure for this admin is dropped at runtime — known orphan, negligible population impact."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FM ↔ ADAM bridge policy
+# ──────────────────────────────────────────────────────────────────────
+# Mirror of [gdacs_policy.<ISO3>] but for the FM↔ADAM lookup. ADAM
+# (WFP) emits exposure rows by admin name; the intermediate boundary
+# layer is `ge_adm1.parquet` (WFP's published global adm1 layer, same
+# vendor). Policy choices reflect the ge_adm1 ↔ FM relationship, NOT
+# the ADAM ↔ FM relationship — because ADAM's CSVs use ge_adm1 names
+# verbatim. Same six actions as gdacs_policy:
+#   accept, country_only, aggregate_adam_to_fm, fm_adm1_only,
+#   needs_manual_mapping, no_adam_source
+# This is a first-pass seed — most ISO3s default to country_only
+# (no entry) until reviewed.
+
+# Clean 1:1 ge_adm1 ↔ FM at adm1 (matcher IoU ≥ 0.99 in smoke run)
+[adam_policy.HTI]
+action = "accept"
+
+[adam_policy.MEX]
+action = "accept"
+
+[adam_policy.BMU]
+action = "accept"
+note = "ge_adm1 and FM both have the 9 parishes; clean match. NOTE: ADAM's published CSV often emits placeholder values ('---', 'Under National Administration') for BMU adm1 — that's an ADAM-side data quality issue, not a lookup gap. Downstream rows that don't match adam_admin_name simply won't attach (left-join semantics)."
+
+# ge_adm1 finer than FM — reverse spatial join rolls ge polygons up
+# to the containing FM polygon. Each FM region gets multiple
+# (ge_adm1_id, adam_admin_name) lookup rows.
+[adam_policy.ISL]
+action = "aggregate_adam_to_fm"
+note = "FM has 8 regions; ge_adm1 has 75 municipalities (sveitarfélög). ADAM emits the municipality names. Aggregation maps each municipality to its containing FM region."
+
+[adam_policy.DOM]
+action = "aggregate_adam_to_fm"
+note = "FM has 10 regions; ge_adm1 has 33 provinces. ADAM emits province names. Aggregation maps each province to its containing FM region."
+
+# Same pre-2011 Cuba reform that affects the GDACS lookup — ADAM
+# inherits the issue because ge_adm1 still carries the old La Habana
+# boundary that became Artemisa + Mayabeque.
+[adam_policy.CUB]
+action = "needs_manual_mapping"
+note = "Same Artemisa/Mayabeque pre-split caveat as gdacs_policy.CUB. ge_adm1 has 16 provinces (matching FM count) but a couple of names lag the modern boundary — see [[adam_per_row_notes]]."
+
+# ADAM has no usable source for these — same exclusion list as
+# gdacs_policy. ANT dissolved 2010; XIM has no FM parquet either.
+[adam_policy.ANT]
+action = "no_adam_source"
+note = "Netherlands Antilles dissolved 2010-10-10."
+
+[adam_policy.XIM]
+action = "no_adam_source"
+note = "No FM parquet for XIM."
