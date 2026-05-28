@@ -624,3 +624,135 @@ note = "Netherlands Antilles dissolved 2010-10-10."
 [adam_policy.XIM]
 action = "no_adam_source"
 note = "No FM parquet for XIM."
+
+
+# ── accept: clean 1:1 ge_adm1 ↔ FM ────────────────────────────────────
+# Auto-classified by build_adam_review_artifacts.py. Mean IoU ≥ 0.6 and
+# fm_count ≈ ge_count (within 2×). Mild noise (low_iou, multiple_
+# candidates) is fine; the matcher picks best-IoU which is the right
+# behaviour. Anything ADAM emits that doesn't match an adam_admin_name
+# in the lookup simply fails to attach (left-join) — that includes the
+# upstream iso3-misattribution bug surfacing on UMI / SPM / FRO etc.,
+# which we ignore at this layer because the bad data won't match.
+
+[adam_policy.BES]
+action = "accept"
+
+[adam_policy.BLM]
+action = "accept"
+
+[adam_policy.CAN]
+action = "accept"
+
+[adam_policy.FRO]
+action = "accept"
+
+[adam_policy.MAF]
+action = "accept"
+
+[adam_policy.MSR]
+action = "country_only"
+note = "ge_adm1 has 3 parishes (Saint Anthony, Saint Georges, Saint Peter); ADAM emits 7 settlement names (Brodericks, Central, East, Plymouth, Salem, ...). Different admin hierarchies entirely — no useful name match possible. Attaches at adm0 only."
+
+[adam_policy.SPM]
+action = "accept"
+
+[adam_policy.ESP]
+action = "accept"
+note = "89% clean. 2 of 19 FM units flagged multiple_candidates — minor coastal-boundary overlap; best-IoU pick is right."
+
+[adam_policy.UMI]
+action = "accept"
+note = "9 FM atolls vs 9 ge entries match cleanly. NOTE: ADAM's UMI rows in storms.adam_exposure include rows whose admin_name is actually a Jamaican parish (Westmoreland, Trelawny, ...) — that's a misattribution bug in ocha_lens.datasources.adam.name_to_iso3's pycountry fuzzy fallback. Those won't match the lookup so they fail to attach — safe behaviour, but the upstream fix should land in ocha-lens."
+
+[adam_policy.ATG]
+action = "accept"
+note = "88% clean. 7/8 FM parishes match; Saint John / Saint John's normalises fine downstream."
+
+[adam_policy.JAM]
+action = "accept"
+note = "88% clean. 14 FM parishes match cleanly; 2 of FM's 16 are offshore cays (Pedro Cays etc.) that ge_adm1 doesn't carry → no_overlap. Acceptable loss."
+
+[adam_policy.USA]
+action = "accept"
+note = "88% clean. 45/51 FM states clean; 6 multiple_candidates are coastal states where ge_adm1 has both the state polygon and a small offshore admin (DC, similar)."
+
+[adam_policy.NLD]
+action = "accept"
+note = "10/12 provinces clean; 2 multiple_candidates."
+
+[adam_policy.VGB]
+action = "accept"
+note = "FM has 7 islands, ge has 5 — accept picks best IoU per FM, the 2 FM units with no ge counterpart (small cays) lose adm1 attribution."
+
+[adam_policy.DMA]
+action = "accept"
+note = "70% clean. 10/10 FM and ge match by count; 3 multi-candidate parishes overlap each other slightly but best-IoU is unambiguous."
+
+[adam_policy.TCA]
+action = "accept"
+note = "4/6 clean. Salt Cay (FM) vs Salt City (ge typo) is one of the misses."
+
+[adam_policy.BHS]
+action = "accept"
+note = "FM 32 districts vs ge 22 — accept emits 22 lookup rows. Berry Islands, Black Point, Mangrove Cay etc. (10 FM units) have no ge counterpart and won't surface ADAM exposure at adm1; that's accurate to the source — ADAM doesn't emit names for those districts either."
+
+
+# ── aggregate_adam_to_fm: ge_adm1 finer than FM ──────────────────────
+# Reverse spatial join: each ge polygon → its containing FM polygon.
+# Triggered when ge_count >= 2 * fm_count, or when FM has 1 polygon
+# and ge has many.
+
+[adam_policy.AIA]
+action = "aggregate_adam_to_fm"
+note = "FM treats AIA as 1 polygon; ge_adm1 has 10 villages. All 10 villages aggregate to the single FM AIA polygon."
+
+[adam_policy.IRL]
+action = "aggregate_adam_to_fm"
+note = "FM has 4 regions; ge_adm1 has 27 counties. Each county rolls up to its containing FM region."
+
+[adam_policy.PRT]
+action = "aggregate_adam_to_fm"
+note = "FM has 20 regions; ge_adm1 has 29 finer subdivisions. Auto-classifier picked needs_manual_mapping based on multi_candidate count, but the shape is the same aggregate pattern as ISL/DOM/IRL — ge is just finer."
+
+
+# ── fm_adm1_only: ge_adm1 too coarse to disambiguate FM ──────────────
+# FM has real adm1 units but ge_adm1 has 1 polygon (or few) for the
+# country. Surfaces FM rows with ge_adm1_id=NULL so other sources can
+# still attach via fm_pcode; ADAM adm1 deliberately doesn't attach.
+
+[adam_policy.GLP]
+action = "fm_adm1_only"
+note = "FM has 2 polygons (mainland Guadeloupe + offshore); ge_adm1 has 1. ADAM rows for GLP are also affected by the upstream iso3-misattribution bug (admin_names that belong to other countries), so the disable-adm1-attach behaviour of fm_adm1_only is the right outcome either way."
+
+[adam_policy.VIR]
+action = "fm_adm1_only"
+note = "FM has 3 islands (St Thomas, St John, St Croix); ge_adm1 has 1 polygon for the territory. ge can't disambiguate the 3 FM units, so surface them with ge_adm1_id=NULL."
+
+[adam_policy.CYM]
+action = "fm_adm1_only"
+note = "FM has 6 districts; ge_adm1 has 3. 0% clean — every match is partial IoU. Safer to surface FM rows with NULL than guess via best-IoU."
+
+[adam_policy.GRL]
+action = "fm_adm1_only"
+note = "FM has 6 municipalities (post-2009 reform); ge_adm1 has 3 (pre-2009). Same boundary-reform mismatch as gdacs_policy.GRL — needs_manual_mapping there, fm_adm1_only here because ge_adm1's 3 polygons aren't the right level."
+
+
+# ── country_only: don't attach adm1 even though FM has units ─────────
+
+[adam_policy.PRI]
+action = "country_only"
+note = "Special: gdacs_overrides.PRI sets fm_level=2 (78 municipios) for the GDACS bridge. ADAM only emits 1 row for PRI (admin_level=0 effectively), so adm1 attachment makes no sense. country_only keeps the adm0 row and skips adm1."
+
+
+# ── needs_manual_mapping: real boundary disagreement at same level ───
+# Same count on both sides but heavy multi_candidate overlap signals
+# admins that have been reorganised between the two source releases.
+
+[adam_policy.KNA]
+action = "needs_manual_mapping"
+note = "14 FM parishes vs 14 ge parishes; only 2 clean, 9 multi_candidate, 3 low_iou. Parish boundaries appear to have shifted between source releases. Per-row notes need authoring; for now best-IoU pick attaches but is unreliable."
+
+[adam_policy.MTQ]
+action = "needs_manual_mapping"
+note = "4 FM communes vs 4 ge — half are multi_candidate. Likely the same canton/commune restructuring as some of the other French overseas territories. Best-IoU pick attaches but flagged."
