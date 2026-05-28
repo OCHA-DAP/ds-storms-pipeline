@@ -38,6 +38,11 @@ DEFAULT_LOCAL_PATH = REPO_ROOT / "data" / "static" / "ge_adm1.parquet"
 GE_ADM1_CONTAINER = "global"
 GE_ADM1_BLOB = "adam/boundaries/ge_adm1.parquet"
 
+# Narrow allow-list of iso3s where ge_adm1's adm1_name is "N/A" but
+# adm0_name holds the real subdivision name. Strict opt-in by iso3
+# so we don't accidentally rename real "N/A" rows elsewhere.
+GE_ADM1_NAME_FALLBACK_ISOS = {"BES", "UMI"}
+
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +100,31 @@ def load_ge_adm1(
 
     if gdf is None or len(gdf) == 0:
         raise RuntimeError("ge_adm1 load returned empty")
+
+    # adm1_name fallback: a handful of iso3s store the *real*
+    # adm1 name in adm0_name and leave adm1_name as the literal
+    # string "N/A". Same pattern FieldMaps uses for SJM/UMI (see
+    # FM_ADM1_NAME_FALLBACK_ISOS in src/static/gdacs/inputs.py).
+    # Examples:
+    #   BES (Caribbean Netherlands): 3 polygons all named "N/A",
+    #        adm0_name = "Bonaire" / "Saba" / "Sint Eustatius"
+    #   UMI (US Minor Outlying Islands): 9 polygons all named "N/A",
+    #        adm0_name = "Navassa Island" / "Baker Island" / ...
+    # Narrow allow-list keeps the fallback from masking real data
+    # gaps in iso3s where N/A really does mean unknown.
+    fallback_mask = (
+        gdf["iso3"].isin(GE_ADM1_NAME_FALLBACK_ISOS)
+        & (gdf["adm1_name"] == "N/A")
+        & gdf["adm0_name"].notna()
+    )
+    if fallback_mask.any():
+        gdf.loc[fallback_mask, "adm1_name"] = (
+            gdf.loc[fallback_mask, "adm0_name"]
+        )
+        logger.info(
+            "Applied adm0_name → adm1_name fallback for %d rows",
+            int(fallback_mask.sum()),
+        )
     return gdf
 
 
