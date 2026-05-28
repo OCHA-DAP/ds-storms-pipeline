@@ -25,12 +25,31 @@ from IPython.display import Markdown, display
 
 OUT = Path("../data/review")
 PER_COUNTRY = OUT / "adam_per_country"
+GEOMS = OUT / "adam_review_geoms.gpkg"
 
 summary = pd.read_csv(OUT / "adam_fm_summary.csv")
 summary["clean_pct"] = (
     summary["n_clean"] / summary["fm_count"].replace(0, 1) * 100
 ).round(0).astype("Int64")
 summary["iou"] = summary["mean_iou"].round(3)
+
+# FM + ge polygons for the per-country panels. The build script writes
+# geoms for every clean+review iso3 (skips fm_empty like ANT/XIM).
+fm_all = gpd.read_file(GEOMS, layer="fm") if GEOMS.exists() else gpd.GeoDataFrame()
+ge_all = gpd.read_file(GEOMS, layer="ge") if GEOMS.exists() else gpd.GeoDataFrame()
+
+ISSUE_COLOR = {
+    None: "#3d9970",
+    "low_iou": "#e74c3c",
+    "multiple_candidates": "#f39c12",
+    "no_overlap": "#7f8c8d",
+}
+ISSUE_LABEL = {
+    None: "clean",
+    "low_iou": "low IoU",
+    "multiple_candidates": "ambiguous",
+    "no_overlap": "no overlap",
+}
 
 # Policy table from the same TOML that drives the build script —
 # guarantees this report describes what the runtime actually does.
@@ -254,6 +273,152 @@ if DB_LIVE:
     )
 else:
     Markdown("_DB unavailable, table skipped_")
+```
+
+## Per-country detail
+
+Every policy-seeded iso3 gets a panel below: header with the chosen action and the headline counts, then a map (FM polygons filled by issue color with a thin dark edge, ge_adm1 polygons overlaid in magenta dashed), then the full per-row match table sorted by issue severity.
+
+**FM fill color** indicates the crosswalk result for each FM unit:
+
+- <span style="color:#3d9970;font-weight:600">green</span> — clean match (single ge partner, IoU ≥ 0.5)
+- <span style="color:#e74c3c;font-weight:600">red</span> — low IoU (FM and ge disagree on this unit's boundary)
+- <span style="color:#f39c12;font-weight:600">orange</span> — multiple ge polygons overlap this FM unit substantially (boundary disagreement, likely a split/merge between sources)
+- <span style="color:#7f8c8d;font-weight:600">gray</span> — no ge polygon overlaps this FM unit at all (or this is an `fm_adm1_only` row with ge deliberately not attached)
+
+```{python}
+#| label: render-countries
+#| results: asis
+# Iterate over every iso3 that has an explicit adam_policy entry — that
+# covers the full set of decisions seeded in adm_level_config.toml. The
+# fm_empty iso3s (ANT, XIM) silently degrade because no geometry exists
+# for them; everything else gets a full panel.
+for iso3 in POLICY_DF["iso3"].tolist():
+    crow_match = summary[summary["iso3"] == iso3]
+    if crow_match.empty:
+        continue
+    crow = crow_match.iloc[0]
+
+    cp_path = PER_COUNTRY / f"{iso3}.parquet"
+    cp = pd.read_parquet(cp_path) if cp_path.exists() else pd.DataFrame()
+    fm = fm_all[fm_all["iso3"] == iso3].copy() if len(fm_all) else gpd.GeoDataFrame()
+    ge = ge_all[ge_all["iso3"] == iso3].copy() if len(ge_all) else gpd.GeoDataFrame()
+
+    pol = POLICY.get(iso3, {})
+    action = pol.get("action", "—")
+
+    display(Markdown(f"### {iso3}"))
+    fm_lvl = int(crow["fm_level"]) if pd.notna(crow["fm_level"]) else "?"
+    if pd.notna(crow["mean_iou"]):
+        display(Markdown(
+            f"**Pipeline action**: `{action}`  ·  "
+            f"**FM level**: adm{fm_lvl}  ·  "
+            f"**FM units**: {int(crow['fm_count'])}  ·  "
+            f"**ge units**: {int(crow['ge_count'])}  ·  "
+            f"**Clean**: {int(crow['n_clean'])}/{int(crow['fm_count'])}  ·  "
+            f"**mean IoU**: {crow['iou']:.3f}  ·  "
+            f"**status**: {crow['status']}"
+        ))
+    else:
+        display(Markdown(
+            f"**Pipeline action**: `{action}`  ·  "
+            f"**FM level**: adm{fm_lvl}  ·  "
+            f"**status**: {crow['status']}"
+        ))
+
+    # Inline the policy note from the TOML — this is where the
+    # rationale for non-obvious calls lives (BMU placeholder garbage,
+    # ISL aggregation, etc.).
+    if pol.get("note"):
+        display(Markdown(f"> {pol['note']}"))
+
+    if len(fm) == 0:
+        display(Markdown("_No FieldMaps geometry available for this country._"))
+        display(Markdown("***"))
+        continue
+    if len(ge) == 0:
+        display(Markdown("_No ge_adm1 geometry available for this country._"))
+        display(Markdown("***"))
+        continue
+
+    # Merge issue info onto FM polygons for fill color
+    if not cp.empty and "fm_pcode" in cp.columns:
+        fm_issue = fm.merge(
+            cp[[c for c in ["fm_pcode","issue","iou","ge_adm1_id","adam_admin_name"]
+                if c in cp.columns]],
+            on="fm_pcode", how="left",
+        )
+    else:
+        fm_issue = fm.assign(issue=None)
+
+    fm_issue["_color"] = fm_issue["issue"].map(ISSUE_COLOR).fillna(ISSUE_COLOR[None])
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+    fm_issue.plot(
+        ax=ax, color=fm_issue["_color"],
+        edgecolor="#222", linewidth=0.7, alpha=0.6,
+    )
+    # White casing under the magenta dashed line so it reads on any
+    # FM fill color
+    ge.plot(ax=ax, facecolor="none", edgecolor="white", linewidth=4.0)
+    ge.plot(
+        ax=ax, facecolor="none", edgecolor="#e6007a",
+        linewidth=2.2, linestyle=(0, (8, 4)),
+    )
+
+    # Annotate when polygon counts are small enough to stay legible
+    if len(fm_issue) <= 25:
+        for _, r in fm_issue.iterrows():
+            if pd.notna(r.get("fm_name")) and r.geometry is not None:
+                pt = r.geometry.representative_point()
+                ax.annotate(
+                    r["fm_name"],
+                    xy=(pt.x, pt.y), ha="center", va="center",
+                    fontsize=7, color="black", fontweight="bold",
+                )
+    if len(ge) <= 25:
+        for _, r in ge.iterrows():
+            if pd.notna(r.get("adm1_name")) and r.geometry is not None:
+                pt = r.geometry.representative_point()
+                ax.annotate(
+                    r["adm1_name"],
+                    xy=(pt.x, pt.y),
+                    xytext=(0, -10), textcoords="offset points",
+                    ha="center", va="top",
+                    fontsize=6, color="#e6007a", style="italic",
+                    fontweight="bold",
+                )
+    ax.set_title(
+        f"{iso3} — FM polygons (black labels, dark edge) / "
+        f"ge_adm1 polygons (magenta italic labels, magenta dashed)",
+        fontsize=11,
+    )
+    ax.set_axis_off()
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+    # Per-row table
+    if not cp.empty:
+        tbl = cp.copy()
+        if "issue" not in tbl.columns:
+            tbl["issue"] = None
+        tbl["issue_label"] = tbl["issue"].map(ISSUE_LABEL).fillna("clean")
+        tbl = tbl.sort_values(
+            ["issue", "iou"], ascending=[True, True], na_position="last",
+        )
+        cols = [
+            "fm_pcode", "fm_name", "ge_adm1_id",
+            "adam_admin_name", "adam_admin_altname",
+            "iou", "n_candidates", "issue_label",
+        ]
+        cols = [c for c in cols if c in tbl.columns]
+        tbl = tbl[cols].reset_index(drop=True)
+        if "iou" in tbl.columns:
+            tbl["iou"] = tbl["iou"].round(3)
+        display(tbl)
+
+    display(Markdown("***"))
 ```
 
 ## Known data-quality issues

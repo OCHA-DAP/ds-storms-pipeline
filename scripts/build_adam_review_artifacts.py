@@ -207,8 +207,14 @@ def main() -> int:
     REVIEW_PATH.write_text("\n".join(review) + "\n")
     logger.info("Clean: %d, review: %d", len(clean), len(review))
 
-    write_review_geoms(review, ge, cfg)
-    logger.info("Wrote %s (review iso3s: %d)", GEOMS_PATH, len(review))
+    # ADAM diverges from the GDACS qmd here: the qmd's per-country
+    # detail section iterates over every policy-seeded iso3 (not just
+    # the review-status ones), so write geoms for clean+review together.
+    # The handful of fm_empty iso3s (ANT, XIM) genuinely have no
+    # geometry, so the qmd will gracefully skip them.
+    geom_iso3 = sorted(set(clean) | set(review))
+    write_review_geoms(geom_iso3, ge, cfg)
+    logger.info("Wrote %s (iso3s with geoms: %d)", GEOMS_PATH, len(geom_iso3))
     return 0
 
 
