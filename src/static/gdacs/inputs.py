@@ -131,16 +131,23 @@ def load_level_config(path: Path | None = None) -> dict:
     Returned dict shape::
 
         {
-          "defaults":         {"fm_level": int, "gadm_level": int},
-          "overrides":        {ISO3: {fm_level, gadm_level?, note?}},
-          "gdacs_overrides":  {ISO3: {fm_level, note?}},
-          "gdacs_policy":     {ISO3: {action: str, note?}},
-          "per_row_notes":    [{iso3, fm_pcode, note}, ...],
-          "data_quality":     {ISO3: {action, note?}},
+          "defaults":          {"fm_level": int, "gadm_level": int},
+          "overrides":         {ISO3: {fm_level, gadm_level?, note?}},
+          "gdacs_overrides":   {ISO3: {fm_level, note?}},
+          "gdacs_policy":      {ISO3: {action: str, note?}},
+          "per_row_notes":     [{iso3, fm_pcode, note}, ...],
+          "data_quality":      {ISO3: {action, note?}},
+          "adam_policy":       {ISO3: {action: str, note?}},
+          "adam_per_row_notes": [{iso3, fm_pcode, note}, ...],
         }
 
     ``[overrides]`` historically carried the FM↔GADM bridge config.
     ``[gdacs_overrides]`` takes precedence for the FM↔GDACS bridge.
+    ``[adam_policy]`` / ``[[adam_per_row_notes]]`` are the FM↔ADAM
+    equivalents of ``gdacs_policy`` / ``per_row_notes``; the two
+    bridges keep separate per-iso3 policy because the upstream admin
+    hierarchies disagree on some countries (e.g. ISL: ADAM uses 75
+    municipalities, GDACS uses 1 whole-country polygon).
     """
     cfg = {
         "defaults": {
@@ -152,6 +159,8 @@ def load_level_config(path: Path | None = None) -> dict:
         "gdacs_policy": {},
         "per_row_notes": [],
         "data_quality": {},
+        "adam_policy": {},
+        "adam_per_row_notes": [],
     }
     if path is None:
         path = DEFAULT_CONFIG
@@ -162,11 +171,12 @@ def load_level_config(path: Path | None = None) -> dict:
     if "defaults" in loaded:
         cfg["defaults"].update(loaded["defaults"])
     for key in ("overrides", "gdacs_overrides", "gdacs_policy",
-                "data_quality"):
+                "data_quality", "adam_policy"):
         if key in loaded:
             cfg[key] = loaded[key]
-    if "per_row_notes" in loaded:
-        cfg["per_row_notes"] = loaded["per_row_notes"]
+    for key in ("per_row_notes", "adam_per_row_notes"):
+        if key in loaded:
+            cfg[key] = loaded[key]
     return cfg
 
 
