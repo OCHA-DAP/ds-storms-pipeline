@@ -145,7 +145,7 @@ Six actions cover every case. Each action describes what the build script does a
 |---|---|---|
 | **`accept`** | runs FM↔ge IoU matcher, emits one lookup row per FM polygon with the best-match ge name | clean 1:1 (HTI, MEX) or minor noise (USA, BHS) |
 | **`aggregate_adam_to_fm`** | reverse spatial join: each ge polygon → its containing FM polygon, multiple rows per FM | ge_adm1 finer than FM (ISL: 75 ge → 8 FM; DOM: 33 → 10) |
-| **`fm_adm1_only`** | emits FM rows with `ge_adm1_id=NULL` and `adam_admin_name=NULL` | ge_adm1 too coarse / no useful adm1 disambiguation possible (CYM, GRL, VIR) |
+| **`fm_adm1_only`** | emits FM rows with `adam_admin_id=NULL` and `adam_admin_name=NULL` | ge_adm1 too coarse / no useful adm1 disambiguation possible (CYM, GRL, VIR) |
 | **`needs_manual_mapping`** | same as accept but flagged via `caveat_note` for boundary-reform cases | same-count both sides, heavy multi_candidate (CUB, KNA) |
 | **`country_only`** | no adm1 rows for this iso3 | real admin-system divergence (MSR: settlements vs parishes) or special cases (PRI) |
 | **`no_adam_source`** | iso3 skipped entirely | no FM AND/OR no ge data (ANT, XIM) |
@@ -170,10 +170,10 @@ diag = summary.merge(POLICY_DF[["iso3","action"]], on="iso3", how="left")
 # are silently country_only and not part of this review pass.
 diag = diag[diag["action"].notna()].copy()
 diag = diag[[
-    "iso3","action","fm_count","ge_count","n_clean",
+    "iso3","action","fm_count","adam_admin_count","n_clean",
     "n_low_iou","n_multi","n_no_overlap","clean_pct","iou","status",
 ]].rename(columns={
-    "fm_count":"FM","ge_count":"ge",
+    "fm_count":"FM","adam_admin_count":"ge",
     "n_clean":"clean","n_low_iou":"low_iou","n_multi":"ambig",
     "n_no_overlap":"no_ov","clean_pct":"%clean","iou":"mean_iou",
 }).sort_values(["action","%clean"], ascending=[True, False])
@@ -220,7 +220,7 @@ for iso3 in ["ISL","DOM","IRL","AIA","PRT"]:
 
 ### `fm_adm1_only`: FM units surface without ge attach
 
-These countries get FM adm1 rows in the lookup with `ge_adm1_id = NULL` and `adam_admin_name = NULL`. ADAM exposure won't join to them at adm1 — by design, because ge_adm1 can't disambiguate. The FM rows still appear so other sources (NHC, GDACS via the parallel lookup) can attach via `fm_pcode`.
+These countries get FM adm1 rows in the lookup with `adam_admin_id = NULL` and `adam_admin_name = NULL`. ADAM exposure won't join to them at adm1 — by design, because ge_adm1 can't disambiguate. The FM rows still appear so other sources (NHC, GDACS via the parallel lookup) can attach via `fm_pcode`.
 
 ```{python}
 #| label: fm-adm1-only-table
@@ -232,7 +232,7 @@ for iso3 in target:
         continue
     df = pd.read_parquet(p)
     fm_names = sorted(df.loc[df["fm_name"].notna(), "fm_name"].unique().tolist())
-    ge_count = int(df["ge_country_count"].dropna().iloc[0]) if "ge_country_count" in df else 0
+    ge_count = int(df["adam_admin_count"].dropna().iloc[0]) if "adam_admin_count" in df else 0
     rows.append({
         "iso3": iso3,
         "FM units surfaced": ", ".join(fm_names[:8]) + (f" (+{len(fm_names)-8} more)" if len(fm_names) > 8 else ""),
@@ -314,7 +314,7 @@ for iso3 in POLICY_DF["iso3"].tolist():
             f"**Pipeline action**: `{action}`  ·  "
             f"**FM level**: adm{fm_lvl}  ·  "
             f"**FM units**: {int(crow['fm_count'])}  ·  "
-            f"**ge units**: {int(crow['ge_count'])}  ·  "
+            f"**ge units**: {int(crow['adam_admin_count'])}  ·  "
             f"**Clean**: {int(crow['n_clean'])}/{int(crow['fm_count'])}  ·  "
             f"**mean IoU**: {crow['iou']:.3f}  ·  "
             f"**status**: {crow['status']}"
@@ -344,7 +344,7 @@ for iso3 in POLICY_DF["iso3"].tolist():
     # Merge issue info onto FM polygons for fill color
     if not cp.empty and "fm_pcode" in cp.columns:
         fm_issue = fm.merge(
-            cp[[c for c in ["fm_pcode","issue","iou","ge_adm1_id","adam_admin_name"]
+            cp[[c for c in ["fm_pcode","issue","iou","adam_admin_id","adam_admin_name"]
                 if c in cp.columns]],
             on="fm_pcode", how="left",
         )
@@ -408,7 +408,7 @@ for iso3 in POLICY_DF["iso3"].tolist():
             ["issue", "iou"], ascending=[True, True], na_position="last",
         )
         cols = [
-            "fm_pcode", "fm_name", "ge_adm1_id",
+            "fm_pcode", "fm_name", "adam_admin_id",
             "adam_admin_name", "adam_admin_altname",
             "iou", "n_candidates", "issue_label",
         ]

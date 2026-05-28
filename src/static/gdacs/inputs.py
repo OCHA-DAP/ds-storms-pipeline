@@ -138,7 +138,9 @@ def load_level_config(path: Path | None = None) -> dict:
           "per_row_notes":     [{iso3, fm_pcode, note}, ...],
           "data_quality":      {ISO3: {action, note?}},
           "adam_policy":       {ISO3: {action: str, note?}},
-          "adam_per_row_notes": [{iso3, fm_pcode, note}, ...],
+          "adam_per_row_notes": [{iso3, ge_adm1_id, note}, ...],
+          "adam_row_overrides": [{iso3, ge_adm1_id, action,
+                                  fm_pcode_override?, ...}, ...],
         }
 
     ``[overrides]`` historically carried the FM↔GADM bridge config.
@@ -161,6 +163,7 @@ def load_level_config(path: Path | None = None) -> dict:
         "data_quality": {},
         "adam_policy": {},
         "adam_per_row_notes": [],
+        "adam_row_overrides": [],
     }
     if path is None:
         path = DEFAULT_CONFIG
@@ -174,7 +177,8 @@ def load_level_config(path: Path | None = None) -> dict:
                 "data_quality", "adam_policy"):
         if key in loaded:
             cfg[key] = loaded[key]
-    for key in ("per_row_notes", "adam_per_row_notes"):
+    for key in ("per_row_notes", "adam_per_row_notes",
+                "adam_row_overrides"):
         if key in loaded:
             cfg[key] = loaded[key]
     return cfg

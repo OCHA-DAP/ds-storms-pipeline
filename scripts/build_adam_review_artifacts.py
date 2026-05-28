@@ -95,7 +95,7 @@ def per_country_summary_row(iso3: str, df: pd.DataFrame) -> dict:
         )
         return {
             "iso3": iso3, "fm_level": fm_level,
-            "fm_count": 0, "ge_count": 0,
+            "fm_count": 0, "adam_admin_count": 0,
             "n_clean": 0, "n_low_iou": 0,
             "n_multi": 0, "n_no_overlap": 0,
             "mean_iou": None, "min_iou": None,
@@ -109,14 +109,14 @@ def per_country_summary_row(iso3: str, df: pd.DataFrame) -> dict:
     n_none = int((matched["issue"] == "no_overlap").sum())
     with_iou = matched[matched["issue"] != "no_overlap"]["iou"]
     ge_count = (
-        int(matched["ge_country_count"].iloc[0])
-        if "ge_country_count" in matched.columns else 0
+        int(matched["adam_admin_count"].iloc[0])
+        if "adam_admin_count" in matched.columns else 0
     )
     return {
         "iso3": iso3,
         "fm_level": fm_level,
         "fm_count": n,
-        "ge_count": ge_count,
+        "adam_admin_count": ge_count,
         "n_clean": n_clean, "n_low_iou": n_low,
         "n_multi": n_multi, "n_no_overlap": n_none,
         "mean_iou": float(with_iou.mean()) if len(with_iou) else None,

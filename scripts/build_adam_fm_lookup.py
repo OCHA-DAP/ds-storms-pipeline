@@ -29,10 +29,10 @@ Output
 
 Schema
 ------
-``iso3, admin_level, fm_pcode, fm_name, ge_adm1_id, adam_admin_name,
+``iso3, admin_level, fm_pcode, fm_name, adam_admin_id, adam_admin_name,
 caveat_note``
 
-PK = ``(iso3, admin_level, fm_pcode, ge_adm1_id)``. Multiple rows per
+PK = ``(iso3, admin_level, fm_pcode, adam_admin_id)``. Multiple rows per
 ``(iso3, fm_pcode)`` expected for ``aggregate_adam_to_fm`` countries
 (ISL: 8 FM regions ← 75 ge_adm1 municipalities; DOM: 10 ← 33 provinces).
 
@@ -47,7 +47,7 @@ aggregate_adam_to_fm    1 per ctry  N per FM adm1 (one per ge_adm1
                                     polygon inside it, reverse
                                     spatial join)
 needs_manual_mapping    1 per ctry  1 per FM adm1, caveat_note set
-fm_adm1_only            1 per ctry  1 per FM adm1, ge_adm1_id=NULL
+fm_adm1_only            1 per ctry  1 per FM adm1, adam_admin_id=NULL
 no_adam_source          none        none — iso3 has no ge_adm1
                                     rows (build skips)
 ======================  ==========  ==============================
@@ -91,7 +91,10 @@ from src.static.adam.inputs import (  # noqa: E402
     load_level_config,
     resolve_adam_fm_level,
 )
-from src.static.adam.matcher import match_country  # noqa: E402
+from src.static.adam.matcher import (  # noqa: E402
+    match_country,
+    match_per_ge_country,
+)
 
 DEFAULT_LOCAL_OUT = REPO_ROOT / "data" / "adam_fm_lookup.csv"
 DB_SCHEMA = "storms"
@@ -99,7 +102,7 @@ DB_TABLE = "adam_fm_lookup"
 
 LOOKUP_COLUMNS = [
     "iso3", "admin_level", "fm_pcode", "fm_name",
-    "ge_adm1_id", "adam_admin_name", "caveat_note",
+    "adam_admin_id", "adam_admin_name", "caveat_note",
 ]
 
 logger = logging.getLogger(__name__)
@@ -120,7 +123,7 @@ def build_adm0_row(
     joins). ``fm_name`` prefers FM's ``adm0_name``, falls back to
     ge_adm1's ``adm0_name``. ``adam_admin_name`` = ge_adm1's
     ``adm0_name`` because that IS what ADAM emits at adm_level=0.
-    ``ge_adm1_id`` is NULL — ge_adm1 has no adm0 records.
+    ``adam_admin_id`` is NULL — ge_adm1 has no adm0 records.
     """
     fm_name = None
     if fm_adm0 is not None and len(fm_adm0):
@@ -139,7 +142,7 @@ def build_adm0_row(
         "admin_level": 0,
         "fm_pcode": iso3,
         "fm_name": fm_name,
-        "ge_adm1_id": None,
+        "adam_admin_id": None,
         "adam_admin_name": ge_adm0_name or iso3,
         "caveat_note": None,
     }
@@ -150,117 +153,90 @@ def build_accept_adm1_rows(
     fm_level: int,
     ge_admin: gpd.GeoDataFrame,
     per_row_notes: list[dict],
+    overrides: list[dict],
     low_iou: float = 0.5,
 ) -> list[dict]:
-    """Run the FM↔ge_adm1 matcher and project results into lookup rows.
+    """Per-ge spatial crosswalk, one row per ge polygon.
 
-    Used for both ``accept`` and ``needs_manual_mapping`` — same row
-    shape; only difference is that ``needs_manual_mapping`` countries
-    have ``[[adam_per_row_notes]]`` entries we attach as
-    ``caveat_note``.
+    Used by both ``accept`` and ``aggregate_adam_to_fm`` (and
+    ``needs_manual_mapping``) — they all share the same emit
+    semantics now: iterate the ge_adm1 side, take the best-IoU FM
+    polygon per ge, surface manual overrides on top. The names of
+    the three policies stay distinct because they carry different
+    review-status information for humans, but the build path is one.
+
+    Manual overrides (``[[adam_row_overrides]]``) handle the
+    spatially-wrong best-IoU picks the IoU matcher can't avoid
+    (e.g. BHS Berry Islands → ge "North Andros" picked by IoU because
+    Berry Islands sits in the broader Andros region). Override actions:
+
+      action = "drop"          — emit no row for this adam_admin_id
+      action = "remap"         — change fm_pcode/fm_name to
+                                  fm_pcode_override / fm_name_override
+
+    ``needs_manual_mapping`` carries ``[[adam_per_row_notes]]`` as
+    ``caveat_note`` on the emitted row.
     """
-    match_rows = match_country(
+    match_rows = match_per_ge_country(
         iso3, ge_admin, low_iou=low_iou, fm_level=fm_level,
     )
     # Drop placeholder rows (no_overlap, fm_empty, ge_empty, etc.) —
-    # we only emit rows where both sides exist.
+    # we only emit rows where both sides exist. ge polygons with
+    # no FM overlap stay out of the lookup.
     match_rows = [
         r for r in match_rows
-        if r.get("fm_pcode") and r.get("ge_adm1_id")
+        if r.get("fm_pcode") and r.get("adam_admin_id")
     ]
     if not match_rows:
         return []
 
-    notes_by_pcode = {
-        n["fm_pcode"]: n.get("note")
-        for n in per_row_notes
-        if n.get("iso3") == iso3
+    # Apply overrides keyed by (iso3, adam_admin_id). adam_admin_id is a
+    # bigint upstream but TOML preserves strings cleanly, so coerce
+    # both sides to str for the comparison.
+    ov_by_ge = {
+        str(o["adam_admin_id"]): o
+        for o in overrides
+        if o.get("iso3") == iso3 and o.get("adam_admin_id") is not None
     }
-    return [
-        {
-            "iso3": iso3,
-            "admin_level": 1,
-            "fm_pcode": r["fm_pcode"],
-            "fm_name": r["fm_name"],
-            "ge_adm1_id": r["ge_adm1_id"],
-            "adam_admin_name": r["adam_admin_name"],
-            "caveat_note": notes_by_pcode.get(r["fm_pcode"]),
-        }
-        for r in match_rows
-    ]
+    # Notes attach to ge polygons; same key as the override map.
+    notes_by_ge = {
+        str(n["adam_admin_id"]): n.get("note")
+        for n in per_row_notes
+        if n.get("iso3") == iso3 and n.get("adam_admin_id") is not None
+    }
 
-
-def build_aggregate_adm1_rows(
-    iso3: str, ge_admin: gpd.GeoDataFrame,
-) -> list[dict]:
-    """For aggregate_adam_to_fm countries: reverse spatial join.
-
-    Each ge_adm1 polygon maps to the FM adm1 polygon containing its
-    representative point. Falls back to max intersection-area when no
-    FM polygon strictly contains the point. ISL (75 municipalities →
-    8 regions) and DOM (33 provinces → 10 regions) are the main cases.
-    """
-    fm = load_fieldmaps_adm(iso3, 1)
-    g = filter_ge_country(ge_admin, iso3)
-    if fm is None or len(fm) == 0 or len(g) == 0:
-        logger.warning(
-            "Aggregate build for %s missing inputs (fm=%d, g=%d)",
-            iso3, 0 if fm is None else len(fm), len(g),
-        )
-        return []
-
-    pcode_col = next(
-        (c for c in ("adm1_pcode", "adm1_id", "adm1_src") if c in fm.columns),
-        None,
-    )
-    name_col = next(
-        (c for c in ("adm1_name", "name_1") if c in fm.columns), None,
-    )
-    if pcode_col is None or name_col is None:
-        logger.error(
-            "Can't resolve FM adm1 columns for %s — got %s",
-            iso3, list(fm.columns),
-        )
-        return []
-
-    # Normalize geom col name on the ge side and align CRS to FM.
-    if g.geometry.name != "geometry":
-        g = g.rename_geometry("geometry")
-    if g.crs != fm.crs:
-        g = g.to_crs(fm.crs)
-
-    rows = []
-    for _, gp in g.iterrows():
-        pt = gp.geometry.representative_point()
-        contains_mask = fm.geometry.contains(pt)
-        if contains_mask.any():
-            container = fm[contains_mask].iloc[0]
+    out: list[dict] = []
+    for r in match_rows:
+        ge_key = str(r["adam_admin_id"])
+        ov = ov_by_ge.get(ge_key)
+        if ov and ov.get("action") == "drop":
+            continue
+        if ov and ov.get("action") == "remap":
+            fm_pcode = ov.get("fm_pcode_override") or r["fm_pcode"]
+            fm_name = ov.get("fm_name_override") or r["fm_name"]
         else:
-            inter = fm.geometry.intersection(gp.geometry).area
-            if inter.max() == 0:
-                logger.warning(
-                    "ge_adm1 %s in %s overlaps no FM adm1 — skipped",
-                    gp["adm1_id"], iso3,
-                )
-                continue
-            container = fm.loc[inter.idxmax()]
-        rows.append({
+            fm_pcode = r["fm_pcode"]
+            fm_name = r["fm_name"]
+        out.append({
             "iso3": iso3,
             "admin_level": 1,
-            "fm_pcode": container[pcode_col],
-            "fm_name": container[name_col],
-            "ge_adm1_id": gp["adm1_id"],
-            "adam_admin_name": gp["adm1_name"],
-            "caveat_note": None,
+            "fm_pcode": fm_pcode,
+            "fm_name": fm_name,
+            "adam_admin_id": r["adam_admin_id"],
+            "adam_admin_name": r["adam_admin_name"],
+            "caveat_note": (
+                (ov.get("note") if ov else None)
+                or notes_by_ge.get(ge_key)
+            ),
         })
-    return rows
+    return out
 
 
 def build_fm_only_adm1_rows(
     iso3: str, fm_level: int = 1,
 ) -> list[dict]:
     """For ``fm_adm1_only`` countries: emit FM adm1 rows with
-    ``ge_adm1_id = NULL``.
+    ``adam_admin_id = NULL``.
 
     Same semantics as the GDACS-side ``fm_adm1_only``: ge_adm1 is
     coarser than FM (or absent), so we surface the FM units in the
@@ -306,7 +282,7 @@ def build_fm_only_adm1_rows(
             "admin_level": 1,
             "fm_pcode": r[pcode_col],
             "fm_name": _name(r),
-            "ge_adm1_id": None,
+            "adam_admin_id": None,
             "adam_admin_name": None,
             "caveat_note": None,
         }
@@ -322,6 +298,7 @@ def build_lookup(cfg: dict, ge_admin: gpd.GeoDataFrame) -> pd.DataFrame:
     """Produce the full lookup DataFrame in one pass."""
     per_row_notes = cfg.get("adam_per_row_notes", [])
     policies = cfg.get("adam_policy", {})
+    overrides = cfg.get("adam_row_overrides", [])
 
     rows: list[dict] = []
     for iso3 in ATLANTIC_ISO3:
@@ -351,19 +328,21 @@ def build_lookup(cfg: dict, ge_admin: gpd.GeoDataFrame) -> pd.DataFrame:
             continue
         if (
             len(fm_adm1) == 1
-            and action not in ("aggregate_adam_to_fm", "fm_adm1_only")
+            and action not in ("accept", "aggregate_adam_to_fm",
+                               "needs_manual_mapping", "fm_adm1_only")
         ):
-            # Same single-polygon FM short-circuit as GDACS build —
-            # `accept`/`needs_manual_mapping` on a 1-poly FM is a no-op.
             continue
 
-        if action in ("accept", "needs_manual_mapping"):
+        if action in ("accept", "aggregate_adam_to_fm",
+                      "needs_manual_mapping"):
+            # All three actions share the same per-ge emit logic.
+            # Policy names stay distinct because they carry different
+            # review-status info (clean / ge-finer / boundary-reform),
+            # but the lookup-build code path is one.
             fm_lvl = resolve_adam_fm_level(iso3, cfg)
             rows.extend(build_accept_adm1_rows(
-                iso3, fm_lvl, ge_admin, per_row_notes,
+                iso3, fm_lvl, ge_admin, per_row_notes, overrides,
             ))
-        elif action == "aggregate_adam_to_fm":
-            rows.extend(build_aggregate_adm1_rows(iso3, ge_admin))
         elif action == "fm_adm1_only":
             fm_lvl = resolve_adam_fm_level(iso3, cfg)
             rows.extend(build_fm_only_adm1_rows(iso3, fm_lvl))
@@ -375,7 +354,7 @@ def build_lookup(cfg: dict, ge_admin: gpd.GeoDataFrame) -> pd.DataFrame:
 
     df = pd.DataFrame(rows, columns=LOOKUP_COLUMNS)
     df.sort_values(
-        ["iso3", "admin_level", "fm_pcode", "ge_adm1_id"],
+        ["iso3", "admin_level", "fm_pcode", "adam_admin_id"],
         inplace=True, kind="stable",
     )
     df.reset_index(drop=True, inplace=True)
@@ -430,16 +409,16 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
                 )
         if action == "fm_adm1_only":
             sub = df[(df["iso3"] == iso3) & (df["admin_level"] == 1)]
-            if sub["ge_adm1_id"].notna().any():
-                bad = sub[sub["ge_adm1_id"].notna()]["fm_pcode"].tolist()
+            if sub["adam_admin_id"].notna().any():
+                bad = sub[sub["adam_admin_id"].notna()]["fm_pcode"].tolist()
                 raise AssertionError(
                     f"fm_adm1_only {iso3} has adm1 rows with non-NULL "
-                    f"ge_adm1_id: {bad[:5]}"
+                    f"adam_admin_id: {bad[:5]}"
                 )
 
-    # 3) PK uniqueness on (iso3, admin_level, fm_pcode, ge_adm1_id).
+    # 3) PK uniqueness on (iso3, admin_level, fm_pcode, adam_admin_id).
     pk_dupes = df.duplicated(
-        subset=["iso3", "admin_level", "fm_pcode", "ge_adm1_id"]
+        subset=["iso3", "admin_level", "fm_pcode", "adam_admin_id"]
     )
     if pk_dupes.any():
         sample = df[pk_dupes].head(5).to_dict("records")
@@ -454,18 +433,18 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
     )
 
 
-def validate_ge_adm1_ids(
+def validate_adam_admin_ids(
     df: pd.DataFrame, ge_admin: gpd.GeoDataFrame,
 ) -> None:
-    """Every non-NULL adm1 ge_adm1_id must reference a real ge_adm1
+    """Every non-NULL adm1 adam_admin_id must reference a real ge_adm1
     polygon. NULL is allowed (the ``fm_adm1_only`` fingerprint)."""
     valid_ids = set(ge_admin["adm1_id"].dropna().unique())
     adm1 = df[df["admin_level"] == 1]
-    referenced = set(adm1["ge_adm1_id"].dropna().unique())
+    referenced = set(adm1["adam_admin_id"].dropna().unique())
     unknown = referenced - valid_ids
     if unknown:
         raise AssertionError(
-            f"adm1 references ge_adm1_id values not in ge_adm1 layer: "
+            f"adm1 references adam_admin_id values not in ge_adm1 layer: "
             f"{sorted(unknown)[:10]}"
         )
 
@@ -525,7 +504,7 @@ def main() -> int:
     df = build_lookup(cfg, ge_admin)
 
     validate(df, cfg)
-    validate_ge_adm1_ids(df, ge_admin)
+    validate_adam_admin_ids(df, ge_admin)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, index=False)
