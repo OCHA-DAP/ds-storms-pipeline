@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.static.adam.admin import (  # noqa: E402
-    filter_ge_country, load_ge_adm1,
+    filter_adam_country, load_adam_admin,
 )
 from src.static.adam.inputs import (  # noqa: E402
     ATLANTIC_ISO3,
@@ -149,7 +149,7 @@ def write_review_geoms(review_iso3: list[str], ge: gpd.GeoDataFrame,
             else:
                 fm["fm_name"] = None
             fm_frames.append(fm[["iso3", "fm_pcode", "fm_name", "geometry"]])
-        g = filter_ge_country(ge, iso3)
+        g = filter_adam_country(ge, iso3)
         if len(g) > 0:
             # ge_adm1's geometry col is `shape`; normalize so the
             # GeoPackage layer is uniform with the FM side.
@@ -186,7 +186,7 @@ def main() -> int:
     logger.info("Loaded policy: %d adam_policy entries",
                 len(cfg.get("adam_policy", {})))
 
-    ge = load_ge_adm1(stage="dev")
+    ge = load_adam_admin(stage="dev")
     logger.info("Loaded %d ge_adm1 polys (%d distinct ISO3)",
                 len(ge), ge["iso3"].nunique())
 

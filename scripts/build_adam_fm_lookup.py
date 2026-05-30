@@ -79,8 +79,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.static.adam.admin import (  # noqa: E402
-    filter_ge_country,
-    load_ge_adm1,
+    filter_adam_country,
+    load_adam_admin,
 )
 from src.static.adam.inputs import (  # noqa: E402
     ATLANTIC_ISO3,
@@ -93,7 +93,7 @@ from src.static.adam.inputs import (  # noqa: E402
 )
 from src.static.adam.matcher import (  # noqa: E402
     match_country,
-    match_per_ge_country,
+    match_per_adam_admin,
 )
 
 DEFAULT_LOCAL_OUT = REPO_ROOT / "data" / "adam_fm_lookup.csv"
@@ -102,8 +102,17 @@ DB_TABLE = "adam_fm_lookup"
 
 LOOKUP_COLUMNS = [
     "iso3", "admin_level", "fm_pcode", "fm_name",
-    "adam_admin_id", "adam_admin_name", "caveat_note",
+    "adam_admin_id", "adam_admin_name",
+    "iou", "caveat_kind", "caveat_note",
 ]
+
+# caveat_kind controlled vocabulary — categorical labels the alert
+# text uses to pick a footnote template. NULL = clean row, no caveat.
+CAVEAT_NO_ADAM_AT_ADM1 = "no_adam_at_adm1"
+CAVEAT_SOURCE_COARSER_THAN_FM = "source_coarser_than_fm"
+CAVEAT_PRE_SPLIT_BOUNDARY = "pre_split_boundary"
+CAVEAT_MANUAL_REMAP = "manual_remap"
+CAVEAT_FM_ONLY_POLICY = "fm_only_policy"
 
 logger = logging.getLogger(__name__)
 
@@ -115,140 +124,51 @@ logger = logging.getLogger(__name__)
 def build_adm0_row(
     iso3: str,
     fm_adm0: gpd.GeoDataFrame | pd.DataFrame | None,
-    ge_country: gpd.GeoDataFrame,
+    adam_country: gpd.GeoDataFrame,
 ) -> dict:
     """Emit the single adm0 row for one country.
 
     ``fm_pcode`` = ISO3 (uniform across the lookup, matches runtime
     joins). ``fm_name`` prefers FM's ``adm0_name``, falls back to
-    ge_adm1's ``adm0_name``. ``adam_admin_name`` = ge_adm1's
-    ``adm0_name`` because that IS what ADAM emits at adm_level=0.
-    ``adam_admin_id`` is NULL — ge_adm1 has no adm0 records.
+    ADAM admin layer's ``adm0_name``. ``adam_admin_name`` = ADAM
+    admin layer's ``adm0_name`` because that IS what ADAM emits at
+    adm_level=0. ``adam_admin_id`` is NULL — the ADAM admin layer
+    has no adm0 records.
     """
     fm_name = None
     if fm_adm0 is not None and len(fm_adm0):
         row = fm_adm0.iloc[0]
         if "adm0_name" in fm_adm0.columns and pd.notna(row.get("adm0_name")):
             fm_name = row["adm0_name"]
-    ge_adm0_name = None
-    if len(ge_country) and "adm0_name" in ge_country.columns:
-        v = ge_country.iloc[0]["adm0_name"]
+    adam_adm0_name = None
+    if len(adam_country) and "adm0_name" in adam_country.columns:
+        v = adam_country.iloc[0]["adm0_name"]
         if pd.notna(v):
-            ge_adm0_name = v
+            adam_adm0_name = v
     if not fm_name:
-        fm_name = ge_adm0_name or iso3
+        fm_name = adam_adm0_name or iso3
     return {
         "iso3": iso3,
         "admin_level": 0,
         "fm_pcode": iso3,
         "fm_name": fm_name,
         "adam_admin_id": None,
-        "adam_admin_name": ge_adm0_name or iso3,
+        "adam_admin_name": adam_adm0_name or iso3,
+        "iou": None,
+        "caveat_kind": None,
         "caveat_note": None,
     }
 
 
-def build_accept_adm1_rows(
-    iso3: str,
-    fm_level: int,
-    ge_admin: gpd.GeoDataFrame,
-    per_row_notes: list[dict],
-    overrides: list[dict],
-    low_iou: float = 0.5,
-) -> list[dict]:
-    """Per-ge spatial crosswalk, one row per ge polygon.
-
-    Used by both ``accept`` and ``aggregate_adam_to_fm`` (and
-    ``needs_manual_mapping``) — they all share the same emit
-    semantics now: iterate the ge_adm1 side, take the best-IoU FM
-    polygon per ge, surface manual overrides on top. The names of
-    the three policies stay distinct because they carry different
-    review-status information for humans, but the build path is one.
-
-    Manual overrides (``[[adam_row_overrides]]``) handle the
-    spatially-wrong best-IoU picks the IoU matcher can't avoid
-    (e.g. BHS Berry Islands → ge "North Andros" picked by IoU because
-    Berry Islands sits in the broader Andros region). Override actions:
-
-      action = "drop"          — emit no row for this adam_admin_id
-      action = "remap"         — change fm_pcode/fm_name to
-                                  fm_pcode_override / fm_name_override
-
-    ``needs_manual_mapping`` carries ``[[adam_per_row_notes]]`` as
-    ``caveat_note`` on the emitted row.
-    """
-    match_rows = match_per_ge_country(
-        iso3, ge_admin, low_iou=low_iou, fm_level=fm_level,
-    )
-    # Drop placeholder rows (no_overlap, fm_empty, ge_empty, etc.) —
-    # we only emit rows where both sides exist. ge polygons with
-    # no FM overlap stay out of the lookup.
-    match_rows = [
-        r for r in match_rows
-        if r.get("fm_pcode") and r.get("adam_admin_id")
-    ]
-    if not match_rows:
-        return []
-
-    # Apply overrides keyed by (iso3, adam_admin_id). adam_admin_id is a
-    # bigint upstream but TOML preserves strings cleanly, so coerce
-    # both sides to str for the comparison.
-    ov_by_ge = {
-        str(o["adam_admin_id"]): o
-        for o in overrides
-        if o.get("iso3") == iso3 and o.get("adam_admin_id") is not None
-    }
-    # Notes attach to ge polygons; same key as the override map.
-    notes_by_ge = {
-        str(n["adam_admin_id"]): n.get("note")
-        for n in per_row_notes
-        if n.get("iso3") == iso3 and n.get("adam_admin_id") is not None
-    }
-
-    out: list[dict] = []
-    for r in match_rows:
-        ge_key = str(r["adam_admin_id"])
-        ov = ov_by_ge.get(ge_key)
-        if ov and ov.get("action") == "drop":
-            continue
-        if ov and ov.get("action") == "remap":
-            fm_pcode = ov.get("fm_pcode_override") or r["fm_pcode"]
-            fm_name = ov.get("fm_name_override") or r["fm_name"]
-        else:
-            fm_pcode = r["fm_pcode"]
-            fm_name = r["fm_name"]
-        out.append({
-            "iso3": iso3,
-            "admin_level": 1,
-            "fm_pcode": fm_pcode,
-            "fm_name": fm_name,
-            "adam_admin_id": r["adam_admin_id"],
-            "adam_admin_name": r["adam_admin_name"],
-            "caveat_note": (
-                (ov.get("note") if ov else None)
-                or notes_by_ge.get(ge_key)
-            ),
-        })
-    return out
-
-
-def build_fm_only_adm1_rows(
-    iso3: str, fm_level: int = 1,
-) -> list[dict]:
-    """For ``fm_adm1_only`` countries: emit FM adm1 rows with
-    ``adam_admin_id = NULL``.
-
-    Same semantics as the GDACS-side ``fm_adm1_only``: ge_adm1 is
-    coarser than FM (or absent), so we surface the FM units in the
-    lookup with no ge attachment. Downstream sources (NHC, etc.) can
-    still attach via fm_pcode; ADAM adm1 rows for this iso3 land as
-    by-design unmatched.
+def _resolve_fm_units(
+    iso3: str, fm_level: int,
+) -> list[tuple[str, str | None]]:
+    """Return the full list of (fm_pcode, fm_name) for an iso3's FM
+    units at ``fm_level``. Used by the FM-centric emit pass to find
+    which FM admin1 units didn't receive a source attach.
     """
     fm = load_fieldmaps_adm(iso3, fm_level)
     if fm is None or len(fm) == 0:
-        logger.warning(
-            "fm_adm1_only %s: FM empty at adm%d", iso3, fm_level,
-        )
         return []
     pcode_col = next(
         (c for c in (f"adm{fm_level}_pcode", f"adm{fm_level}_id",
@@ -260,33 +180,219 @@ def build_fm_only_adm1_rows(
          if c in fm.columns),
         None,
     )
-    if pcode_col is None or name_col is None:
+    if pcode_col is None:
         logger.error(
-            "Can't resolve FM adm%d columns for %s — got %s",
+            "Can't resolve FM adm%d pcode for %s — got %s",
             fm_level, iso3, list(fm.columns),
         )
         return []
-
-    def _name(row) -> str | None:
-        v = row[name_col]
-        if v is None or (isinstance(v, float) and v != v):
+    units: list[tuple[str, str | None]] = []
+    for _, r in fm.iterrows():
+        pcode = r[pcode_col]
+        if pd.isna(pcode):
+            continue
+        nm = r[name_col] if name_col else None
+        if nm is None or (isinstance(nm, float) and nm != nm):
             if (iso3 in FM_ADM1_NAME_FALLBACK_ISOS
-                    and "adm0_name" in row):
-                return fallback_fm_name_from_adm0(row["adm0_name"])
-            return None
-        return v
+                    and "adm0_name" in r):
+                nm = fallback_fm_name_from_adm0(r["adm0_name"])
+            else:
+                nm = None
+        units.append((pcode, nm))
+    return units
 
+
+def build_accept_adm1_rows(
+    iso3: str,
+    fm_level: int,
+    adam_admin: gpd.GeoDataFrame,
+    per_row_notes: list[dict],
+    overrides: list[dict],
+    low_iou: float = 0.5,
+) -> list[dict]:
+    """Per-ADAM-admin spatial crosswalk PLUS FM-centric NULL-source rows.
+
+    Shared build path for ``accept``, ``aggregate_adam_to_fm`` and
+    ``needs_manual_mapping``. Two emit passes:
+
+      Pass 1 — Per-ADAM-admin (one row per ADAM polygon)
+        match_per_adam_admin gives best-IoU FM per ADAM polygon.
+        Overrides apply on top:
+          action = "drop"   — emit no row for this adam_admin_id
+          action = "remap"  — change fm_pcode/fm_name to override
+          action = "caveat" — keep IoU pick, attach caveat metadata
+
+      Pass 2 — FM-centric NULL-source (one row per uncovered FM unit)
+        After pass 1, find FM admin1 units that didn't receive an
+        attached source (either no IoU match, or every match was
+        dropped/remapped away). Emit a row per uncovered FM with
+        adam_admin_id=NULL, iou=NULL, caveat_kind="no_adam_at_adm1".
+        FM-keyed overrides apply here too:
+          action = "mark_no_source" — force NULL-source row even if
+                                       a weak IoU pick exists; allows
+                                       custom caveat_note
+          action = "caveat"         — attach caveat to the NULL-source
+                                       row that auto-emitted
+
+    Result: every FM admin1 unit gets at least one row. FM units with
+    one source attached get one row. FM units with multiple sources
+    (aggregate case) get N rows. FM units with no source get one
+    NULL-source row with a caveat explaining why.
+    """
+    # Per-source matcher output.
+    match_rows = match_per_adam_admin(
+        iso3, adam_admin, low_iou=low_iou, fm_level=fm_level,
+    )
+    # Drop placeholder rows (no_overlap, fm_empty, etc.) — only emit
+    # rows where both sides exist.
+    match_rows = [
+        r for r in match_rows
+        if r.get("fm_pcode") and r.get("adam_admin_id")
+    ]
+
+    # Index overrides + per_row_notes for fast lookup. adam_admin_id
+    # is bigint upstream; coerce both sides to str so TOML
+    # representations compare cleanly. fm_pcode is already str.
+    src_overrides = {
+        str(o["adam_admin_id"]): o
+        for o in overrides
+        if o.get("iso3") == iso3 and o.get("adam_admin_id") is not None
+        and o.get("action") in ("drop", "remap")
+    }
+    src_caveats = {
+        str(o["adam_admin_id"]): o
+        for o in overrides
+        if o.get("iso3") == iso3 and o.get("adam_admin_id") is not None
+        and o.get("action") == "caveat"
+    }
+    fm_force_null = {
+        o["fm_pcode"]: o
+        for o in overrides
+        if o.get("iso3") == iso3 and o.get("fm_pcode") is not None
+        and o.get("action") == "mark_no_source"
+    }
+    fm_caveats = {
+        o["fm_pcode"]: o
+        for o in overrides
+        if o.get("iso3") == iso3 and o.get("fm_pcode") is not None
+        and o.get("action") == "caveat"
+    }
+    src_notes = {
+        str(n["adam_admin_id"]): n.get("note")
+        for n in per_row_notes
+        if n.get("iso3") == iso3 and n.get("adam_admin_id") is not None
+    }
+
+    out: list[dict] = []
+    covered_fm_pcodes: set[str] = set()
+
+    # ── Pass 1: per-source emit ──
+    for r in match_rows:
+        src_key = str(r["adam_admin_id"])
+        ov = src_overrides.get(src_key)
+        if ov and ov.get("action") == "drop":
+            # Source-side drop — record nothing in lookup. TOML is the
+            # audit trail.
+            continue
+        # Decide target FM (IoU pick or remap override).
+        if ov and ov.get("action") == "remap":
+            fm_pcode = ov.get("fm_pcode_override") or r["fm_pcode"]
+            fm_name = ov.get("fm_name_override") or r["fm_name"]
+            caveat_kind = ov.get("caveat_kind") or CAVEAT_MANUAL_REMAP
+            caveat_note = ov.get("note")
+        else:
+            fm_pcode = r["fm_pcode"]
+            fm_name = r["fm_name"]
+            caveat_kind = None
+            caveat_note = None
+        # Force-null on FM side trumps a per-source attach.
+        if fm_pcode in fm_force_null:
+            continue
+        # Apply source-keyed caveat if no override took it.
+        src_cv = src_caveats.get(src_key)
+        if src_cv and not caveat_note:
+            caveat_kind = src_cv.get("caveat_kind") or caveat_kind
+            caveat_note = src_cv.get("note") or caveat_note
+        # Fallback to per_row_notes (legacy mechanism).
+        if not caveat_note and src_key in src_notes:
+            caveat_note = src_notes[src_key]
+        out.append({
+            "iso3": iso3,
+            "admin_level": 1,
+            "fm_pcode": fm_pcode,
+            "fm_name": fm_name,
+            "adam_admin_id": r["adam_admin_id"],
+            "adam_admin_name": r["adam_admin_name"],
+            "iou": r.get("iou"),
+            "caveat_kind": caveat_kind,
+            "caveat_note": caveat_note,
+        })
+        covered_fm_pcodes.add(fm_pcode)
+
+    # ── Pass 2: FM-centric NULL-source rows ──
+    # Every FM admin1 unit that didn't receive a source attach (or was
+    # explicitly mark_no_source'd) gets a row with adam_admin_id=NULL.
+    fm_units = _resolve_fm_units(iso3, fm_level)
+    for fm_pcode, fm_name in fm_units:
+        if fm_pcode in covered_fm_pcodes:
+            continue
+        force = fm_force_null.get(fm_pcode)
+        cv = fm_caveats.get(fm_pcode)
+        if force:
+            kind = force.get("caveat_kind") or CAVEAT_NO_ADAM_AT_ADM1
+            note = force.get("note")
+        elif cv:
+            kind = cv.get("caveat_kind") or CAVEAT_NO_ADAM_AT_ADM1
+            note = cv.get("note")
+        else:
+            kind = CAVEAT_NO_ADAM_AT_ADM1
+            note = None
+        out.append({
+            "iso3": iso3,
+            "admin_level": 1,
+            "fm_pcode": fm_pcode,
+            "fm_name": fm_name,
+            "adam_admin_id": None,
+            "adam_admin_name": None,
+            "iou": None,
+            "caveat_kind": kind,
+            "caveat_note": note,
+        })
+
+    return out
+
+
+def build_fm_only_adm1_rows(
+    iso3: str, fm_level: int = 1,
+    policy_note: str | None = None,
+) -> list[dict]:
+    """For ``fm_adm1_only`` countries: emit FM adm1 rows with
+    ``adam_admin_id = NULL`` for every FM unit.
+
+    The ADAM admin layer is coarser than FM (or has no useful adm1
+    breakdown), so we surface the FM units in the lookup with no
+    source attached. ``caveat_kind`` = ``fm_only_policy`` so the
+    alert text knows this is policy-driven, not a per-row gap.
+    """
+    fm_units = _resolve_fm_units(iso3, fm_level)
+    if not fm_units:
+        logger.warning(
+            "fm_adm1_only %s: FM empty at adm%d", iso3, fm_level,
+        )
+        return []
     return [
         {
             "iso3": iso3,
             "admin_level": 1,
-            "fm_pcode": r[pcode_col],
-            "fm_name": _name(r),
+            "fm_pcode": fm_pcode,
+            "fm_name": fm_name,
             "adam_admin_id": None,
             "adam_admin_name": None,
-            "caveat_note": None,
+            "iou": None,
+            "caveat_kind": CAVEAT_FM_ONLY_POLICY,
+            "caveat_note": policy_note,
         }
-        for _, r in fm.iterrows()
+        for fm_pcode, fm_name in fm_units
     ]
 
 
@@ -294,7 +400,7 @@ def build_fm_only_adm1_rows(
 # Driver
 # ─────────────────────────────────────────────────────────────────────
 
-def build_lookup(cfg: dict, ge_admin: gpd.GeoDataFrame) -> pd.DataFrame:
+def build_lookup(cfg: dict, adam_admin: gpd.GeoDataFrame) -> pd.DataFrame:
     """Produce the full lookup DataFrame in one pass."""
     per_row_notes = cfg.get("adam_per_row_notes", [])
     policies = cfg.get("adam_policy", {})
@@ -309,8 +415,8 @@ def build_lookup(cfg: dict, ge_admin: gpd.GeoDataFrame) -> pd.DataFrame:
 
         # ── adm0 ──
         fm_adm0 = load_fieldmaps_adm(iso3, 0)
-        ge_country = filter_ge_country(ge_admin, iso3)
-        rows.append(build_adm0_row(iso3, fm_adm0, ge_country))
+        adam_country = filter_adam_country(adam_admin, iso3)
+        rows.append(build_adm0_row(iso3, fm_adm0, adam_country))
 
         # ── adm1 ──
         action = policies.get(iso3, {}).get("action")
@@ -341,11 +447,14 @@ def build_lookup(cfg: dict, ge_admin: gpd.GeoDataFrame) -> pd.DataFrame:
             # but the lookup-build code path is one.
             fm_lvl = resolve_adam_fm_level(iso3, cfg)
             rows.extend(build_accept_adm1_rows(
-                iso3, fm_lvl, ge_admin, per_row_notes, overrides,
+                iso3, fm_lvl, adam_admin, per_row_notes, overrides,
             ))
         elif action == "fm_adm1_only":
             fm_lvl = resolve_adam_fm_level(iso3, cfg)
-            rows.extend(build_fm_only_adm1_rows(iso3, fm_lvl))
+            rows.extend(build_fm_only_adm1_rows(
+                iso3, fm_lvl,
+                policy_note=policies.get(iso3, {}).get("note"),
+            ))
         else:
             logger.warning(
                 "Unknown action '%s' for %s — skipping adm1",
@@ -400,11 +509,14 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
             raise AssertionError(
                 f"country_only {iso3} has {n} adm1 rows (expected 0)"
             )
-        if action == "accept" and n == 0:
+        if action in ("accept", "aggregate_adam_to_fm",
+                      "needs_manual_mapping"):
+            # FM-centric emit guarantees at least one row per FM unit;
+            # zero rows means FM was empty.
             fm = load_fieldmaps_adm(iso3, 1)
-            if fm is not None and len(fm) > 1:
+            if fm is not None and len(fm) > 0 and n == 0:
                 raise AssertionError(
-                    f"accept {iso3} has 0 adm1 rows but FM has "
+                    f"{action} {iso3} has 0 adm1 rows but FM has "
                     f"{len(fm)} polygons"
                 )
         if action == "fm_adm1_only":
@@ -434,11 +546,11 @@ def validate(df: pd.DataFrame, cfg: dict) -> None:
 
 
 def validate_adam_admin_ids(
-    df: pd.DataFrame, ge_admin: gpd.GeoDataFrame,
+    df: pd.DataFrame, adam_admin: gpd.GeoDataFrame,
 ) -> None:
     """Every non-NULL adm1 adam_admin_id must reference a real ge_adm1
     polygon. NULL is allowed (the ``fm_adm1_only`` fingerprint)."""
-    valid_ids = set(ge_admin["adm1_id"].dropna().unique())
+    valid_ids = set(adam_admin["adm1_id"].dropna().unique())
     adm1 = df[df["admin_level"] == 1]
     referenced = set(adm1["adam_admin_id"].dropna().unique())
     unknown = referenced - valid_ids
@@ -492,19 +604,19 @@ def main() -> int:
     logger.info(
         "Loading ge_adm1 layer (stage=%s, local-first)", args.mode,
     )
-    ge_admin = load_ge_adm1(stage=args.mode)
+    adam_admin = load_adam_admin(stage=args.mode)
     logger.info(
         "  %d ge_adm1 polygons across %d distinct ISO3 codes",
-        len(ge_admin), ge_admin["iso3"].nunique(),
+        len(adam_admin), adam_admin["iso3"].nunique(),
     )
 
     logger.info(
         "Building lookup for %d Atlantic countries", len(ATLANTIC_ISO3),
     )
-    df = build_lookup(cfg, ge_admin)
+    df = build_lookup(cfg, adam_admin)
 
     validate(df, cfg)
-    validate_adam_admin_ids(df, ge_admin)
+    validate_adam_admin_ids(df, adam_admin)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, index=False)
