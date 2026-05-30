@@ -756,3 +756,78 @@ note = "14 FM parishes vs 14 ge parishes; only 2 clean, 9 multi_candidate, 3 low
 [adam_policy.MTQ]
 action = "needs_manual_mapping"
 note = "4 FM communes vs 4 ge — half are multi_candidate. Likely the same canton/commune restructuring as some of the other French overseas territories. Best-IoU pick attaches but flagged."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FM ↔ ADAM per-row overrides
+# ──────────────────────────────────────────────────────────────────────
+# Override the matcher's per-ADAM-admin spatial pick. Four actions:
+#
+#   action = "drop"            — source-keyed; emit no row at all for
+#                                this adam_admin_id (TOML is the audit).
+#   action = "remap"           — source-keyed; change the FM target to
+#                                fm_pcode_override / fm_name_override.
+#   action = "mark_no_source"  — fm-keyed; force a NULL-source row for
+#                                this FM unit with the given caveat.
+#   action = "caveat"          — keyed either side; annotate without
+#                                changing the mapping.
+#
+# caveat_kind controlled vocabulary (informs alert footnote template):
+#   no_adam_at_adm1        FM unit has no source coverage
+#   source_coarser_than_fm Source polygon covers multiple FM units
+#   pre_split_boundary     Source predates an FM admin-reform
+#   manual_remap           IoU pick was overridden manually
+#   fm_only_policy         Country policy is fm_adm1_only
+
+# ─── BHS — three remaps, one caveat ────────────────────────────────────
+# IoU picked the geographically-larger neighboring FM unit in three
+# cases because ge polygons are coarser than FM in some parts of the
+# island chain. Name correspondence is unambiguous; remap.
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901501
+action = "remap"
+fm_pcode_override = "BHS-20201113-06"
+fm_name_override = "Central Abaco"
+caveat_kind = "manual_remap"
+note = "IoU picked FM Hope Town (0.16); ge name 'Central Abaco' corresponds to FM Central Abaco."
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901502
+action = "remap"
+fm_pcode_override = "BHS-20201113-07"
+fm_name_override = "Central Andros"
+caveat_kind = "manual_remap"
+note = "IoU picked FM North Andros (0.47); ge name 'Central Andros' corresponds to FM Central Andros."
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901507
+action = "remap"
+fm_pcode_override = "BHS-20201113-09"
+fm_name_override = "City of Freeport"
+caveat_kind = "manual_remap"
+note = "IoU picked FM West Grand Bahama (0.64); ge name 'Freeport' corresponds to FM City of Freeport."
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901518
+action = "caveat"
+caveat_kind = "source_coarser_than_fm"
+note = "ge polygon labeled 'Under National Administration' (GAUL placeholder) maps spatially to FM New Providence (Nassau). The IoU pick is correct (0.51); flagging because the source name is opaque — alerts using ADAM's emitted name 'Under National Administration' for a BHS row should know it routes to New Providence."
+
+# ─── USA — drop the federal-lands placeholder ─────────────────────────
+[[adam_row_overrides]]
+iso3 = "USA"
+adam_admin_id = 902134
+action = "drop"
+note = "ge 'Under National Administration' is a GAUL placeholder for federal/unincorporated lands. IoU picked FM Michigan (0.32) by spatial drift; no state-level FM correspondence. Drop."
+
+# ─── VGB — drop the catch-all placeholder ──────────────────────────────
+[[adam_row_overrides]]
+iso3 = "VGB"
+adam_admin_id = 39505
+action = "drop"
+note = "ge 'Other Islands' is a catch-all polygon mapping to FM 'uncertain' (FM's own placeholder). Both are non-real admin units. Drop."
