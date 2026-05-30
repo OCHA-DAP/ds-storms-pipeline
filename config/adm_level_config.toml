@@ -577,16 +577,16 @@ note = "GDACS VEN-DFR = 'Dependencias Federales' (Venezuelan offshore islands, ~
 # ──────────────────────────────────────────────────────────────────────
 # Mirror of [gdacs_policy.<ISO3>] but for the FM↔ADAM lookup. ADAM
 # (WFP) emits exposure rows by admin name; the intermediate boundary
-# layer is `ge_adm1.parquet` (WFP's published global adm1 layer, same
-# vendor). Policy choices reflect the ge_adm1 ↔ FM relationship, NOT
-# the ADAM ↔ FM relationship — because ADAM's CSVs use ge_adm1 names
+# layer is the ADAM source boundary file (the ADAM source layer's filename) (WFP's published global adm1 layer, same
+# vendor). Policy choices reflect the ADAM ↔ FM relationship, NOT
+# the ADAM ↔ FM relationship — because ADAM's CSVs use ADAM admin layer names
 # verbatim. Same six actions as gdacs_policy:
 #   accept, country_only, aggregate_adam_to_fm, fm_adm1_only,
 #   needs_manual_mapping, no_adam_source
 # This is a first-pass seed — most ISO3s default to country_only
 # (no entry) until reviewed.
 
-# Clean 1:1 ge_adm1 ↔ FM at adm1 (matcher IoU ≥ 0.99 in smoke run)
+# Clean 1:1 ADAM ↔ FM at adm1 (matcher IoU ≥ 0.99 in smoke run)
 [adam_policy.HTI]
 action = "accept"
 
@@ -595,25 +595,25 @@ action = "accept"
 
 [adam_policy.BMU]
 action = "accept"
-note = "ge_adm1 and FM both have the 9 parishes; clean match. NOTE: ADAM's published CSV often emits placeholder values ('---', 'Under National Administration') for BMU adm1 — that's an ADAM-side data quality issue, not a lookup gap. Downstream rows that don't match adam_admin_name simply won't attach (left-join semantics)."
+note = "the ADAM admin layer and FM both have the 9 parishes; clean match. NOTE: ADAM's published CSV often emits placeholder values ('---', 'Under National Administration') for BMU adm1 — that's an ADAM-side data quality issue, not a lookup gap. Downstream rows that don't match adam_admin_name simply won't attach (left-join semantics)."
 
-# ge_adm1 finer than FM — reverse spatial join rolls ge polygons up
+# ADAM admin layer finer than FM — reverse spatial join rolls ge polygons up
 # to the containing FM polygon. Each FM region gets multiple
-# (ge_adm1_id, adam_admin_name) lookup rows.
+# (the ADAM admin layer_id, adam_admin_name) lookup rows.
 [adam_policy.ISL]
 action = "aggregate_adam_to_fm"
-note = "FM has 8 regions; ge_adm1 has 75 municipalities (sveitarfélög). ADAM emits the municipality names. Aggregation maps each municipality to its containing FM region."
+note = "FM has 8 regions; the ADAM admin layer has 75 municipalities (sveitarfélög). ADAM emits the municipality names. Aggregation maps each municipality to its containing FM region."
 
 [adam_policy.DOM]
 action = "aggregate_adam_to_fm"
-note = "FM has 10 regions; ge_adm1 has 33 provinces. ADAM emits province names. Aggregation maps each province to its containing FM region."
+note = "FM has 10 regions; the ADAM admin layer has 33 provinces. ADAM emits province names. Aggregation maps each province to its containing FM region."
 
 # Same pre-2011 Cuba reform that affects the GDACS lookup — ADAM
-# inherits the issue because ge_adm1 still carries the old La Habana
+# inherits the issue because the ADAM admin layer still carries the old La Habana
 # boundary that became Artemisa + Mayabeque.
 [adam_policy.CUB]
 action = "needs_manual_mapping"
-note = "Same Artemisa/Mayabeque pre-split caveat as gdacs_policy.CUB. ge_adm1 has 16 provinces (matching FM count) but a couple of names lag the modern boundary — see [[adam_per_row_notes]]."
+note = "Same Artemisa/Mayabeque pre-split caveat as gdacs_policy.CUB. the ADAM admin layer has 16 provinces (matching FM count) but a couple of names lag the modern boundary — see [[adam_per_row_notes]]."
 
 # ADAM has no usable source for these — same exclusion list as
 # gdacs_policy. ANT dissolved 2010; XIM has no FM parquet either.
@@ -626,7 +626,7 @@ action = "no_adam_source"
 note = "No FM parquet for XIM."
 
 
-# ── accept: clean 1:1 ge_adm1 ↔ FM ────────────────────────────────────
+# ── accept: clean 1:1 ADAM ↔ FM ────────────────────────────────────
 # Auto-classified by build_adam_review_artifacts.py. Mean IoU ≥ 0.6 and
 # fm_count ≈ ge_count (within 2×). Mild noise (low_iou, multiple_
 # candidates) is fine; the matcher picks best-IoU which is the right
@@ -652,7 +652,7 @@ action = "accept"
 
 [adam_policy.MSR]
 action = "country_only"
-note = "ge_adm1 has 3 parishes (Saint Anthony, Saint Georges, Saint Peter); ADAM emits 7 settlement names (Brodericks, Central, East, Plymouth, Salem, ...). Different admin hierarchies entirely — no useful name match possible. Attaches at adm0 only."
+note = "ADAM emits settlement-level names for MSR (Brodericks, Central, East, Plymouth, Salem, …) — Plymouth is the volcano-destroyed former capital, so these are real MSR settlements. WFP appears to use a finer admin level for MSR than its standard adm1 publication: our reference adm1 layer has 3 parishes (Saint Anthony, Saint Georges, Saint Peter) that don't correspond. No usable per-name crosswalk to FM's 3 parishes — country_only attaches ADAM exposure at adm0 only until a finer FM-side breakdown becomes available."
 
 [adam_policy.SPM]
 action = "accept"
@@ -671,11 +671,11 @@ note = "88% clean. 7/8 FM parishes match; Saint John / Saint John's normalises f
 
 [adam_policy.JAM]
 action = "accept"
-note = "88% clean. 14 FM parishes match cleanly; 2 of FM's 16 are offshore cays (Pedro Cays etc.) that ge_adm1 doesn't carry → no_overlap. Acceptable loss."
+note = "88% clean. 14 FM parishes match cleanly; 2 of FM's 16 are offshore cays (Pedro Cays etc.) that the ADAM admin layer doesn't carry → no_overlap. Acceptable loss."
 
 [adam_policy.USA]
 action = "accept"
-note = "88% clean. 45/51 FM states clean; 6 multiple_candidates are coastal states where ge_adm1 has both the state polygon and a small offshore admin (DC, similar)."
+note = "88% clean. 45/51 FM states clean; 6 multiple_candidates are coastal states where the ADAM admin layer has both the state polygon and a small offshore admin (DC, similar)."
 
 [adam_policy.NLD]
 action = "accept"
@@ -698,44 +698,44 @@ action = "accept"
 note = "FM 32 districts vs ge 22 — accept emits 22 lookup rows. Berry Islands, Black Point, Mangrove Cay etc. (10 FM units) have no ge counterpart and won't surface ADAM exposure at adm1; that's accurate to the source — ADAM doesn't emit names for those districts either."
 
 
-# ── aggregate_adam_to_fm: ge_adm1 finer than FM ──────────────────────
+# ── aggregate_adam_to_fm: ADAM admin layer finer than FM ──────────────────────
 # Reverse spatial join: each ge polygon → its containing FM polygon.
 # Triggered when ge_count >= 2 * fm_count, or when FM has 1 polygon
 # and ge has many.
 
 [adam_policy.AIA]
 action = "aggregate_adam_to_fm"
-note = "FM treats AIA as 1 polygon; ge_adm1 has 10 villages. All 10 villages aggregate to the single FM AIA polygon."
+note = "FM treats AIA as 1 polygon; the ADAM admin layer has 10 villages. All 10 villages aggregate to the single FM AIA polygon."
 
 [adam_policy.IRL]
 action = "aggregate_adam_to_fm"
-note = "FM has 4 regions; ge_adm1 has 27 counties. Each county rolls up to its containing FM region."
+note = "FM has 4 regions; the ADAM admin layer has 27 counties. Each county rolls up to its containing FM region."
 
 [adam_policy.PRT]
 action = "aggregate_adam_to_fm"
-note = "FM has 20 regions; ge_adm1 has 29 finer subdivisions. Auto-classifier picked needs_manual_mapping based on multi_candidate count, but the shape is the same aggregate pattern as ISL/DOM/IRL — ge is just finer."
+note = "FM has 20 regions; the ADAM admin layer has 29 finer subdivisions. Auto-classifier picked needs_manual_mapping based on multi_candidate count, but the shape is the same aggregate pattern as ISL/DOM/IRL — ge is just finer."
 
 
-# ── fm_adm1_only: ge_adm1 too coarse to disambiguate FM ──────────────
-# FM has real adm1 units but ge_adm1 has 1 polygon (or few) for the
-# country. Surfaces FM rows with ge_adm1_id=NULL so other sources can
+# ── fm_adm1_only: ADAM admin layer too coarse to disambiguate FM ──────────────
+# FM has real adm1 units but the ADAM admin layer has 1 polygon (or few) for the
+# country. Surfaces FM rows with the ADAM admin layer_id=NULL so other sources can
 # still attach via fm_pcode; ADAM adm1 deliberately doesn't attach.
 
 [adam_policy.GLP]
 action = "fm_adm1_only"
-note = "FM has 2 polygons (mainland Guadeloupe + offshore); ge_adm1 has 1. ADAM rows for GLP are also affected by the upstream iso3-misattribution bug (admin_names that belong to other countries), so the disable-adm1-attach behaviour of fm_adm1_only is the right outcome either way."
+note = "FM has 2 polygons (mainland Guadeloupe + offshore); the ADAM admin layer has 1. ADAM rows for GLP are also affected by the upstream iso3-misattribution bug (admin_names that belong to other countries), so the disable-adm1-attach behaviour of fm_adm1_only is the right outcome either way."
 
 [adam_policy.VIR]
 action = "fm_adm1_only"
-note = "FM has 3 islands (St Thomas, St John, St Croix); ge_adm1 has 1 polygon for the territory. ge can't disambiguate the 3 FM units, so surface them with ge_adm1_id=NULL."
+note = "FM has 3 islands (St Thomas, St John, St Croix); the ADAM admin layer has 1 polygon for the territory. ge can't disambiguate the 3 FM units, so surface them with the ADAM admin layer_id=NULL."
 
 [adam_policy.CYM]
 action = "fm_adm1_only"
-note = "FM has 6 districts; ge_adm1 has 3. 0% clean — every match is partial IoU. Safer to surface FM rows with NULL than guess via best-IoU."
+note = "FM has 6 districts; the ADAM admin layer has 3. 0% clean — every match is partial IoU. Safer to surface FM rows with NULL than guess via best-IoU."
 
 [adam_policy.GRL]
 action = "fm_adm1_only"
-note = "FM has 6 municipalities (post-2009 reform); ge_adm1 has 3 (pre-2009). Same boundary-reform mismatch as gdacs_policy.GRL — needs_manual_mapping there, fm_adm1_only here because ge_adm1's 3 polygons aren't the right level."
+note = "FM has 6 municipalities (post-2009 reform); the ADAM admin layer has 3 (pre-2009). Same boundary-reform mismatch as gdacs_policy.GRL — needs_manual_mapping there, fm_adm1_only here because the ADAM admin layer's 3 polygons aren't the right level."
 
 
 # ── country_only: don't attach adm1 even though FM has units ─────────

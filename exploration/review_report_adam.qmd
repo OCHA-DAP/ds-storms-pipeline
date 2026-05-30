@@ -25,7 +25,6 @@ from IPython.display import Markdown, display
 
 OUT = Path("../data/review")
 PER_COUNTRY = OUT / "adam_per_country"
-GEOMS = OUT / "adam_review_geoms.gpkg"
 
 # The lookup CSV — final FM-centric decisions, one row per FM unit
 # (more if multiple ADAM polygons aggregate to the same FM unit).
@@ -38,10 +37,33 @@ summary["clean_pct"] = (
 ).round(0).astype("Int64")
 summary["iou"] = summary["mean_iou"].round(3)
 
-# FM + ADAM admin polygons for the per-country panels. Build script
-# writes geoms for every clean+review iso3 (skips fm_empty like ANT/XIM).
-fm_all = gpd.read_file(GEOMS, layer="fm") if GEOMS.exists() else gpd.GeoDataFrame()
-adam_admin_all = gpd.read_file(GEOMS, layer="ge") if GEOMS.exists() else gpd.GeoDataFrame()
+# Geometry sources:
+#   - FM: loaded per-iso3 from the OCHA-DAP blob via the same loader
+#     the production build uses. Bypasses the gpkg cache entirely so
+#     any transient blob failure during artifact-build can't poison
+#     the qmd's view (cf. MEX / CAN bug).
+#   - ADAM admin layer: loaded once from data/static/ge_adm1.parquet
+#     (local 278 MB file, fast filter per iso3).
+import sys as _sys
+_sys.path.insert(0, "..")
+from src.static.adam.admin import load_adam_admin  # noqa: E402
+from src.static.adam.inputs import load_fieldmaps_adm  # noqa: E402
+
+ADAM_ADMIN_ALL = load_adam_admin()
+
+
+def fetch_fm(iso3: str):
+    """Per-call FM load with a swallowed-exception fallback so a blob
+    timeout on one country doesn't break the whole render."""
+    try:
+        return load_fieldmaps_adm(iso3, 1)
+    except Exception as e:
+        print(f"_FM blob load failed for {iso3}: {e}_\n")
+        return None
+
+
+def fetch_adam(iso3: str):
+    return ADAM_ADMIN_ALL[ADAM_ADMIN_ALL["iso3"] == iso3].copy()
 
 ISSUE_COLOR = {
     None: "#3d9970",
@@ -346,11 +368,18 @@ for iso3 in POLICY_DF["iso3"].tolist():
     crow_match = summary[summary["iso3"] == iso3]
     crow = crow_match.iloc[0] if not crow_match.empty else None
 
-    fm = fm_all[fm_all["iso3"] == iso3].copy() if len(fm_all) else gpd.GeoDataFrame()
-    adam_admin = (
-        adam_admin_all[adam_admin_all["iso3"] == iso3].copy()
-        if len(adam_admin_all) else gpd.GeoDataFrame()
-    )
+    fm = fetch_fm(iso3)
+    if fm is None or len(fm) == 0:
+        fm = gpd.GeoDataFrame()
+    else:
+        # Normalize fm_pcode column for downstream merge with lookup
+        from src.static.adam.inputs import fm_id_and_name_cols
+        pcode_col, name_col = fm_id_and_name_cols(fm, 1)
+        if pcode_col and pcode_col != "fm_pcode":
+            fm = fm.rename(columns={pcode_col: "fm_pcode"})
+        if name_col and name_col != "fm_name":
+            fm = fm.rename(columns={name_col: "fm_name"})
+    adam_admin = fetch_adam(iso3)
     lk = LOOKUP[
         (LOOKUP["iso3"] == iso3) & (LOOKUP["admin_level"] == 1)
     ].copy() if not LOOKUP.empty else pd.DataFrame()
@@ -387,6 +416,15 @@ for iso3 in POLICY_DF["iso3"].tolist():
         continue
 
     # ── Map ──
+    # Two rendering modes:
+    #   aggregate_adam_to_fm — FM-dominant: each FM region gets a
+    #     categorical fill color so the rollup target is obvious; ADAM
+    #     polygons drawn as thin dashed subdivisions on top. IoU-based
+    #     coloring is suppressed because for aggregate it's always low
+    #     (each ADAM polygon is small relative to its FM region) and
+    #     would mislead.
+    #   everything else — current behavior: FM filled by lookup outcome
+    #     (green/orange/red/gray), ADAM heavy magenta dashed.
     if not lk.empty and "fm_pcode" in fm.columns:
         fm_lk = fm.merge(
             lk[["fm_pcode", "adam_admin_id", "adam_admin_name",
@@ -398,34 +436,75 @@ for iso3 in POLICY_DF["iso3"].tolist():
             adam_admin_id=pd.NA, adam_admin_name=pd.NA,
             iou=pd.NA, caveat_kind=pd.NA,
         )
-    fm_lk["_color"] = fm_lk.apply(_row_fill_color, axis=1)
+
+    is_aggregate = (action == "aggregate_adam_to_fm")
 
     fig, ax = plt.subplots(figsize=(11, 7))
-    fm_lk.plot(
-        ax=ax, color=fm_lk["_color"],
-        edgecolor="#222", linewidth=0.7, alpha=0.6,
-    )
-    if len(adam_admin) > 0:
-        adam_admin.plot(
-            ax=ax, facecolor="none", edgecolor="white", linewidth=4.0,
+
+    if is_aggregate:
+        # One color per FM region (categorical). Multiple FM rows for
+        # the same fm_pcode share the color. tab10 palette cycles every
+        # 10 — fine for our scope (max 12 FM regions in any aggregate
+        # case).
+        unique_fm = sorted(fm_lk["fm_pcode"].dropna().unique())
+        palette = plt.get_cmap("tab10")
+        color_map = {p: palette(i % 10) for i, p in enumerate(unique_fm)}
+        fm_lk["_color"] = fm_lk["fm_pcode"].map(color_map).fillna("#ddd")
+        # FM dominant: thick dark border, solid fill.
+        fm_lk.plot(
+            ax=ax, color=fm_lk["_color"],
+            edgecolor="black", linewidth=2.0, alpha=0.55,
         )
-        adam_admin.plot(
-            ax=ax, facecolor="none", edgecolor="#e6007a",
-            linewidth=2.2, linestyle=(0, (8, 4)),
+        # ADAM subdivisions: thin grey dashed.
+        if len(adam_admin) > 0:
+            adam_admin.plot(
+                ax=ax, facecolor="none", edgecolor="#333",
+                linewidth=0.6, linestyle=(0, (3, 2)),
+            )
+        title = (
+            f"{iso3} — aggregate_adam_to_fm: FM regions (filled, thick "
+            f"border) / ADAM admin polygons (thin dashed subdivisions)"
         )
-    if len(fm_lk) <= 25:
+    else:
+        fm_lk["_color"] = fm_lk.apply(_row_fill_color, axis=1)
+        fm_lk.plot(
+            ax=ax, color=fm_lk["_color"],
+            edgecolor="#222", linewidth=0.7, alpha=0.6,
+        )
+        if len(adam_admin) > 0:
+            adam_admin.plot(
+                ax=ax, facecolor="none", edgecolor="white", linewidth=4.0,
+            )
+            adam_admin.plot(
+                ax=ax, facecolor="none", edgecolor="#e6007a",
+                linewidth=2.2, linestyle=(0, (8, 4)),
+            )
+        title = (
+            f"{iso3} — FM polygons (filled by lookup outcome) / "
+            f"ADAM admin polygons (magenta dashed)"
+        )
+
+    # FM labels — show only one label per FM polygon (multiple aggregate
+    # rows would otherwise stack the same name 9× on Capital Region).
+    fm_label_seen: set[str] = set()
+    if len(fm_lk) <= 25 or is_aggregate:
         for _, r in fm_lk.iterrows():
-            if pd.notna(r.get("fm_name")) and r.geometry is not None:
-                pt = r.geometry.representative_point()
+            if r.get("fm_pcode") in fm_label_seen:
+                continue
+            if pd.notna(r.get("fm_name")) and r.get("geometry") is not None:
+                pt = r["geometry"].representative_point()
                 ax.annotate(
                     r["fm_name"],
                     xy=(pt.x, pt.y), ha="center", va="center",
-                    fontsize=7, color="black", fontweight="bold",
+                    fontsize=8 if is_aggregate else 7,
+                    color="black", fontweight="bold",
                 )
-    if len(adam_admin) and len(adam_admin) <= 25:
+                fm_label_seen.add(r["fm_pcode"])
+    # ADAM labels only for non-aggregate (aggregate has too many)
+    if not is_aggregate and len(adam_admin) and len(adam_admin) <= 25:
         for _, r in adam_admin.iterrows():
-            if pd.notna(r.get("adm1_name")) and r.geometry is not None:
-                pt = r.geometry.representative_point()
+            if pd.notna(r.get("adm1_name")) and r.get("geometry") is not None:
+                pt = r["geometry"].representative_point()
                 ax.annotate(
                     r["adm1_name"],
                     xy=(pt.x, pt.y),
@@ -434,11 +513,7 @@ for iso3 in POLICY_DF["iso3"].tolist():
                     fontsize=6, color="#e6007a", style="italic",
                     fontweight="bold",
                 )
-    ax.set_title(
-        f"{iso3} — FM polygons (filled by lookup outcome) / "
-        f"ADAM admin polygons (magenta dashed)",
-        fontsize=11,
-    )
+    ax.set_title(title, fontsize=11)
     ax.set_axis_off()
     plt.tight_layout()
     plt.show()
