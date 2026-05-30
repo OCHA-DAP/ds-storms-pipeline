@@ -831,3 +831,111 @@ iso3 = "VGB"
 adam_admin_id = 39505
 action = "drop"
 note = "ge 'Other Islands' is a catch-all polygon mapping to FM 'uncertain' (FM's own placeholder). Both are non-real admin units. Drop."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GDACS — shared source polygons (boundary-reform cases)
+# ──────────────────────────────────────────────────────────────────────
+# When GDACS's admin polygon predates a modern FM-side admin reform,
+# one GDACS code maps to multiple modern FM units. Reporting the same
+# exposure number under both FM rows is correct (GDACS doesn't
+# disaggregate); the caveat note tells downstream consumers and alert
+# text to NOT sum across the listed FM rows.
+#
+# Schema:
+#   iso3, gmi_admin, fm_pcodes:[], caveat_kind, note
+# Build script applies the same caveat_kind + caveat_note to every
+# lookup row whose fm_pcode is in fm_pcodes for the given iso3.
+
+[[gdacs_shared_source]]
+iso3 = "CUB"
+gmi_admin = "CUB-LHB"
+fm_pcodes = ["CUB-20201118-01", "CUB-20201118-12"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-2011 boundary 'La Habana' (CUB-LHB). The Cuban province was split in 2011 into modern Artemisa and Mayabeque. The same GDACS exposure number is reported under both FM rows — do not sum across them."
+
+[[gdacs_shared_source]]
+iso3 = "GRL"
+gmi_admin = "GRL-VST"
+fm_pcodes = ["GRL-20230119-1", "GRL-20230119-2", "GRL-20230119-4", "GRL-20230119-5"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-2009 boundary 'Vestgrønland' (West Greenland). Greenland reformed its admin structure in 2009 (and again in 2018) into modern municipalities. GDACS-VST covers what is now Avannaata + Kujalleq + Qeqertalik + Qeqqata. Same GDACS exposure number under all four FM rows — do not sum."
+
+[[gdacs_shared_source]]
+iso3 = "GRL"
+gmi_admin = "GRL-OST"
+fm_pcodes = ["GRL-20230119-3", "GRL-20230119-6"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-2009 boundary 'Østgrønland' (East Greenland). Covers what is now Northeast Greenland National Park + Sermersooq. Same GDACS exposure under both FM rows — do not sum."
+
+[[gdacs_shared_source]]
+iso3 = "ISL"
+gmi_admin = "ISL-RYK"
+fm_pcodes = ["ISL-20230119-1", "ISL-20230119-5"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Reykjavik' polygon spans what is now FM Capital Region (Höfuðborgarsvæðið) and FM Southern Peninsula (Suðurnes) under Iceland's modern regional split. Same GDACS exposure number under both FM rows."
+
+[[gdacs_shared_source]]
+iso3 = "NIC"
+gmi_admin = "NIC-ZEL"
+fm_pcodes = ["NIC-20231203-16", "NIC-20231203-17"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-1987 boundary 'Zelaya' (NIC-ZEL), the historic single department on Nicaragua's Caribbean coast. Split in 1987 into RAAN (north) and RAAS (south), renamed RACCN/RACCS in 2014. Same GDACS exposure under both FM rows — do not sum."
+
+[[gdacs_shared_source]]
+iso3 = "PAN"
+gmi_admin = "PAN-BDT"
+fm_pcodes = ["PAN-20230404-01", "PAN-20230404-10"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Bocas del Toro' polygon predates the 1997 creation of the indigenous Comarca Ngöbe-Buglé, which was carved out of Bocas del Toro and neighboring provinces. GDACS reports one number for the combined area now covered by FM Bocas del Toro + FM Ngöbe Buglé."
+
+[[gdacs_shared_source]]
+iso3 = "PAN"
+gmi_admin = "PAN-DAR"
+fm_pcodes = ["PAN-20230404-05", "PAN-20230404-06"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Darién' polygon predates the indigenous Comarca Emberá-Wounaan, carved out of Darién province. GDACS reports one number for the combined area now covered by FM Darién + FM Emberá."
+
+[[gdacs_shared_source]]
+iso3 = "PAN"
+gmi_admin = "PAN-PAN"
+fm_pcodes = ["PAN-20230404-11", "PAN-20230404-12"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Panama' polygon predates the 2014 split of Panamá province into modern Panamá and Panamá Oeste. GDACS reports one number for the combined area now covered by both FM units."
+
+[[gdacs_shared_source]]
+iso3 = "VEN"
+gmi_admin = "VEN-DFD"
+fm_pcodes = ["VEN-20230404-01", "VEN-20230404-24"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Distrito Federal' polygon predates the 1998 separation of Vargas (now La Guaira) from the federal district. GDACS reports one number for the combined area now covered by FM Distrito Capital + FM La Guaira."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ADAM — shared source polygons (coarse-source cases)
+# ──────────────────────────────────────────────────────────────────────
+# When the ADAM admin layer's polygon is coarser than FM (covers
+# multiple FM units), ADAM's one exposure number represents the
+# combined area. The build script applies the same caveat_kind +
+# caveat_note to every listed fm_pcode so alert text can footnote it.
+
+[[adam_shared_source]]
+iso3 = "BHS"
+adam_admin_id = 901501
+fm_pcodes = ["BHS-20201113-06", "BHS-20201113-15"]
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon 'Central Abaco' covers FM Central Abaco and FM Hope Town. ADAM does not disaggregate; its exposure number for 'Central Abaco' represents the combined area."
+
+[[adam_shared_source]]
+iso3 = "BHS"
+adam_admin_id = 901514
+fm_pcodes = ["BHS-20201113-26", "BHS-20201113-27"]
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon 'San Salvador' covers FM San Salvador and FM Rum Cay. ADAM reports one number for the combined area."
+
+[[adam_shared_source]]
+iso3 = "BHS"
+adam_admin_id = 901516
+fm_pcodes = ["BHS-20201113-18", "BHS-20201113-29"]
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon 'South Andros' covers FM South Andros and FM Mangrove Cay. ADAM reports one number for the combined area."

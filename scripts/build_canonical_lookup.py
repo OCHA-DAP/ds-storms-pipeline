@@ -126,7 +126,7 @@ DB_TABLE = "gdacs_fm_lookup"
 
 LOOKUP_COLUMNS = [
     "iso3", "admin_level", "fm_pcode", "fm_name",
-    "gmi_admin", "gdacs_admin_name", "caveat_note",
+    "gmi_admin", "gdacs_admin_name", "caveat_kind", "caveat_note",
 ]
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,7 @@ def build_adm0_row(
         "fm_name": fm_name,
         "gmi_admin": gmi_cntry,
         "gdacs_admin_name": gdacs_cntry_name or iso3,
+        "caveat_kind": None,
         "caveat_note": None,
     }
 
@@ -213,6 +214,7 @@ def build_accept_adm1_rows(
             "fm_name": r["fm_name"],
             "gmi_admin": r["gmi_admin"],
             "gdacs_admin_name": r["gdacs_admin_name"],
+            "caveat_kind": None,
             "caveat_note": notes_by_pcode.get(r["fm_pcode"]),
         }
         for r in match_rows
@@ -278,6 +280,7 @@ def build_aggregate_adm1_rows(
             "fm_name": container[name_col],
             "gmi_admin": gp["GMI_ADMIN"],
             "gdacs_admin_name": gp["ADMIN_NAME"],
+            "caveat_kind": None,
             "caveat_note": None,
         })
     return rows
@@ -341,6 +344,7 @@ def build_fm_only_adm1_rows(
             "fm_name": _name(r),
             "gmi_admin": None,
             "gdacs_admin_name": None,
+            "caveat_kind": "fm_only_policy",
             "caveat_note": None,
         }
         for _, r in fm.iterrows()
@@ -422,6 +426,41 @@ def build_lookup(cfg: dict, gdacs_admin: gpd.GeoDataFrame) -> pd.DataFrame:
             )
 
     df = pd.DataFrame(rows, columns=LOOKUP_COLUMNS)
+
+    # ── Final pass: apply [[gdacs_shared_source]] group caveats ──
+    # Each entry names a coarse GDACS polygon (gmi_admin) + the FM
+    # units it covers + a shared caveat. We overwrite caveat_kind and
+    # caveat_note on every matching row so the alert text downstream
+    # can render the same footnote for any FM in the group. Used for
+    # boundary-reform cases (CUB Artemisa/Mayabeque ↔ pre-2011 La
+    # Habana; NIC RACN+RACS ↔ pre-1987 Zelaya; etc.). Warns when a
+    # listed fm_pcode doesn't appear in the lookup.
+    shared = cfg.get("gdacs_shared_source", [])
+    for entry in shared:
+        iso3 = entry.get("iso3")
+        fm_set = set(entry.get("fm_pcodes", []))
+        note = entry.get("note")
+        kind = entry.get("caveat_kind", "source_coarser_than_fm")
+        if not iso3 or not fm_set or not note:
+            logger.warning("Skipping malformed gdacs_shared_source: %s", entry)
+            continue
+        mask = (
+            (df["iso3"] == iso3)
+            & (df["admin_level"] == 1)
+            & (df["fm_pcode"].isin(fm_set))
+        )
+        n = int(mask.sum())
+        if n != len(fm_set):
+            present = set(df.loc[mask, "fm_pcode"])
+            missing = sorted(fm_set - present)
+            logger.warning(
+                "gdacs_shared_source for %s gmi_admin=%s: applied %d of %d "
+                "fm_pcodes; missing from lookup: %s",
+                iso3, entry.get("gmi_admin"), n, len(fm_set), missing,
+            )
+        df.loc[mask, "caveat_kind"] = kind
+        df.loc[mask, "caveat_note"] = note
+
     df.sort_values(
         ["iso3", "admin_level", "fm_pcode", "gmi_admin"],
         inplace=True, kind="stable",

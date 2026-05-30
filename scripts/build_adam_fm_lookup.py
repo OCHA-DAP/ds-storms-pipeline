@@ -462,6 +462,39 @@ def build_lookup(cfg: dict, adam_admin: gpd.GeoDataFrame) -> pd.DataFrame:
             )
 
     df = pd.DataFrame(rows, columns=LOOKUP_COLUMNS)
+
+    # ── Final pass: apply [[adam_shared_source]] group caveats ──
+    # Each entry names a coarse ADAM polygon + the FM units it covers,
+    # plus a shared caveat note. We overwrite caveat_kind/caveat_note
+    # on every matching row so the alert text downstream can render the
+    # same footnote for any FM in the group. Validation: warn when a
+    # listed fm_pcode doesn't appear in the lookup (typo or scope gap).
+    shared = cfg.get("adam_shared_source", [])
+    for entry in shared:
+        iso3 = entry.get("iso3")
+        fm_set = set(entry.get("fm_pcodes", []))
+        note = entry.get("note")
+        kind = entry.get("caveat_kind", "source_coarser_than_fm")
+        if not iso3 or not fm_set or not note:
+            logger.warning("Skipping malformed adam_shared_source: %s", entry)
+            continue
+        mask = (
+            (df["iso3"] == iso3)
+            & (df["admin_level"] == 1)
+            & (df["fm_pcode"].isin(fm_set))
+        )
+        n = int(mask.sum())
+        if n != len(fm_set):
+            present = set(df.loc[mask, "fm_pcode"])
+            missing = sorted(fm_set - present)
+            logger.warning(
+                "adam_shared_source for %s adam_admin_id=%s: applied %d of %d "
+                "fm_pcodes; missing from lookup: %s",
+                iso3, entry.get("adam_admin_id"), n, len(fm_set), missing,
+            )
+        df.loc[mask, "caveat_kind"] = kind
+        df.loc[mask, "caveat_note"] = note
+
     df.sort_values(
         ["iso3", "admin_level", "fm_pcode", "adam_admin_id"],
         inplace=True, kind="stable",

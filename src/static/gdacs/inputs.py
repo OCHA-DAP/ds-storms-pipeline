@@ -141,7 +141,18 @@ def load_level_config(path: Path | None = None) -> dict:
           "adam_per_row_notes": [{iso3, ge_adm1_id, note}, ...],
           "adam_row_overrides": [{iso3, ge_adm1_id, action,
                                   fm_pcode_override?, ...}, ...],
+          "gdacs_shared_source": [{iso3, gmi_admin, fm_pcodes:[],
+                                   caveat_kind, note}, ...],
+          "adam_shared_source":  [{iso3, adam_admin_id, fm_pcodes:[],
+                                   caveat_kind, note}, ...],
         }
+
+    The two ``*_shared_source`` arrays express "this one source polygon
+    covers these N FM units" — one entry per shared group, and the
+    build script writes the same caveat_kind+note onto every listed FM
+    row. Used for boundary-reform cases (CUB Artemisa/Mayabeque ↔ pre-
+    2011 La Habana; NIC RACN+RACS ↔ pre-1987 Zelaya) where the source's
+    one number represents the combined area of multiple modern FM units.
 
     ``[overrides]`` historically carried the FM↔GADM bridge config.
     ``[gdacs_overrides]`` takes precedence for the FM↔GDACS bridge.
@@ -164,6 +175,8 @@ def load_level_config(path: Path | None = None) -> dict:
         "adam_policy": {},
         "adam_per_row_notes": [],
         "adam_row_overrides": [],
+        "gdacs_shared_source": [],
+        "adam_shared_source": [],
     }
     if path is None:
         path = DEFAULT_CONFIG
@@ -178,7 +191,8 @@ def load_level_config(path: Path | None = None) -> dict:
         if key in loaded:
             cfg[key] = loaded[key]
     for key in ("per_row_notes", "adam_per_row_notes",
-                "adam_row_overrides"):
+                "adam_row_overrides",
+                "gdacs_shared_source", "adam_shared_source"):
         if key in loaded:
             cfg[key] = loaded[key]
     return cfg
