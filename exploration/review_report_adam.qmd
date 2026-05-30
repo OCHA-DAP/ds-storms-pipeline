@@ -547,81 +547,11 @@ for iso3 in POLICY_DF["iso3"].tolist():
             + "\n```"
         ))
 
-    # ── Review-candidate snippet hints ──
-    # For rows likely to need attention, render a copy-pasteable TOML
-    # snippet so the reviewer can grab it, edit the action / note,
-    # and drop it into exploration/REVIEW.md or directly into the TOML.
-    # Filter to keep the snippet block manageable per country:
-    #   - rows already overridden are skipped (you already touched them)
-    #   - rows with adam_admin_id NULL get a "mark_no_source / caveat" snippet
-    #   - rows with IoU < 0.3 get a "remap" snippet
-    #   - rows whose adam_admin_name is a GAUL placeholder get a "drop or caveat" snippet
-    snippets: list[str] = []
-    already_keyed = {str(o.get("adam_admin_id"))
-                     for o in overrides_for_iso
-                     if o.get("adam_admin_id") is not None}
-    already_keyed |= {o.get("fm_pcode")
-                      for o in overrides_for_iso
-                      if o.get("fm_pcode") is not None}
-
-    GAUL_PLACEHOLDERS = {"under national administration", "---",
-                         "name unknown", "n/a"}
-
-    for _, r in lk.iterrows():
-        fmp = r.get("fm_pcode")
-        aid = r.get("adam_admin_id")
-        aname = r.get("adam_admin_name")
-        iou = r.get("iou")
-        if fmp in already_keyed:
-            continue
-        if pd.notna(aid) and str(int(aid)) in already_keyed:
-            continue
-
-        snippet = None
-        if pd.isna(aid):
-            # NULL-source row — user might want a custom caveat or
-            # mark_no_source explanation
-            snippet = (
-                f"# {r['fm_name']} ({fmp}) — currently no source attached\n"
-                f"[[adam_row_overrides]]\n"
-                f'iso3 = "{iso3}"\n'
-                f'fm_pcode = "{fmp}"\n'
-                f'action = "caveat"  # or "mark_no_source"\n'
-                f'caveat_kind = "no_adam_at_adm1"\n'
-                f'note = "..."'
-            )
-        elif aname and str(aname).strip().lower() in GAUL_PLACEHOLDERS:
-            # GAUL placeholder source — likely drop or caveat
-            snippet = (
-                f"# {r['fm_name']} ({fmp}) ← ADAM '{aname}' (placeholder)\n"
-                f"[[adam_row_overrides]]\n"
-                f'iso3 = "{iso3}"\n'
-                f"adam_admin_id = {int(aid)}\n"
-                f'action = "drop"  # or "caveat" if the attach is OK\n'
-                f'note = "..."'
-            )
-        elif pd.notna(iou) and iou < 0.3:
-            # Low IoU — likely a wrong best-IoU pick
-            snippet = (
-                f"# {r['fm_name']} ({fmp}) ← ADAM '{aname}' (iou={iou:.3f})\n"
-                f"[[adam_row_overrides]]\n"
-                f'iso3 = "{iso3}"\n'
-                f"adam_admin_id = {int(aid)}\n"
-                f'action = "remap"  # change FM target\n'
-                f'fm_pcode_override = "EDIT_ME"\n'
-                f'note = "..."'
-            )
-        if snippet:
-            snippets.append(snippet)
-
-    if snippets:
-        display(Markdown(
-            f"<details><summary><b>Review-candidate snippets "
-            f"({len(snippets)})</b> — copy, edit, paste into "
-            f"<code>exploration/REVIEW.md</code> or the TOML</summary>\n\n"
-            "```toml\n" + "\n\n".join(snippets) + "\n```\n\n</details>"
-        ))
-
+    # Per-row review snippets removed — was generating false positives
+    # (e.g. flagging Redonda as "needs remap" just because the islet is
+    # tiny). Editorial recommendations now live in exploration/REVIEW.md
+    # where each finding has rationale + status field, not a blanket
+    # TOML stub.
     display(Markdown("***"))
 ```
 
