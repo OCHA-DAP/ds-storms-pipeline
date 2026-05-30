@@ -354,22 +354,6 @@ action = "Raise with FieldMaps maintainers — fix the two province-region swap 
 #   rename              — pure naming change; same geometry,
 #                         informational only.
 
-[[per_row_notes]]
-iso3 = "CUB"
-fm_pcode = "CUB-20201118-01"
-fm_name = "Artemisa"
-gmi_admin = "CUB-LHB"
-kind = "pre_split_boundary"
-note = "GDACS uses pre-2011 boundary. The 'CUB-LHB / La Habana' GDACS polygon covers BOTH modern Artemisa AND Mayabeque (the province was split in 2011). The same GDACS exposure number will appear under both Artemisa and Mayabeque rows — DO NOT SUM across them, that double-counts the population."
-
-[[per_row_notes]]
-iso3 = "CUB"
-fm_pcode = "CUB-20201118-12"
-fm_name = "Mayabeque"
-gmi_admin = "CUB-LHB"
-kind = "pre_split_boundary"
-note = "GDACS uses pre-2011 boundary. The 'CUB-LHB / La Habana' GDACS polygon covers BOTH modern Mayabeque AND Artemisa (the province was split in 2011). The same GDACS exposure number will appear under both Mayabeque and Artemisa rows — DO NOT SUM across them, that double-counts the population."
-
 
 [[per_row_notes]]
 iso3 = "JAM"
@@ -386,22 +370,6 @@ fm_name = "Morant Cays"
 gmi_admin = ""
 kind = "fm_offshore_orphan"
 note = "FM adm1 record for Morant Cays — 4 small islets ~50 km SE of Jamaica. Jamaican sovereign territory but not a parish. FM puts the name in adm0_name ('Morant Cays (Jam.)') rather than adm1_name. Not represented in GDACS, hence no_overlap. Uninhabited; practical impact on exposure reporting is zero."
-
-[[per_row_notes]]
-iso3 = "NIC"
-fm_pcode = "NIC-20231203-16"
-fm_name = "Región Autónoma Costa Caribe Norte"
-gmi_admin = "NIC-ZEL"
-kind = "pre_split_boundary"
-note = "GDACS uses the pre-1987 boundary 'Zelaya' (NIC-ZEL), the historic single department on Nicaragua's Caribbean coast named for President José Santos Zelaya. It was split in 1987 under the Sandinista-era constitution into RAAN (north) and RAAS (south), and renamed in 2014 to RACCN and RACCS. GDACS's Zelaya polygon covers BOTH modern Costa Caribe Norte AND Costa Caribe Sur. The same GDACS exposure number will appear under both FM rows — DO NOT SUM across them, that double-counts the population."
-
-[[per_row_notes]]
-iso3 = "NIC"
-fm_pcode = "NIC-20231203-17"
-fm_name = "Región Autónoma de la Costa Caribe Sur"
-gmi_admin = "NIC-ZEL"
-kind = "pre_split_boundary"
-note = "Same as Costa Caribe Norte — GDACS 'Zelaya' (NIC-ZEL) covers both modern Costa Caribe Norte and Costa Caribe Sur (1987 split, 2014 rename). DO NOT SUM the GDACS exposure across these two FM rows."
 
 # ─────────────────────────────────────────────────────────────────────
 # Added 2026-05-25: out-of-scope ISO3s newly added to ATLANTIC_ISO3.
@@ -474,70 +442,6 @@ note = "Isle of Man — no FieldMaps source available. GDACS reports it via extr
 # Per-row notes added in Phase 2 — pre-split / rename caveats
 # for ISL/GRL/SWE; orphan-no-fm-unit for USA-PS1 / VEN-DFR.
 # ─────────────────────────────────────────────────────────────────────
-
-[[per_row_notes]]
-iso3 = "ISL"
-fm_pcode = "ISL-20230119-1"
-fm_name = "Capital Region"
-gmi_admin = "ISL-RYK"
-kind = "pre_split_boundary"
-note = "GDACS's ISL-RYK ('Reykjavik') corresponds to two modern FM regions: Capital Region and Southern Peninsula. Same GDACS exposure number attaches to both — do not sum across these rows or you double-count Reykjavik."
-
-[[per_row_notes]]
-iso3 = "ISL"
-fm_pcode = "ISL-20230119-5"
-fm_name = "Southern Peninsula"
-gmi_admin = "ISL-RYK"
-kind = "pre_split_boundary"
-note = "Same as Capital Region — sister row to the Reykjavik split. GDACS ISL-RYK exposure attaches to both this row and Capital Region; do not sum."
-
-[[per_row_notes]]
-iso3 = "GRL"
-fm_pcode = "GRL-20230119-1"
-fm_name = "Avannaata"
-gmi_admin = "GRL-VST"
-kind = "pre_split_boundary"
-note = "GDACS uses pre-2009 Vestgrønland; FM uses modern municipalities. Avannaata, Kujalleq, Qeqertalik, Qeqqata, and Sermersooq all map to the same GDACS gmi_admin (GRL-VST or GRL-OST). Do not sum across rows with the same gmi_admin."
-
-[[per_row_notes]]
-iso3 = "GRL"
-fm_pcode = "GRL-20230119-2"
-fm_name = "Kujalleq"
-gmi_admin = "GRL-VST"
-kind = "pre_split_boundary"
-note = "Sister row to Avannaata (GDACS GRL-VST)."
-
-[[per_row_notes]]
-iso3 = "GRL"
-fm_pcode = "GRL-20230119-3"
-fm_name = "Northeast Greenland National Park"
-gmi_admin = "GRL-OST"
-kind = "pre_split_boundary"
-note = "Sister row to Sermersooq (GDACS GRL-OST)."
-
-[[per_row_notes]]
-iso3 = "GRL"
-fm_pcode = "GRL-20230119-4"
-fm_name = "Qeqertalik"
-gmi_admin = "GRL-VST"
-kind = "pre_split_boundary"
-note = "Sister row to Avannaata (GDACS GRL-VST)."
-
-[[per_row_notes]]
-iso3 = "GRL"
-fm_pcode = "GRL-20230119-5"
-fm_name = "Qeqqata"
-gmi_admin = "GRL-VST"
-kind = "pre_split_boundary"
-note = "Sister row to Avannaata (GDACS GRL-VST)."
-
-[[per_row_notes]]
-iso3 = "GRL"
-fm_pcode = "GRL-20230119-6"
-fm_name = "Sermersooq"
-gmi_admin = "GRL-OST"
-kind = "pre_split_boundary"
-note = "Sister row to Northeast Greenland National Park (GDACS GRL-OST)."
 
 [[per_row_notes]]
 iso3 = "SWE"
@@ -939,3 +843,16 @@ adam_admin_id = 901516
 fm_pcodes = ["BHS-20201113-18", "BHS-20201113-29"]
 caveat_kind = "source_coarser_than_fm"
 note = "ADAM polygon 'South Andros' covers FM South Andros and FM Mangrove Cay. ADAM reports one number for the combined area."
+
+
+# ─── DOM 'Under National Administration' — caveat, not drop ───
+# Small national-lands polygon (~0.02 deg²) in southwestern DR, near
+# Sierra de Bahoruco / Lago Enriquillo. Spatially attaches to Región
+# Enriquillo correctly, but the source name is opaque. Keep the attach,
+# add a footnote so the alert text can explain.
+[[adam_row_overrides]]
+iso3 = "DOM"
+adam_admin_id = 901058
+action = "caveat"
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon labeled 'Under National Administration' is a small national-lands area in SW Dominican Republic (Sierra de Bahoruco / Lago Enriquillo region), not a province. ADAM attaches its exposure number to Región Enriquillo via the aggregate spatial join; the polygon represents federal-jurisdiction land within the region."
