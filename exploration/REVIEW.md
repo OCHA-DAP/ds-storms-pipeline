@@ -40,15 +40,15 @@ Audit trail — these landed in earlier commits, kept for reference.
 - [x] BHS — 3 shared_source caveats (Central Abaco↔Hope Town, San Salvador↔Rum Cay, South Andros↔Mangrove Cay) → `9a02e3f`
 - [x] DOM — caveat for 901058 (national-lands polygon in SW DR) → `cb2e0bc`
 - [x] Cleaned 12 redundant `[[per_row_notes]]` (CUB/NIC/ISL/GRL) → `cb2e0bc`
-- [x] ATG / AIA / BHS / CYM / DOM / IRL / JAM / PRT / TCA / UMI / VGB / VIR — all `🚀 Accept all` findings applied as NO ACTION → **this commit**
-- [x] GRL — policy note rewritten with "ADAM boundaries not compatible with OCHA CODs"; propagates as caveat_note on all 6 FM rows → **this commit**
-- [x] JAM offshore-cay rows (Pedro Bank, Morant Cays) — names now populated via FM_ADM1_NAME_FALLBACK_ISOS (was null) → **this commit**
-- [x] SPM — single FM row now has a name (was null) via the same fallback → **this commit**
-- [x] KNA — country-wide boundary-misalignment caveat now applied to all 14 FM rows via new needs_manual_mapping policy_note propagation → **this commit**
-- [x] MSR — note rewritten to compare ADAM vs FM directly (was framing as WFP vs ADAM) → **this commit**
-- [x] MTQ — changed from `needs_manual_mapping` to `accept` (names align, all IoUs ≥ 0.87) → **this commit**
-- [x] PRI — added `[adam_overrides.PRI] fm_level = 1` so ADAM bridge uses FM adm1 (= whole island) not the GDACS-side fm_level=2 → **this commit**
-- [x] 33 missing iso3 policy entries seeded — see Phase 3 section below → **this commit**
+- [x] ATG / AIA / BHS / CYM / DOM / IRL / JAM / PRT / TCA / UMI / VGB / VIR — all `🚀 Accept all` findings applied as NO ACTION → `08834d8`
+- [x] GRL — policy note rewritten with "ADAM boundaries not compatible with OCHA CODs"; propagates as caveat_note on all 6 FM rows → `08834d8`
+- [x] JAM offshore-cay rows (Pedro Bank, Morant Cays) — names now populated via FM_ADM1_NAME_FALLBACK_ISOS (was null) → `08834d8`
+- [x] SPM — single FM row now has a name (was null) via the same fallback → `08834d8`
+- [x] KNA — country-wide boundary-misalignment caveat now applied to all 14 FM rows via new needs_manual_mapping policy_note propagation → `08834d8`
+- [x] MSR — note rewritten to compare ADAM vs FM directly (was framing as WFP vs ADAM) → `08834d8`
+- [x] MTQ — changed from `needs_manual_mapping` to `accept` (names align, all IoUs ≥ 0.87) → `08834d8`
+- [x] PRI — added `[adam_overrides.PRI] fm_level = 1` so ADAM bridge uses FM adm1 (= whole island) not the GDACS-side fm_level=2 → `08834d8`
+- [x] 33 missing iso3 policy entries seeded — see Phase 3 section below → `08834d8`
 
 ---
 
