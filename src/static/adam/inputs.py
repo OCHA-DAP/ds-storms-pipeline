@@ -16,10 +16,15 @@ adm0-name fallback for SJM/UMI are all reused from
 :mod:`src.static.gdacs.inputs`. Two ADAM-specific helpers added:
 
 - :func:`resolve_adam_fm_level` — which FM admin level to bridge to.
-  Defaults to ``[overrides.<ISO3>].fm_level`` then
-  ``[defaults].fm_level``. No ``[adam_overrides]`` block exists yet
-  (YAGNI) — add one alongside ``gdacs_overrides`` if a country ever
-  needs ADAM-specific level wiring distinct from GDACS.
+  Resolution order:
+    1. ``[adam_overrides.<ISO3>].fm_level`` (ADAM-specific override)
+    2. ``[overrides.<ISO3>].fm_level`` (shared FM↔GADM bridge config)
+    3. ``[defaults].fm_level``
+  The ADAM-specific layer exists because some countries need
+  different FM levels for ADAM vs GDACS — most notably PRI, where
+  ``[overrides.PRI].fm_level = 2`` (for the GDACS-GADM municipios
+  bridge) but ADAM wants ``fm_level = 1`` (single PRI polygon, since
+  ADAM only emits country-level for PRI).
 - :func:`adam_policy_for` — convenience getter for
   ``[adam_policy.<ISO3>]``.
 """
@@ -42,10 +47,14 @@ from src.static.gdacs.inputs import (  # noqa: F401
 def resolve_adam_fm_level(iso3: str, cfg: dict) -> int:
     """Look up the FM admin level to use for the FM↔ADAM bridge.
 
-    Mirror of :func:`src.static.gdacs.inputs.resolve_gdacs_fm_level`
-    but without the GDACS-specific override layer — ADAM uses the
-    shared ``[overrides]`` block, falling back to ``[defaults]``.
+    Three-tier resolution:
+      1. ``[adam_overrides.<ISO3>].fm_level`` — ADAM-specific override
+      2. ``[overrides.<ISO3>].fm_level`` — shared FM↔GADM config
+      3. ``[defaults].fm_level``
     """
+    ov = cfg.get("adam_overrides", {}).get(iso3)
+    if ov and "fm_level" in ov:
+        return ov["fm_level"]
     ov = cfg.get("overrides", {}).get(iso3)
     if ov and "fm_level" in ov:
         return ov["fm_level"]

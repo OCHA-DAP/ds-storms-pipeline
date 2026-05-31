@@ -43,12 +43,19 @@ DEFAULT_FM_LEVEL = 1
 DEFAULT_GADM_LEVEL = 1
 
 # Narrow allow-list of iso3s where FieldMaps puts the actual
-# subdivision name in ``adm0_name`` and leaves ``adm1_name`` NULL
-# (e.g. UMI "Baker Island (USA)", SJM "Svalbard Islands (Nor.)").
+# subdivision name in ``adm0_name`` and leaves ``adm1_name`` NULL.
 # Anywhere else, NULL adm1_name is treated as a real data gap and
 # left as NaN downstream. Strict opt-in by iso3 prevents the fallback
 # from masking unrelated FM data-quality issues.
-FM_ADM1_NAME_FALLBACK_ISOS = {"SJM", "UMI"}
+#
+# Examples of the pattern:
+#   UMI: 9 atolls, each row has adm0_name like "Baker Island (USA)"
+#   SJM: Svalbard + Jan Mayen, adm0_name like "Svalbard Islands (Nor.)"
+#   JAM: 14 named parishes (clean) + 2 offshore-cay rows with null
+#        adm1_name and adm0_name "Pedro Bank (Jam.)" / "Morant Cays (Jam.)"
+#   SPM: single FM polygon with null adm1_name; adm0_name
+#        "Saint Pierre and Miquelon (Fr.)"
+FM_ADM1_NAME_FALLBACK_ISOS = {"SJM", "UMI", "JAM", "SPM"}
 
 
 def fallback_fm_name_from_adm0(adm0_name: str | None) -> str | None:
@@ -137,6 +144,7 @@ def load_level_config(path: Path | None = None) -> dict:
           "gdacs_policy":      {ISO3: {action: str, note?}},
           "per_row_notes":     [{iso3, fm_pcode, note}, ...],
           "data_quality":      {ISO3: {action, note?}},
+          "adam_overrides":    {ISO3: {fm_level, note?}},
           "adam_policy":       {ISO3: {action: str, note?}},
           "adam_per_row_notes": [{iso3, ge_adm1_id, note}, ...],
           "adam_row_overrides": [{iso3, ge_adm1_id, action,
@@ -172,6 +180,7 @@ def load_level_config(path: Path | None = None) -> dict:
         "gdacs_policy": {},
         "per_row_notes": [],
         "data_quality": {},
+        "adam_overrides": {},
         "adam_policy": {},
         "adam_per_row_notes": [],
         "adam_row_overrides": [],
@@ -187,7 +196,7 @@ def load_level_config(path: Path | None = None) -> dict:
     if "defaults" in loaded:
         cfg["defaults"].update(loaded["defaults"])
     for key in ("overrides", "gdacs_overrides", "gdacs_policy",
-                "data_quality", "adam_policy"):
+                "data_quality", "adam_overrides", "adam_policy"):
         if key in loaded:
             cfg[key] = loaded[key]
     for key in ("per_row_notes", "adam_per_row_notes",

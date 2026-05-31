@@ -556,7 +556,7 @@ action = "accept"
 
 [adam_policy.MSR]
 action = "country_only"
-note = "ADAM emits settlement-level names for MSR (Brodericks, Central, East, Plymouth, Salem, …) — Plymouth is the volcano-destroyed former capital, so these are real MSR settlements. WFP appears to use a finer admin level for MSR than its standard adm1 publication: our reference adm1 layer has 3 parishes (Saint Anthony, Saint Georges, Saint Peter) that don't correspond. No usable per-name crosswalk to FM's 3 parishes — country_only attaches ADAM exposure at adm0 only until a finer FM-side breakdown becomes available."
+note = "ADAM emits 7 settlement-level names for MSR (Brodericks, Central, East, North, Plymouth, Salem, South) — Plymouth is the volcano-destroyed former capital, so these are real MSR settlements. FM publishes MSR at adm1 as 3 parishes (Saint Anthony, Saint Georges, Saint Peter). The two admin layers are at different levels; the ADAM settlements don't aggregate cleanly to FM parishes by any spatial or name match. No usable per-name crosswalk to FM adm1 — country_only attaches ADAM exposure at the country (adm0) level only."
 
 [adam_policy.SPM]
 action = "accept"
@@ -639,14 +639,18 @@ note = "FM has 6 districts; the ADAM admin layer has 3. 0% clean — every match
 
 [adam_policy.GRL]
 action = "fm_adm1_only"
-note = "FM has 6 municipalities (post-2009 reform); the ADAM admin layer has 3 (pre-2009). Same boundary-reform mismatch as gdacs_policy.GRL — needs_manual_mapping there, fm_adm1_only here because the ADAM admin layer's 3 polygons aren't the right level."
+note = "ADAM admin boundaries for Greenland use pre-2009 reform districts (Vestgrønland / Ostgrønland) that are not compatible with OCHA COD / FieldMaps post-reform municipalities (Avannaata, Kujalleq, Northeast Greenland National Park, Qeqertalik, Qeqqata, Sermersooq). No usable per-FM-unit crosswalk; ADAM exposure attaches at country (adm0) level only."
 
 
 # ── country_only: don't attach adm1 even though FM has units ─────────
 
+[adam_overrides.PRI]
+fm_level = 1
+note = "FM adm1 for PRI is a single whole-territory polygon (the 78 municipios are at adm2 in FM — the data-quality issue documented in data_quality.PRI). For the ADAM bridge we want adm1, since FM adm1 (1 poly) matches the level ADAM reports at for PRI (also 1 poly = whole territory). The [overrides.PRI] block has fm_level=2 for the GDACS↔GADM municipios bridge; this adam_overrides entry forces adm1 for the ADAM bridge instead."
+
 [adam_policy.PRI]
 action = "country_only"
-note = "Special: gdacs_overrides.PRI sets fm_level=2 (78 municipios) for the GDACS bridge. ADAM only emits 1 row for PRI (admin_level=0 effectively), so adm1 attachment makes no sense. country_only keeps the adm0 row and skips adm1."
+note = "FM adm1 for PRI is a single whole-territory polygon (matches ADAM's 1-polygon coverage). country_only attaches ADAM exposure at adm0 only; reporting at FM adm1 = same as adm0 = country level."
 
 
 # ── needs_manual_mapping: real boundary disagreement at same level ───
@@ -655,11 +659,11 @@ note = "Special: gdacs_overrides.PRI sets fm_level=2 (78 municipios) for the GDA
 
 [adam_policy.KNA]
 action = "needs_manual_mapping"
-note = "14 FM parishes vs 14 ge parishes; only 2 clean, 9 multi_candidate, 3 low_iou. Parish boundaries appear to have shifted between source releases. Per-row notes need authoring; for now best-IoU pick attaches but is unreliable."
+note = "ADAM and FM both publish KNA at the 14-parish level, but parish boundaries differ noticeably between the two layers (9 of 14 FM parishes have multiple ADAM candidates overlapping them; 3 have IoU < 0.5). The auto-matching is the best-IoU pick per ADAM polygon, but FM↔ADAM parish boundaries are not directly comparable — proceed with caution when reporting any KNA adm1 exposure number side-by-side."
 
 [adam_policy.MTQ]
-action = "needs_manual_mapping"
-note = "4 FM communes vs 4 ge — half are multi_candidate. Likely the same canton/commune restructuring as some of the other French overseas territories. Best-IoU pick attaches but flagged."
+action = "accept"
+note = "4 FM communes ↔ 4 ADAM polygons, names align cleanly (Fort-de-France, Le Marin, Saint-Pierre, La Trinité — minor accent differences only). All IoUs ≥ 0.87. Previously flagged as needs_manual_mapping due to multi_candidate counts, but on review the spatial overlaps are clean and the name match is unambiguous."
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -856,3 +860,158 @@ adam_admin_id = 901058
 action = "caveat"
 caveat_kind = "source_coarser_than_fm"
 note = "ADAM polygon labeled 'Under National Administration' is a small national-lands area in SW Dominican Republic (Sierra de Bahoruco / Lago Enriquillo region), not a province. ADAM attaches its exposure number to Región Enriquillo via the aggregate spatial join; the polygon represents federal-jurisdiction land within the region."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 3 seed (2026-05-31): the remaining 33 ATLANTIC_ISO3 countries
+# that had no explicit [adam_policy] entry and were silently falling
+# through to country_only. Each gets an explicit policy so the qmd
+# renders a panel and the runtime behavior is clear.
+#
+# Auto-classified by inspecting the matcher diagnostic (fm_count,
+# adam_admin_count, clean_pct, mean_iou). Specific rationale on each.
+# Most are countries that don't currently have ADAM data flowing in
+# storms.adam_exposure — the policy decision is what to do WHEN data
+# arrives.
+# ──────────────────────────────────────────────────────────────────────
+
+# ── accept: clean 1:1 ADAM ↔ FM at adm1 (mean IoU ≥ 0.6) ─────────────
+
+[adam_policy.ABW]
+action = "accept"
+note = "Single-polygon territory. 1 FM ↔ 1 ADAM, clean match."
+
+[adam_policy.BEL]
+action = "accept"
+note = "3 FM regions ↔ 3 ADAM polygons, names align cleanly. Mean IoU 0.98."
+
+[adam_policy.BLZ]
+action = "accept"
+note = "6 FM districts ↔ 6 ADAM polygons. Mean IoU 0.92; 2 multi_candidate rows are minor boundary noise, not a real mismatch."
+
+[adam_policy.COL]
+action = "accept"
+note = "33 FM departments ↔ 34 ADAM polygons (ADAM has 1 extra unit, likely an offshore island). Clean name match for the 33 matched rows, mean IoU 0.996."
+
+[adam_policy.CPV]
+action = "accept"
+note = "22 FM municipalities ↔ 22 ADAM polygons, clean 1:1. Mean IoU 0.98."
+
+[adam_policy.CRI]
+action = "accept"
+note = "7 FM provinces ↔ 7 ADAM polygons, clean 1:1. Mean IoU 0.99."
+
+[adam_policy.CUW]
+action = "accept"
+note = "Single-polygon territory. 1 FM ↔ 1 ADAM, clean match."
+
+[adam_policy.DEU]
+action = "accept"
+note = "16 FM Bundesländer ↔ 16 ADAM polygons, clean 1:1. Mean IoU 0.99."
+
+[adam_policy.GBR]
+action = "accept"
+note = "4 FM constituent countries (England, Scotland, Wales, NI) ↔ 4 ADAM polygons. Mean IoU 0.98."
+
+[adam_policy.GIB]
+action = "accept"
+note = "Single-polygon territory. 1 FM ↔ 1 ADAM."
+
+[adam_policy.GUF]
+action = "accept"
+note = "2 FM regions ↔ 2 ADAM polygons. Mean IoU 0.99."
+
+[adam_policy.GUY]
+action = "accept"
+note = "10 FM regions ↔ 10 ADAM polygons. Mean IoU 0.98."
+
+[adam_policy.LCA]
+action = "accept"
+note = "10 FM quarters ↔ 10 ADAM polygons, clean 1:1. Mean IoU 0.97."
+
+[adam_policy.RUS]
+action = "accept"
+note = "8 FM federal districts ↔ 9 ADAM polygons (1 ADAM extra). Clean match for the 8 paired districts. Mean IoU 0.997. Cross-basin leak (Kamchatka shows up via extratropical storm reporting)."
+
+[adam_policy.SUR]
+action = "accept"
+note = "10 FM districts ↔ 10 ADAM polygons. Mean IoU 0.97."
+
+# Minor noise (5-15% non-clean) but spatially correct — accept.
+[adam_policy.GTM]
+action = "accept"
+note = "22 FM departments ↔ 23 ADAM polygons. 95% clean; 1 multi_candidate row is boundary digitization noise."
+
+[adam_policy.SWE]
+action = "accept"
+note = "21 FM län ↔ 21 ADAM polygons. 95% clean. (GDACS has post-1997 merger issues at SWE-ALV / SWE-KRS handled via per_row_notes; ADAM's admin layer doesn't carry the same legacy, so ADAM mapping is cleaner here.)"
+
+[adam_policy.MAR]
+action = "accept"
+note = "10 FM regions ↔ 11 ADAM polygons (post-2015 reform; ADAM has 1 extra). 90% clean — Western Sahara polygon is the discrepancy."
+
+[adam_policy.SXM]
+action = "accept"
+note = "8 FM quarters ↔ 8 ADAM polygons. 88% clean; minor boundary noise."
+
+[adam_policy.VEN]
+action = "accept"
+note = "25 FM states ↔ 26 ADAM polygons (ADAM has 1 extra — Dependencias Federales offshore). 80% clean; 4 multi_candidate rows are minor edge cases. VEN-DFR / Vargas split is handled via [[per_row_notes]] on the GDACS side."
+
+# ── aggregate_adam_to_fm: ADAM admin layer finer than FM ────────────
+
+[adam_policy.HND]
+action = "aggregate_adam_to_fm"
+note = "18 FM departments ↔ 23 ADAM polygons. ADAM is slightly finer (5 extra polygons); aggregate rolls each ADAM polygon up to its containing FM department."
+
+[adam_policy.NIC]
+action = "aggregate_adam_to_fm"
+note = "17 FM departments ↔ 20 ADAM polygons. ADAM has 3 extra polygons (incl. pre-1987 Zelaya boundary; GDACS-side handles via gdacs_shared_source). For ADAM, aggregate rolls each ADAM polygon up to containing FM department."
+
+[adam_policy.FRA]
+action = "aggregate_adam_to_fm"
+note = "13 FM regions (post-2016 reform) ↔ 22 ADAM polygons (pre-2016 regions). ADAM is older granularity; aggregate rolls each older region up to the modern containing FM region."
+
+[adam_policy.NOR]
+action = "aggregate_adam_to_fm"
+note = "11 FM regions (post-2020 reform) ↔ 19 ADAM polygons (pre-2020 counties). ADAM is older; aggregate rolls up."
+
+[adam_policy.JEY]
+action = "aggregate_adam_to_fm"
+note = "1 FM polygon (whole island) ↔ 12 ADAM parishes. ADAM is much finer; aggregate rolls all 12 parishes up to the single FM Jersey polygon."
+
+# ── fm_adm1_only: ADAM admin layer too coarse to disambiguate ────────
+
+[adam_policy.GRD]
+action = "fm_adm1_only"
+note = "8 FM parishes ↔ 6 ADAM polygons. ADAM is coarser; surface 8 FM rows with NULL ADAM attach. ADAM exposure attaches at adm0 only."
+
+[adam_policy.SJM]
+action = "fm_adm1_only"
+note = "2 FM units (Svalbard, Jan Mayen) ↔ 1 ADAM polygon (whole territory). ADAM can't disambiguate; surface 2 FM rows with NULL ADAM attach. (FM-side adm1_name is null; resolved via the SJM fallback to adm0_name.)"
+
+[adam_policy.LUX]
+action = "fm_adm1_only"
+note = "12 FM cantons ↔ 4 ADAM districts. ADAM is much coarser; the 4 ADAM districts don't align with the 12 FM cantons cleanly. fm_adm1_only surfaces all 12 FM cantons with NULL ADAM attach."
+
+# ── needs_manual_mapping: same count, real boundary disagreement ────
+
+[adam_policy.PAN]
+action = "needs_manual_mapping"
+note = "13 FM provinces+comarcas ↔ 13 ADAM polygons. 5 multi_candidate rows. ADAM polygons predate several comarca creations (Ngöbe-Buglé 1997, Emberá; GDACS-side handles via gdacs_shared_source). Best-IoU attaches but proceed with caution for adm1 comparisons."
+
+[adam_policy.TTO]
+action = "needs_manual_mapping"
+note = "15 FM regional corporations ↔ 15 ADAM polygons. 8 multi_candidate rows — Trinidad's admin restructuring (1990s regional corporation creation) means ADAM and FM boundaries don't always align. Best-IoU attaches but adm1 comparisons should be flagged."
+
+[adam_policy.SLV]
+action = "needs_manual_mapping"
+note = "14 FM departments ↔ 15 ADAM polygons. 9 multi_candidate rows despite matching counts — boundary alignment is loose. Best-IoU attaches but flagged."
+
+[adam_policy.VCT]
+action = "needs_manual_mapping"
+note = "6 FM parishes ↔ 6 ADAM polygons. 5 of 6 are multi_candidate — parish boundaries differ substantially between layers. Best-IoU attaches but flagged."
+
+[adam_policy.BRB]
+action = "needs_manual_mapping"
+note = "11 FM parishes ↔ 11 ADAM polygons. 10 of 11 are multi_candidate — Barbados parish boundaries differ substantially between FM and ADAM layers. Best-IoU attaches but every row should be flagged for review."

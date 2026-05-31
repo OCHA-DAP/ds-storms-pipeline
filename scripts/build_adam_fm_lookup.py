@@ -209,6 +209,8 @@ def build_accept_adm1_rows(
     per_row_notes: list[dict],
     overrides: list[dict],
     low_iou: float = 0.5,
+    policy_caveat_kind: str | None = None,
+    policy_caveat_note: str | None = None,
 ) -> list[dict]:
     """Per-ADAM-admin spatial crosswalk PLUS FM-centric NULL-source rows.
 
@@ -316,6 +318,12 @@ def build_accept_adm1_rows(
         # Fallback to per_row_notes (legacy mechanism).
         if not caveat_note and src_key in src_notes:
             caveat_note = src_notes[src_key]
+        # Country-level policy caveat (e.g. needs_manual_mapping
+        # boundary-misalignment note) — applies when no per-row
+        # caveat is set. Lowest-priority fallback.
+        if not caveat_note and policy_caveat_note:
+            caveat_kind = caveat_kind or policy_caveat_kind
+            caveat_note = policy_caveat_note
         out.append({
             "iso3": iso3,
             "admin_level": 1,
@@ -344,6 +352,11 @@ def build_accept_adm1_rows(
         elif cv:
             kind = cv.get("caveat_kind") or CAVEAT_NO_ADAM_AT_ADM1
             note = cv.get("note")
+        elif policy_caveat_note:
+            # Country-level policy caveat (needs_manual_mapping etc.)
+            # propagates here too — same shape as the per-source pass.
+            kind = policy_caveat_kind or CAVEAT_NO_ADAM_AT_ADM1
+            note = policy_caveat_note
         else:
             kind = CAVEAT_NO_ADAM_AT_ADM1
             note = None
@@ -445,9 +458,22 @@ def build_lookup(cfg: dict, adam_admin: gpd.GeoDataFrame) -> pd.DataFrame:
             # Policy names stay distinct because they carry different
             # review-status info (clean / ge-finer / boundary-reform),
             # but the lookup-build code path is one.
+            #
+            # For needs_manual_mapping countries, the policy note is
+            # propagated as caveat_note on every emitted row (both
+            # source-attached AND NULL-source) so downstream alerts
+            # carry the country-level "boundaries are misaligned"
+            # warning without having to author per-row caveats.
             fm_lvl = resolve_adam_fm_level(iso3, cfg)
+            pol_caveat_kind = None
+            pol_caveat_note = None
+            if action == "needs_manual_mapping":
+                pol_caveat_kind = "needs_manual_mapping"
+                pol_caveat_note = policies.get(iso3, {}).get("note")
             rows.extend(build_accept_adm1_rows(
                 iso3, fm_lvl, adam_admin, per_row_notes, overrides,
+                policy_caveat_kind=pol_caveat_kind,
+                policy_caveat_note=pol_caveat_note,
             ))
         elif action == "fm_adm1_only":
             fm_lvl = resolve_adam_fm_level(iso3, cfg)
