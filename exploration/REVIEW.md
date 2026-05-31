@@ -49,7 +49,7 @@ Audit trail — these landed in earlier commits, kept for reference.
 - [x] MTQ — changed from `needs_manual_mapping` to `accept` (names align, all IoUs ≥ 0.87) → `08834d8`
 - [x] PRI — added `[adam_overrides.PRI] fm_level = 1` so ADAM bridge uses FM adm1 (= whole island) not the GDACS-side fm_level=2 → `08834d8`
 - [x] 33 missing iso3 policy entries seeded — see Phase 3 section below → `08834d8`
-- [x] GLP + ISL — both `🚀 Accept all` ticked, NO ACTION applied (no TOML change) → `__HASH__`
+- [x] GLP + ISL — both `🚀 Accept all` ticked, NO ACTION applied (no TOML change) → `8cd4c53`
 
 ---
 
@@ -225,7 +225,7 @@ lookup WHERE iso3='GLP'` returns just the adm0 row), the action would
 change to `country_only`. The behavioral difference is purely
 cosmetic — same downstream answer. Leaving as `fm_adm1_only` for now
 since it surfaces the FM units to the lookup; flip the bit later if
-you want a tidier table. **Accepted as-is — applied in `__HASH__`.**
+you want a tidier table. **Accepted as-is — applied in `8cd4c53`.**
 
 ---
 
@@ -296,7 +296,7 @@ either. Same situation as DOM / IRL / PRT — aggregate countries where
 the recommendation is "no action, low IoUs are expected." I'm leaving
 ISL as `pending` originally. If you want me to apply the same NO ACTION
 treatment as the other aggregate countries, say so in the next pass
-or tick the box. **Accepted (NO ACTION) — applied in `__HASH__`.**
+or tick the box. **Accepted (NO ACTION) — applied in `8cd4c53`.**
 
 ---
 
