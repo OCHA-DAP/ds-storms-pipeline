@@ -49,6 +49,7 @@ Audit trail — these landed in earlier commits, kept for reference.
 - [x] MTQ — changed from `needs_manual_mapping` to `accept` (names align, all IoUs ≥ 0.87) → `08834d8`
 - [x] PRI — added `[adam_overrides.PRI] fm_level = 1` so ADAM bridge uses FM adm1 (= whole island) not the GDACS-side fm_level=2 → `08834d8`
 - [x] 33 missing iso3 policy entries seeded — see Phase 3 section below → `08834d8`
+- [x] GLP + ISL — both `🚀 Accept all` ticked, NO ACTION applied (no TOML change) → `__HASH__`
 
 ---
 
@@ -197,13 +198,13 @@ Just aggregate all ADAM DOM units correctly to the FM unit they compose
 
 ### GLP — 2 NULL-source rows, by-design
 
-**Country default**: 🚀 `[ ]` Accept all
+**Country default**: 🚀 `[x]` Accept all
 
-- ⬜ **Policy expectation** — GLP is `fm_adm1_only`. ADAM has 1
+- [x] **Policy expectation** — GLP is `fm_adm1_only`. ADAM has 1
   polygon for Guadeloupe (no Basse-Terre / Pointe-à-Pitre split);
   FM has 2. Both FM rows get `no_adam_at_adm1` by design. ADAM
   exposure attaches at adm0 only.
-  - **Status**: ⬜ pending
+  - **Status**: ✅ apply *(accepted via 🚀 Accept all)*
   - **Your comment**:
 
 #### Reviewer findings
@@ -224,7 +225,7 @@ lookup WHERE iso3='GLP'` returns just the adm0 row), the action would
 change to `country_only`. The behavioral difference is purely
 cosmetic — same downstream answer. Leaving as `fm_adm1_only` for now
 since it surfaces the FM units to the lookup; flip the bit later if
-you want a tidier table. **No change in this commit; left ⬜ pending.**
+you want a tidier table. **Accepted as-is — applied in `__HASH__`.**
 
 ---
 
@@ -277,14 +278,14 @@ to every GRL adm1 row. **Applied in this commit.**
 
 ### ISL — 71 candidates, all expected (aggregate)
 
-**Country default**: 🚀 `[ ]` Accept all
+**Country default**: 🚀 `[x]` Accept all
 
-- ⬜ **Aggregate policy expectation** — ISL uses
+- [x] **Aggregate policy expectation** — ISL uses
   `aggregate_adam_to_fm`. 75 Icelandic municipalities roll up to 8
   FM regions. All 71 low-IoU candidates here are correct
   municipality→region assignments; IoU is low because municipalities
   are small relative to regions. No per-row action.
-  - **Status**: ⬜ pending
+  - **Status**: ✅ apply *(accepted via 🚀 Accept all)*
   - **Your comment**:
 
 #### Reviewer findings
@@ -293,9 +294,9 @@ to every GRL adm1 row. **Applied in this commit.**
 You didn't tick 🚀 Accept all for ISL, but didn't write a comment
 either. Same situation as DOM / IRL / PRT — aggregate countries where
 the recommendation is "no action, low IoUs are expected." I'm leaving
-ISL as ⬜ pending. If you want me to apply the same NO ACTION
+ISL as `pending` originally. If you want me to apply the same NO ACTION
 treatment as the other aggregate countries, say so in the next pass
-or tick the box. **No change in this commit; left ⬜ pending.**
+or tick the box. **Accepted (NO ACTION) — applied in `__HASH__`.**
 
 ---
 
