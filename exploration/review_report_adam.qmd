@@ -613,7 +613,27 @@ Notable divergences:
 
 ## What's left
 
-- **33 of 68 ATLANTIC_ISO3 countries** have no policy entry yet — they're not currently in `storms.adam_exposure`, so the silent `country_only` default does no harm. Need explicit entries before ADAM starts reporting on them (e.g. when ETF rolls a new storm into one of those iso3s).
+```{python}
+#| label: whats-left-coverage
+seeded_isos = set(POLICY_DF["iso3"])
+atlantic_isos = set(ATLANTIC_ISO3) if "ATLANTIC_ISO3" in dir() else None
+# Pull ATLANTIC_ISO3 from the build module so the number is always live
+from src.static.adam.inputs import ATLANTIC_ISO3 as _atl  # noqa: E402
+atlantic_isos = set(_atl)
+missing = sorted(atlantic_isos - seeded_isos)
+
+display(Markdown(
+    f"- **Policy coverage of ATLANTIC_ISO3**: "
+    f"{len(seeded_isos & atlantic_isos)} of {len(atlantic_isos)} "
+    f"iso3s have an explicit `[adam_policy]` entry. "
+    + (
+        f"Missing ({len(missing)}): {', '.join(missing)}."
+        if missing else
+        "**All countries covered.**"
+      )
+))
+```
+
 - **Upstream fix in `ocha-lens`** for the iso3 misattribution bug — not blocking this work, but unlocks the ~10 iso3s currently stuck at 0% adm1 attach.
 - **Blob-mirror `ge_adm1.parquet`** — currently lives at `data/static/` (gitignored, 278 MB). Once policy is settled, a single commit can flip the loader from local-first to blob-first.
-- **Optional: per-row notes for KNA / MTQ** — both seeded as `needs_manual_mapping` but no per-row caveats authored yet. The lookup attaches via best-IoU which works most of the time, but won't catch the actual boundary-reform stories the way CUB's per_row_notes do for GDACS.
+- **`needs_manual_mapping` countries** (CUB, KNA, PAN, TTO, SLV, VCT, BRB) — auto-matching is in place but per-row caveats may still be valuable for the boundary-reform cases. CUB / NIC / GRL / ISL / PAN are already handled at the GDACS-side via `[[gdacs_shared_source]]`; ADAM-side per-row notes are a future polish item rather than a blocker.
