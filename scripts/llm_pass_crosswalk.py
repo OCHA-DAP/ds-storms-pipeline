@@ -28,11 +28,50 @@ Run from repo root::
 
 import argparse
 import logging
+import re
 import sys
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import coloredlogs
 import pandas as pd
+
+
+# Countries where the [adam_policy] = needs_manual_mapping but the row-
+# level data is clean enough to resolve algorithmically by name match.
+# For each FM polygon in these countries the LLM pass picks the best
+# name-similarity ADAM partner above noise (or the sole partner if
+# there is only one), promotes to match or fm_in_adam based on shared
+# ADAMs across FMs, drops the other above-noise rows as boundary
+# spillover, and sets below-noise rows to their natural `noise` label.
+LLM_RESOLVE_COUNTRIES = ["BRB", "CUB", "KNA", "PAN", "SLV", "TTO", "VCT"]
+
+NOISE_IOU = 0.05
+
+
+def normalize_name(s) -> str:
+    """Lowercase, strip accents, normalize St./Saint, strip punctuation."""
+    if not s or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    s = str(s).lower().strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"\bst\.?\b", "saint", s)
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def name_match_score(a, b) -> float:
+    """Return 0–1 similarity between two place names. Uses
+    SequenceMatcher.ratio() on normalized strings, which is robust to
+    abbreviations (St. ↔ Saint), accents (Holguín ↔ Holguan), and
+    minor typos (Saint Thomas ↔ St. Tomas)."""
+    na, nb = normalize_name(a), normalize_name(b)
+    if not na or not nb:
+        return 0.0
+    return SequenceMatcher(None, na, nb).ratio()
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +243,103 @@ def main() -> int:
         xw.at[idx, "classification_type"] = "llm"
         xw.at[idx, "note"] = note
         applied += 1
+
+    # ── Resolve needs_manual_mapping countries by name match ────────
+    # For each FM polygon, pick best-name-match ADAM partner above
+    # noise (or sole partner). Promote to match or fm_in_adam based on
+    # whether multiple FMs share the same ADAM as their best partner.
+    # Drop other above-noise rows. Set below-noise rows to `noise`.
+    resolved = 0
+    for iso3 in LLM_RESOLVE_COUNTRIES:
+        country = xw[(xw["iso3"] == iso3) & (xw["row_kind"] == "overlap")]
+        country_spatial = country[country["classification_type"] == "spatial"]
+        if len(country_spatial) == 0:
+            continue
+        above = country_spatial[country_spatial["iou"] >= NOISE_IOU]
+
+        # For each FM, pick best-name-match ADAM among above-noise.
+        # If only one above-noise candidate, it's the primary by default
+        # (high IoU + sole candidate = clearly the match, even if name
+        # disagrees, e.g. TTO Couva-Tabaquite-Talparo ↔ Couva).
+        primary_per_fm: dict[str, tuple[float, float]] = {}  # fm_pcode -> (adam_id, score)
+        for fm_pcode, g in above.groupby("fm_pcode"):
+            fm_name = g.iloc[0]["fm_name"]
+            scored = [
+                (r["adam_admin_id"], name_match_score(fm_name, r["adam_admin_name"]))
+                for _, r in g.iterrows()
+            ]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            primary_per_fm[fm_pcode] = scored[0]
+
+        # Count how many FMs picked each ADAM as their primary
+        # (→ fm_in_adam if shared by multiple FMs).
+        fms_per_primary_adam: dict[float, list[str]] = {}
+        for fm_pcode, (adam_id, _) in primary_per_fm.items():
+            fms_per_primary_adam.setdefault(adam_id, []).append(fm_pcode)
+
+        # Apply edits.
+        for idx in country_spatial.index:
+            r = xw.loc[idx]
+            fm_pcode = r["fm_pcode"]
+            adam_id = r["adam_admin_id"]
+            iou = r["iou"]
+            primary = primary_per_fm.get(fm_pcode)
+
+            if iou < NOISE_IOU:
+                xw.at[idx, "status"] = "noise"
+                xw.at[idx, "classification_type"] = "llm"
+                xw.at[idx, "note"] = (
+                    f"Below-noise overlap (IoU {iou:.3f}). Auto-relabel "
+                    f"from needs_review (country policy={r['policy']}) "
+                    f"to noise during LLM resolution of {iso3}."
+                )
+                resolved += 1
+                continue
+
+            if primary is None or adam_id != primary[0]:
+                # Above-noise spillover — drop
+                primary_name = ""
+                if primary is not None:
+                    primary_name = above[above["adam_admin_id"] == primary[0]].iloc[0]["adam_admin_name"]
+                xw.at[idx, "status"] = "drop"
+                xw.at[idx, "classification_type"] = "llm"
+                xw.at[idx, "note"] = (
+                    f"Above-noise boundary spillover (IoU {iou:.3f}). "
+                    f"FM '{r['fm_name']}' canonical match is ADAM "
+                    f"'{primary_name}' by name."
+                )
+                resolved += 1
+                continue
+
+            # This is the primary
+            score = primary[1]
+            shared_fms = fms_per_primary_adam[adam_id]
+            if len(shared_fms) == 1:
+                xw.at[idx, "status"] = "match"
+                xw.at[idx, "classification_type"] = "llm"
+                xw.at[idx, "note"] = (
+                    f"LLM name-match resolution: FM '{r['fm_name']}' ↔ "
+                    f"ADAM '{r['adam_admin_name']}' "
+                    f"(name-score {score:.2f}, IoU {iou:.2f}). "
+                    f"Country was needs_manual_mapping; this row is a "
+                    f"clean 1:1 correspondence."
+                )
+            else:
+                # Multiple FMs share this ADAM as primary → fm_in_adam
+                others = [p for p in shared_fms if p != fm_pcode]
+                xw.at[idx, "status"] = "fm_in_adam"
+                xw.at[idx, "classification_type"] = "llm"
+                xw.at[idx, "note"] = (
+                    f"LLM name-match resolution: FM '{r['fm_name']}' is "
+                    f"one of {len(shared_fms)} FM polygons sharing ADAM "
+                    f"'{r['adam_admin_name']}' (others: "
+                    f"{', '.join(str(p) for p in others)}). "
+                    f"ADAM is coarser than FM for this region."
+                )
+            resolved += 1
+
+    logger.info("Resolved %d rows across %s",
+                resolved, LLM_RESOLVE_COUNTRIES)
 
     # ── Cascade promotions ──────────────────────────────────────────
     # Dropping a spillover row can collapse the topology count for the
