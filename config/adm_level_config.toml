@@ -555,8 +555,8 @@ action = "accept"
 action = "accept"
 
 [adam_policy.MSR]
-action = "country_only"
-note = "ADAM emits 7 settlement-level names for MSR (Brodericks, Central, East, North, Plymouth, Salem, South) — Plymouth is the volcano-destroyed former capital, so these are real MSR settlements. FM publishes MSR at adm1 as 3 parishes (Saint Anthony, Saint Georges, Saint Peter). The two admin layers are at different levels; the ADAM settlements don't aggregate cleanly to FM parishes by any spatial or name match. No usable per-name crosswalk to FM adm1 — country_only attaches ADAM exposure at the country (adm0) level only."
+action = "accept"
+note = "ADAM admin layer has 3 MSR parishes (Saint Anthony, Saint Georges, Saint Peter) that match FM's 3 parishes cleanly (mean IoU 0.96). NOTE: ADAM's exposure CSVs for MSR emit settlement-level names (Plymouth, Salem, Brodericks, Central, East, North, South) — different from the parish names in this lookup. Those settlement-level exposure rows won't match any lookup row and effectively drop from adm1 reporting; ADAM data only surfaces at adm0 in practice unless WFP starts emitting parish-level data."
 
 [adam_policy.SPM]
 action = "accept"

@@ -50,6 +50,7 @@ Audit trail — these landed in earlier commits, kept for reference.
 - [x] PRI — added `[adam_overrides.PRI] fm_level = 1` so ADAM bridge uses FM adm1 (= whole island) not the GDACS-side fm_level=2 → `08834d8`
 - [x] 33 missing iso3 policy entries seeded — see Phase 3 section below → `08834d8`
 - [x] GLP + ISL — both `🚀 Accept all` ticked, NO ACTION applied (no TOML change) → `8cd4c53`
+- [x] MSR — reviewer pushback: switched country_only → accept (admin-layer match is clean; settlement-level exposure rows fail to join naturally) → `__HASH__`
 
 ---
 
@@ -358,18 +359,30 @@ rows now carry that caveat. **Applied in this commit.**
 thing. We should be comparing ADAM (WFP) with FM - unclear that you have 
 the right policy or not ni the QMD
 
-**My response**: Right, that framing was wrong. Rewrote the MSR note
-to compare ADAM-emitted-names directly with FM parishes (no WFP-vs-
-ADAM framing). New note: *"ADAM emits 7 settlement-level names for
-MSR (Brodericks, Central, East, North, Plymouth, Salem, South) —
-Plymouth is the volcano-destroyed former capital, so these are real
-MSR settlements. FM publishes MSR at adm1 as 3 parishes (Saint
-Anthony, Saint Georges, Saint Peter). The two admin layers are at
-different levels; the ADAM settlements don't aggregate cleanly to FM
-parishes by any spatial or name match. No usable per-name crosswalk
-to FM adm1 — country_only attaches ADAM exposure at the country
-(adm0) level only."* Policy stays as `country_only`. **Applied in
-this commit.**
+**My response (first pass)**: Rewrote the note to compare ADAM-side
+parishes directly with FM parishes. Kept policy as `country_only`
+because ADAM's exposure CSVs emit settlement-level names. Applied in
+`08834d8`.
+
+**My response (second pass — reviewer pushback)**: You noted that
+the qmd panel shows 3 ADAM admin polygons cleanly matching 3 FM
+parishes — `country_only` was over-conservative. The data is:
+
+- **ADAM admin layer (boundary reference)**: 3 parishes (Saint
+  Anthony, Saint Georges, Saint Peter), match FM cleanly with mean
+  IoU 0.96
+- **ADAM exposure CSV feed**: 7 settlement names (Plymouth, Salem,
+  Brodericks, Central, East, North, South) that don't match the
+  parish names
+
+Switched MSR to `accept`. The 3 parish-level lookup rows are now
+emitted with the clean spatial match. ADAM exposure rows with
+settlement names just naturally fail to join the lookup (no matching
+adam_admin_name in the lookup) and drop from adm1 reporting — same
+practical outcome as `country_only` for the current settlement-level
+feed, but cleaner representation and ready to attach immediately if
+WFP starts emitting parish-level data for MSR. **Applied in commit
+`__HASH__`.**
 
 ---
 
