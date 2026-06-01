@@ -50,7 +50,7 @@ Audit trail — these landed in earlier commits, kept for reference.
 - [x] PRI — added `[adam_overrides.PRI] fm_level = 1` so ADAM bridge uses FM adm1 (= whole island) not the GDACS-side fm_level=2 → `08834d8`
 - [x] 33 missing iso3 policy entries seeded — see Phase 3 section below → `08834d8`
 - [x] GLP + ISL — both `🚀 Accept all` ticked, NO ACTION applied (no TOML change) → `8cd4c53`
-- [x] MSR — reviewer pushback: switched country_only → accept (admin-layer match is clean; settlement-level exposure rows fail to join naturally) → `__HASH__`
+- [x] MSR — reviewer pushback: switched country_only → accept (admin-layer match is clean; settlement-level exposure rows fail to join naturally) → `5b80945`
 
 ---
 
@@ -382,7 +382,7 @@ adam_admin_name in the lookup) and drop from adm1 reporting — same
 practical outcome as `country_only` for the current settlement-level
 feed, but cleaner representation and ready to attach immediately if
 WFP starts emitting parish-level data for MSR. **Applied in commit
-`__HASH__`.**
+`5b80945`.**
 
 ---
 
