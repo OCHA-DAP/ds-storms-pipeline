@@ -416,15 +416,11 @@ for iso3 in POLICY_DF["iso3"].tolist():
         continue
 
     # ── Map ──
-    # Two rendering modes:
-    #   aggregate_adam_to_fm — FM-dominant: each FM region gets a
-    #     categorical fill color so the rollup target is obvious; ADAM
-    #     polygons drawn as thin dashed subdivisions on top. IoU-based
-    #     coloring is suppressed because for aggregate it's always low
-    #     (each ADAM polygon is small relative to its FM region) and
-    #     would mislead.
-    #   everything else — current behavior: FM filled by lookup outcome
-    #     (green/orange/red/gray), ADAM heavy magenta dashed.
+    # One rendering style for every country, so the visual contract is
+    # consistent: FM polygons filled by lookup outcome (green / orange /
+    # red / grey), FM border thick + dark so the regions are always
+    # readable underneath the ADAM overlay, ADAM polygons drawn as bright
+    # pink dashed on top with a white casing for contrast.
     if not lk.empty and "fm_pcode" in fm.columns:
         fm_lk = fm.merge(
             lk[["fm_pcode", "adam_admin_id", "adam_admin_name",
@@ -437,57 +433,29 @@ for iso3 in POLICY_DF["iso3"].tolist():
             iou=pd.NA, caveat_kind=pd.NA,
         )
 
-    is_aggregate = (action == "aggregate_adam_to_fm")
+    fm_lk["_color"] = fm_lk.apply(_row_fill_color, axis=1)
 
     fig, ax = plt.subplots(figsize=(11, 7))
-
-    if is_aggregate:
-        # One color per FM region (categorical). Multiple FM rows for
-        # the same fm_pcode share the color. tab10 palette cycles every
-        # 10 — fine for our scope (max 12 FM regions in any aggregate
-        # case).
-        unique_fm = sorted(fm_lk["fm_pcode"].dropna().unique())
-        palette = plt.get_cmap("tab10")
-        color_map = {p: palette(i % 10) for i, p in enumerate(unique_fm)}
-        fm_lk["_color"] = fm_lk["fm_pcode"].map(color_map).fillna("#ddd")
-        # FM dominant: thick dark border, solid fill.
-        fm_lk.plot(
-            ax=ax, color=fm_lk["_color"],
-            edgecolor="black", linewidth=2.0, alpha=0.55,
+    # FM polygons — filled by lookup outcome, thick dark border so the
+    # FM units stay readable even when ADAM dashed lines run over them.
+    fm_lk.plot(
+        ax=ax, color=fm_lk["_color"],
+        edgecolor="black", linewidth=1.5, alpha=0.55,
+    )
+    # ADAM polygons — bright pink dashed on a white casing.
+    if len(adam_admin) > 0:
+        adam_admin.plot(
+            ax=ax, facecolor="none", edgecolor="white", linewidth=4.0,
         )
-        # ADAM subdivisions: thin grey dashed.
-        if len(adam_admin) > 0:
-            adam_admin.plot(
-                ax=ax, facecolor="none", edgecolor="#333",
-                linewidth=0.6, linestyle=(0, (3, 2)),
-            )
-        title = (
-            f"{iso3} — aggregate_adam_to_fm: FM regions (filled, thick "
-            f"border) / ADAM admin polygons (thin dashed subdivisions)"
-        )
-    else:
-        fm_lk["_color"] = fm_lk.apply(_row_fill_color, axis=1)
-        fm_lk.plot(
-            ax=ax, color=fm_lk["_color"],
-            edgecolor="#222", linewidth=0.7, alpha=0.6,
-        )
-        if len(adam_admin) > 0:
-            adam_admin.plot(
-                ax=ax, facecolor="none", edgecolor="white", linewidth=4.0,
-            )
-            adam_admin.plot(
-                ax=ax, facecolor="none", edgecolor="#e6007a",
-                linewidth=2.2, linestyle=(0, (8, 4)),
-            )
-        title = (
-            f"{iso3} — FM polygons (filled by lookup outcome) / "
-            f"ADAM admin polygons (magenta dashed)"
+        adam_admin.plot(
+            ax=ax, facecolor="none", edgecolor="#e6007a",
+            linewidth=2.0, linestyle=(0, (8, 4)),
         )
 
-    # FM labels — show only one label per FM polygon (multiple aggregate
-    # rows would otherwise stack the same name 9× on Capital Region).
+    # FM labels — one per FM polygon (multiple-row aggregate cases would
+    # otherwise stack the same name N× on a region).
     fm_label_seen: set[str] = set()
-    if len(fm_lk) <= 25 or is_aggregate:
+    if len(fm_lk) <= 30:
         for _, r in fm_lk.iterrows():
             if r.get("fm_pcode") in fm_label_seen:
                 continue
@@ -496,12 +464,13 @@ for iso3 in POLICY_DF["iso3"].tolist():
                 ax.annotate(
                     r["fm_name"],
                     xy=(pt.x, pt.y), ha="center", va="center",
-                    fontsize=8 if is_aggregate else 7,
-                    color="black", fontweight="bold",
+                    fontsize=7, color="black", fontweight="bold",
                 )
                 fm_label_seen.add(r["fm_pcode"])
-    # ADAM labels only for non-aggregate (aggregate has too many)
-    if not is_aggregate and len(adam_admin) and len(adam_admin) <= 25:
+    # ADAM labels — same threshold; if a country has > 30 ADAM polygons
+    # (the ISL / DOM aggregate cases) the map is too dense for labels
+    # anyway and the per-row table below carries the names.
+    if len(adam_admin) and len(adam_admin) <= 30:
         for _, r in adam_admin.iterrows():
             if pd.notna(r.get("adm1_name")) and r.get("geometry") is not None:
                 pt = r["geometry"].representative_point()
@@ -513,7 +482,11 @@ for iso3 in POLICY_DF["iso3"].tolist():
                     fontsize=6, color="#e6007a", style="italic",
                     fontweight="bold",
                 )
-    ax.set_title(title, fontsize=11)
+    ax.set_title(
+        f"{iso3} — FM polygons (filled by lookup outcome, dark border) / "
+        f"ADAM admin polygons (magenta dashed)",
+        fontsize=11,
+    )
     ax.set_axis_off()
     plt.tight_layout()
     plt.show()
