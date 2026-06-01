@@ -205,10 +205,66 @@ def main() -> int:
         xw.at[idx, "note"] = note
         applied += 1
 
+    # ── Cascade promotions ──────────────────────────────────────────
+    # Dropping a spillover row can collapse the topology count for the
+    # ADAM/FM partner that survived. E.g. dropping Inagua×UNA leaves
+    # UNA with only 1 above-noise FM partner (New Providence), so
+    # New Providence×UNA should now be `match` not `fm_in_adam`.
+    # Auto-detect and promote.
+    NOISE = 0.05
+    overlap = xw[xw["row_kind"] == "overlap"]
+    counted = overlap[
+        (overlap["iou"] >= NOISE) & (overlap["status"] != "drop")
+    ]
+    fm_count = counted.groupby(["iso3", "fm_pcode"]).size().to_dict()
+    aa_count = counted.groupby(["iso3", "adam_admin_id"]).size().to_dict()
+
+    def expected(r) -> str:
+        if r["iou"] < NOISE:
+            return "noise"
+        nf = fm_count.get((r["iso3"], r["fm_pcode"]), 0)
+        na = aa_count.get((r["iso3"], r["adam_admin_id"]), 0)
+        if nf == 1 and na == 1:
+            return "match"
+        if nf > 1 and na == 1:
+            return "adam_in_fm"
+        if nf == 1 and na > 1:
+            return "fm_in_adam"
+        return "fragmented"
+
+    cascaded = 0
+    for idx in xw.index:
+        r = xw.loc[idx]
+        # Only cascade spatial overlap rows that aren't already drop/noise
+        if r["row_kind"] != "overlap":
+            continue
+        if r["classification_type"] != "spatial":
+            continue
+        if r["status"] in ("drop", "noise", "needs_review"):
+            continue
+        # Skip rows under a policy override (drop / needs_review applied)
+        if isinstance(r["policy"], str) and r["policy"]:
+            continue
+        exp = expected(r)
+        if r["status"] != exp:
+            old_status = r["status"]
+            xw.at[idx, "status"] = exp
+            xw.at[idx, "classification_type"] = "llm"
+            xw.at[idx, "note"] = (
+                f"Cascade: {old_status} → {exp} after LLM-pass drops "
+                f"removed the partner that justified the previous "
+                f"topology label. Counts are now ({fm_count.get((r['iso3'], r['fm_pcode']), 0)} "
+                f"above-noise ADAMs in this FM, "
+                f"{aa_count.get((r['iso3'], r['adam_admin_id']), 0)} "
+                f"above-noise FMs in this ADAM)."
+            )
+            cascaded += 1
+
     xw.to_csv(args.csv, index=False)
     logger.info(
-        "Applied %d edits, skipped %d non-spatial rows, %d not found",
-        applied, skipped_not_spatial, len(not_found),
+        "Applied %d primary edits, %d cascade promotions, "
+        "skipped %d non-spatial rows, %d not found",
+        applied, cascaded, skipped_not_spatial, len(not_found),
     )
     if not_found:
         logger.warning("Not found in CSV: %s", not_found)
