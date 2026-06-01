@@ -1,0 +1,219 @@
+"""LLM pass on data/adam_fm_crosswalk.csv — Claude's row-level decisions.
+
+This script encodes the LLM (Claude) review of `fragmented` rows and
+applies them as overrides with classification_type="llm". It is
+idempotent and safe: it only edits rows currently classified as
+`spatial` — if you've manually changed a row to `human`, this script
+leaves it alone. If you re-run it after rebuilding the CSV, it'll
+re-apply the same set of edits.
+
+Decisions are based on:
+
+  * Names — when FM and ADAM disagree spatially but the name match is
+    obviously correct (e.g. FM North Andros ↔ ADAM North Andros, even
+    though ADAM Central Andros has a higher IoU with the FM polygon).
+  * Topology context — when a fragmented label is really an
+    adam_in_fm relationship in disguise (e.g. FM Central Abaco
+    straddles ADAM N+S Abaco because ADAM has no clean Central
+    Abaco polygon).
+  * Noise from placeholders — ADAM polygons named "Under National
+    Administration" (BHS 901518, USA 902134) or with NaN names
+    (NIC 900324, 900325) consistently produce spurious overlaps.
+    Drop them.
+
+Run from repo root::
+
+    uv run python scripts/llm_pass_crosswalk.py
+"""
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+import coloredlogs
+import pandas as pd
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_IN = REPO_ROOT / "data" / "adam_fm_crosswalk.csv"
+
+logger = logging.getLogger(__name__)
+
+
+# Each edit is (iso3, fm_pcode, adam_admin_id, new_status, note).
+# new_status="" means no status change (just adding a note).
+EDITS: list[tuple[str, str, float, str, str]] = [
+    # ── BHS fragmented (8) ──────────────────────────────────────────
+    (
+        "BHS", "BHS-20201113-06", 901515.0, "adam_in_fm",
+        "FM Central Abaco straddles ADAM's North Abaco + South Abaco "
+        "because ADAM has no clean Central Abaco polygon (the one it "
+        "carries is tiny — IoU 0.04, below noise). Report alongside "
+        "both N + S Abaco ADAMs with a coarseness caveat.",
+    ),
+    (
+        "BHS", "BHS-20201113-06", 901511.0, "adam_in_fm",
+        "FM Central Abaco straddles ADAM's North Abaco + South Abaco "
+        "because ADAM has no clean Central Abaco polygon. Same caveat "
+        "as the South Abaco row.",
+    ),
+    (
+        "BHS", "BHS-20201113-11", 901507.0, "drop",
+        "Boundary spillover. FM East Grand Bahama is dominated by "
+        "ADAM East Grand Bahama (IoU 0.72, adam_in_fm). The 10% "
+        "overlap with ADAM Freeport is digitization fuzz.",
+    ),
+    (
+        "BHS", "BHS-20201113-16", 901518.0, "drop",
+        "Spillover from ADAM placeholder polygon 'Under National "
+        "Administration'. FM Inagua's canonical match is ADAM Inagua "
+        "(IoU 0.92, adam_in_fm).",
+    ),
+    (
+        "BHS", "BHS-20201113-23", 901502.0, "drop",
+        "Boundary disagreement between FM and ADAM Andros. ADAM splits "
+        "the area into Central + North Andros; FM treats it as one "
+        "North Andros polygon. The spatial primary (Central Andros, "
+        "IoU 0.47) is collateral — dropped to avoid double-counting. "
+        "Canonical match is the name-aligned row below "
+        "(FM North Andros ↔ ADAM North Andros).",
+    ),
+    (
+        "BHS", "BHS-20201113-23", 901512.0, "match",
+        "Name match wins over spatial. FM and ADAM disagree on the "
+        "Central/North Andros boundary — ADAM North Andros polygon "
+        "covers a smaller area than FM North Andros (which extends "
+        "into what ADAM calls Central Andros). Report this ADAM "
+        "number with a caveat that ADAM's polygon is geographically "
+        "smaller than the FM polygon it represents.",
+    ),
+    (
+        "BHS", "BHS-20201113-24", 901503.0, "drop",
+        "Boundary spillover. FM North Eleuthera is dominated by "
+        "ADAM North Eleuthera (IoU 0.60, adam_in_fm). The 22% overlap "
+        "with ADAM Central Eleuthera is digitization fuzz.",
+    ),
+    (
+        "BHS", "BHS-20201113-32", 901507.0, "adam_in_fm",
+        "FM West Grand Bahama is covered by both ADAM Freeport (the "
+        "city, IoU 0.64) and ADAM West Grand Bahama (the rest of the "
+        "region, IoU 0.12, already adam_in_fm). Both aggregate into "
+        "FM West Grand Bahama. Report with caveat that ADAM splits "
+        "this region into city + non-city polygons.",
+    ),
+    # ── NIC fragmented (6) — all unnamed (N/A) ADAM polygons ────────
+    (
+        "NIC", "NIC-20231203-06", 900325.0, "drop",
+        "Unnamed (N/A) ADAM polygon spilling across FM departments. "
+        "Likely one of Nicaragua's autonomous coastal regions (RACCN/"
+        "RACCS) but with N/A in upstream adm1_name. FM León's "
+        "canonical match is ADAM León (IoU 0.93, adam_in_fm).",
+    ),
+    (
+        "NIC", "NIC-20231203-09", 900325.0, "drop",
+        "Unnamed (N/A) ADAM polygon. FM Managua's canonical match is "
+        "ADAM Managua (IoU 0.83, adam_in_fm).",
+    ),
+    (
+        "NIC", "NIC-20231203-11", 900324.0, "drop",
+        "Unnamed (N/A) ADAM polygon. FM Chontales's canonical match "
+        "is ADAM Chontales (IoU 0.80, adam_in_fm).",
+    ),
+    (
+        "NIC", "NIC-20231203-12", 900324.0, "drop",
+        "Unnamed (N/A) ADAM polygon. FM Granada's canonical match is "
+        "ADAM Granada (IoU 0.52, adam_in_fm).",
+    ),
+    (
+        "NIC", "NIC-20231203-14", 900324.0, "drop",
+        "Unnamed (N/A) ADAM polygon overlapping at 30% IoU — the "
+        "largest of the N/A overlaps but still without a clean name. "
+        "FM Rivas's canonical match is ADAM Rivas (IoU 0.41, "
+        "adam_in_fm).",
+    ),
+    (
+        "NIC", "NIC-20231203-15", 900324.0, "drop",
+        "Unnamed (N/A) ADAM polygon. FM Río San Juan's canonical "
+        "match is ADAM Río San Juan (IoU 0.78, adam_in_fm).",
+    ),
+    # ── USA fragmented (2) — both 'Under National Administration' ───
+    (
+        "USA", "USA-20230119-26", 902134.0, "drop",
+        "Spillover from ADAM placeholder polygon 'Under National "
+        "Administration'. FM Michigan's canonical match is ADAM "
+        "Michigan (IoU 0.61, adam_in_fm).",
+    ),
+    (
+        "USA", "USA-20230119-55", 902134.0, "drop",
+        "Spillover from ADAM placeholder polygon 'Under National "
+        "Administration'. FM Wisconsin's canonical match is ADAM "
+        "Wisconsin (IoU 0.85, adam_in_fm).",
+    ),
+]
+
+
+def main() -> int:
+    coloredlogs.install(
+        level="INFO",
+        fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--csv", type=Path, default=DEFAULT_IN)
+    args = ap.parse_args()
+
+    xw = pd.read_csv(args.csv)
+    logger.info("Loaded %d rows from %s", len(xw), args.csv)
+    # `note` is read as float64 when the column is empty. Coerce to
+    # object so string assignment works.
+    for col in ("status", "classification_type", "note"):
+        if xw[col].dtype != object:
+            xw[col] = xw[col].astype(object)
+    xw["note"] = xw["note"].fillna("")
+
+    applied = 0
+    skipped_not_spatial = 0
+    not_found = []
+    for iso3, fm_pcode, adam_id, new_status, note in EDITS:
+        mask = (
+            (xw["iso3"] == iso3)
+            & (xw["fm_pcode"] == fm_pcode)
+            & (xw["adam_admin_id"] == adam_id)
+        )
+        n = mask.sum()
+        if n == 0:
+            not_found.append((iso3, fm_pcode, adam_id))
+            continue
+        if n > 1:
+            logger.warning(
+                "Edit key matched %d rows: %s/%s/%s — skipping",
+                n, iso3, fm_pcode, adam_id,
+            )
+            continue
+        idx = xw.index[mask][0]
+        current_cls = xw.at[idx, "classification_type"]
+        if current_cls != "spatial":
+            skipped_not_spatial += 1
+            logger.info(
+                "Skipping %s/%s/%s — already classification_type=%s",
+                iso3, fm_pcode, adam_id, current_cls,
+            )
+            continue
+        if new_status:
+            xw.at[idx, "status"] = new_status
+        xw.at[idx, "classification_type"] = "llm"
+        xw.at[idx, "note"] = note
+        applied += 1
+
+    xw.to_csv(args.csv, index=False)
+    logger.info(
+        "Applied %d edits, skipped %d non-spatial rows, %d not found",
+        applied, skipped_not_spatial, len(not_found),
+    )
+    if not_found:
+        logger.warning("Not found in CSV: %s", not_found)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
