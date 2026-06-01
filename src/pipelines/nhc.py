@@ -1737,6 +1737,7 @@ def _process_buffer_exposure_country(
     out_table: str,
     engine,
     drop_cols: list[str] | None = None,
+    buffers_union_prep=None,            # shapely PreparedGeometry over union of gdf_buffers
 ) -> int:
     """Compute and write per-unit exposure for all admin units in one country.
 
@@ -1754,6 +1755,12 @@ def _process_buffer_exposure_country(
     from src.utils.exposure import calculate_exposure
 
     country_geom = country_units.geometry.union_all()
+    # Prefilter against the prepared union of all buffers. For tracks this
+    # is near-redundant with the bbox check (localized buffers); for WSP
+    # it's the actual win, since basin-wide bboxes let most countries pass
+    # the bbox check even when no polygon touches them.
+    if buffers_union_prep is not None and not buffers_union_prep.intersects(country_geom):
+        return 0
     candidate_idx = list(buffers_sindex.intersection(country_geom.bounds))
     if not candidate_idx:
         return 0
@@ -1928,6 +1935,7 @@ def _run_track_exp(
     admin_levels = session.admin_levels
 
     try:
+        from shapely.prepared import prep
         logger.info(f"Loading {buffers_log_label} for exposure calculation...")
         gdf_buffers = load_buffers(engine)
         if gdf_buffers.empty:
@@ -1937,6 +1945,7 @@ def _run_track_exp(
             return
         buffers_sindex = gdf_buffers.sindex
         buffers_bbox = tuple(gdf_buffers.total_bounds)
+        buffers_union_prep = prep(gdf_buffers.geometry.union_all())
 
         for admin_level in admin_levels:
             country_groups = session.country_groups_by_level[admin_level]
@@ -1963,6 +1972,7 @@ def _run_track_exp(
                     admin_level=admin_level,
                     gdf_buffers=gdf_buffers,
                     buffers_sindex=buffers_sindex,
+                    buffers_union_prep=buffers_union_prep,
                     da_wp=session.da_wp,
                     done_df=done_df,
                     overwrite=overwrite,
@@ -2443,6 +2453,7 @@ def _run_exp_year_chunk(
     """
     import warnings
     from rasterio.errors import ShapeSkipWarning
+    from shapely.prepared import prep
     from tqdm import tqdm
 
     warnings.filterwarnings("ignore", category=ShapeSkipWarning)
@@ -2454,6 +2465,23 @@ def _run_exp_year_chunk(
         )
     engine = session.engine
     admin_levels = session.admin_levels
+
+    # Compact description of the active filters — surfaced in every load
+    # log line so it's obvious what's being pulled from the DB. Without
+    # this, "loading year 2025" can read as a full-year scan when in
+    # realtime mode we're really pulling a single issued_time.
+    filter_parts: list[str] = []
+    if issued_time is not None:
+        filter_parts.append(f"issued_time={issued_time}")
+    if since:
+        filter_parts.append(f"since={since}")
+    if until:
+        filter_parts.append(f"until={until}")
+    if basin:
+        filter_parts.append(f"basin={basin}")
+    filters_desc = (
+        ", ".join(filter_parts) if filter_parts else "no filters (full table)"
+    )
 
     try:
         if single_year is not None:
@@ -2476,7 +2504,9 @@ def _run_exp_year_chunk(
         if not years:
             logger.info(f"{table_label}: no years match filters. Skipping.")
             return
-        logger.info(f"{table_label}: {len(years)} year chunks: {years}")
+        logger.info(
+            f"{table_label}: {len(years)} year chunks: {years} ({filters_desc})"
+        )
 
         done_by_level = {
             al: (
@@ -2491,7 +2521,9 @@ def _run_exp_year_chunk(
 
         total_processed = 0
         for year in years:
-            logger.info(f"{table_label}: loading year {year}…")
+            logger.info(
+                f"{table_label}: loading year {year} ({filters_desc})…"
+            )
             gdf_wsp = load_chunk(engine, year)
             if gdf_wsp.empty:
                 logger.info(f"{table_label}: year {year} has no polygons; skipping")
@@ -2500,12 +2532,14 @@ def _run_exp_year_chunk(
                 gdf_wsp = gdf_wsp[gdf_wsp["issued_time"] == pd.Timestamp(issued_time)]
                 if gdf_wsp.empty:
                     continue
+            n_distinct_it = gdf_wsp["issued_time"].nunique()
             logger.info(
-                f"{table_label}: year {year} → {len(gdf_wsp)} polygons; "
-                f"running per-admin-level country loop"
+                f"{table_label}: year {year} → {len(gdf_wsp)} polygons across "
+                f"{n_distinct_it} issued_time(s); running per-admin-level country loop"
             )
             wsp_sindex = gdf_wsp.sindex
             buffers_bbox = tuple(gdf_wsp.total_bounds)
+            buffers_union_prep = prep(gdf_wsp.geometry.union_all())
 
             for admin_level in admin_levels:
                 country_groups = session.country_groups_by_level[admin_level]
@@ -2527,6 +2561,7 @@ def _run_exp_year_chunk(
                         admin_level=admin_level,
                         gdf_buffers=gdf_wsp,
                         buffers_sindex=wsp_sindex,
+                        buffers_union_prep=buffers_union_prep,
                         da_wp=session.da_wp,
                         done_df=done_df,
                         overwrite=overwrite,
@@ -2546,7 +2581,7 @@ def _run_exp_year_chunk(
                     f"{year_writes} country writes, {bbox_skipped} bbox-prefiltered "
                     f"({total_processed} cumulative)"
                 )
-            del gdf_wsp, wsp_sindex
+            del gdf_wsp, wsp_sindex, buffers_union_prep
 
         logger.info(f"{table_label}: all years done; {total_processed} writes.")
     finally:
