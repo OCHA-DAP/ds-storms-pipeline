@@ -263,8 +263,11 @@ def country_crosswalk(
                     status = "fm_in_adam"
                 else:
                     status = "fragmented"
-            # Policy-driven overrides take precedence over topology
-            if overlap_status_override is not None:
+            # Policy-driven overrides take precedence over topology,
+            # but only for above-noise rows. Below-noise is boundary
+            # digitization fuzz regardless of policy — labeling it
+            # `noise` is the honest default.
+            if iou >= NOISE_IOU and overlap_status_override is not None:
                 status = overlap_status_override
             rows.append(policy_cols({
                 "iso3": iso3,

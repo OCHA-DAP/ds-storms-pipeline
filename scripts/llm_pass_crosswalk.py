@@ -286,14 +286,10 @@ def main() -> int:
             primary = primary_per_fm.get(fm_pcode)
 
             if iou < NOISE_IOU:
-                xw.at[idx, "status"] = "noise"
-                xw.at[idx, "classification_type"] = "llm"
-                xw.at[idx, "note"] = (
-                    f"Below-noise overlap (IoU {iou:.3f}). Auto-relabel "
-                    f"from needs_review (country policy={r['policy']}) "
-                    f"to noise during LLM resolution of {iso3}."
-                )
-                resolved += 1
+                # Below-noise rows are already labeled `noise` by the
+                # build script (policy override no longer applies below
+                # the noise threshold). No LLM decision needed — leave
+                # them spatial.
                 continue
 
             if primary is None or adam_id != primary[0]:
