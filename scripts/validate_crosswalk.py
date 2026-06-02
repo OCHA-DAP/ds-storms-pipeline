@@ -37,7 +37,7 @@ NOISE_IOU = 0.05
 
 VALID_STATUS = {
     "match", "adam_in_fm", "fm_in_adam", "fragmented",
-    "noise", "drop", "keep", "needs_review",
+    "noise", "drop", "needs_review",
     "fm_only", "adam_only",
 }
 VALID_CLASSIFICATION = {"spatial", "llm", "human"}
@@ -172,21 +172,15 @@ def main() -> int:
         n_fm_in_adam = statuses.get("fm_in_adam", 0)
         n_fragmented = statuses.get("fragmented", 0)
         n_fm_only = statuses.get("fm_only", 0)
-        n_keep = statuses.get("keep", 0)
-        # `keep` is the reviewer's "include despite noise/drop, with
-        # caveat" — exclusive with the spatial definitives. If `keep`
-        # is present, all other rows for this FM must be drop/noise.
         definitive_types = [
             t for t, n in [
                 ("match", n_match),
                 ("adam_in_fm", n_adam_in_fm),
                 ("fm_in_adam", n_fm_in_adam),
-                ("keep", n_keep),
             ] if n > 0
         ]
         has_definitive = (
-            n_match + n_adam_in_fm + n_fm_in_adam
-            + n_fm_only + n_keep > 0
+            n_match + n_adam_in_fm + n_fm_in_adam + n_fm_only > 0
         )
         policy = g.iloc[0]["policy"]
         # Uniqueness: exactly one definitive label kind per FM
