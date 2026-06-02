@@ -148,6 +148,59 @@ def main() -> int:
             topology_mismatches,
         )
 
+    # --- Check 3.5: FM uniqueness invariant ---
+    # Each FM polygon should resolve to exactly one of:
+    #   * 1 `match`        (clean 1:1)
+    #   * N `adam_in_fm`   (1 FM aggregates N ADAMs — all equal)
+    #   * 1 `fm_in_adam`   (FM is inside 1 ADAM, sibling of others)
+    #   * only drop/noise  (FM has no ADAM partner)
+    # Other rows must be drop / noise / keep / needs_review.
+    # Violations: multiple match, multiple fm_in_adam, mixed
+    # definitive labels, lingering fragmented.
+    DEFINITIVE = {"match", "adam_in_fm", "fm_in_adam"}
+    uniqueness_violations = 0
+    for (iso3, fm_pcode), g in xw[
+        xw["row_kind"].isin(["overlap", "fm_only"])
+    ].groupby(["iso3", "fm_pcode"]):
+        statuses = g["status"].value_counts().to_dict()
+        n_match = statuses.get("match", 0)
+        n_adam_in_fm = statuses.get("adam_in_fm", 0)
+        n_fm_in_adam = statuses.get("fm_in_adam", 0)
+        n_fragmented = statuses.get("fragmented", 0)
+        definitive_types = [
+            t for t, n in [
+                ("match", n_match),
+                ("adam_in_fm", n_adam_in_fm),
+                ("fm_in_adam", n_fm_in_adam),
+            ] if n > 0
+        ]
+        problem = None
+        if n_fragmented > 0:
+            problem = f"{n_fragmented} fragmented row(s) unresolved"
+        elif len(definitive_types) > 1:
+            problem = (f"mixed definitive labels: "
+                       f"{n_match}m + {n_adam_in_fm}aif + "
+                       f"{n_fm_in_adam}fia")
+        elif n_match > 1:
+            problem = f"{n_match} match rows (expected exactly 1)"
+        elif n_fm_in_adam > 1:
+            problem = f"{n_fm_in_adam} fm_in_adam rows (expected 1)"
+        if problem:
+            uniqueness_violations += 1
+            first_idx = g.index[0]
+            issues.append({
+                "iso3": iso3, "fm_pcode": fm_pcode,
+                "adam_admin_id": None,
+                "issue": f"FM uniqueness: {problem}",
+            })
+            for idx in g.index:
+                flag(idx, "fm_uniqueness")
+    if uniqueness_violations:
+        logger.warning(
+            "%d FM polygons violate uniqueness invariant",
+            uniqueness_violations,
+        )
+
     # --- Check 4: human-classified rows that match the spatial default ---
     suspect_human = 0
     for idx, r in xw[xw["classification_type"] == "human"].iterrows():
