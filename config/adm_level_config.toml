@@ -560,6 +560,14 @@ note = "FM adm1 for PRI is a single whole-territory polygon (the 78 municipios a
 action = "country_only"
 note = "FM adm1 for PRI is a single whole-territory polygon (matches ADAM's 1-polygon coverage). country_only attaches ADAM exposure at adm0 only; reporting at FM adm1 = same as adm0 = country level."
 
+[adam_policy.MAF]
+action = "country_only"
+note = "FM treats MAF (Saint-Martin, French collectivity) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Aggregating to adm1 adds nothing over adm0. Report at country level only."
+
+[adam_policy.JEY]
+action = "country_only"
+note = "FM treats JEY (Jersey) as 1 polygon; ADAM has 12 parishes. Aggregating 12 small parishes up to one FM polygon at adm1 adds no informational value for a country this size; report at country level only."
+
 
 # ── needs_manual_mapping: real boundary disagreement at same level ───
 # Same count on both sides but heavy multi_candidate overlap signals
