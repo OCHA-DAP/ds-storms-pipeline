@@ -584,6 +584,14 @@ note = "FM treats CUW (Curaçao) as 1 polygon; ADAM has 1 unnamed polygon (adm1_
 action = "country_only"
 note = "FM treats GIB (Gibraltar) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
 
+[adam_policy.ABW]
+action = "country_only"
+note = "FM treats ABW (Aruba) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.SPM]
+action = "country_only"
+note = "FM treats SPM (Saint Pierre and Miquelon) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
 
 # ── needs_manual_mapping: real boundary disagreement at same level ───
 # Same count on both sides but heavy multi_candidate overlap signals
