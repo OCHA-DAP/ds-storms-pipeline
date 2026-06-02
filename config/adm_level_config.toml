@@ -568,6 +568,22 @@ note = "FM treats MAF (Saint-Martin, French collectivity) as 1 polygon; ADAM has
 action = "country_only"
 note = "FM treats JEY (Jersey) as 1 polygon; ADAM has 12 parishes. Aggregating 12 small parishes up to one FM polygon at adm1 adds no informational value for a country this size; report at country level only."
 
+[adam_policy.BLM]
+action = "country_only"
+note = "FM treats BLM (Saint Barthélemy, French collectivity) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.FRO]
+action = "country_only"
+note = "FM treats FRO (Faroe Islands) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.CUW]
+action = "country_only"
+note = "FM treats CUW (Curaçao) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.GIB]
+action = "country_only"
+note = "FM treats GIB (Gibraltar) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
 
 # ── needs_manual_mapping: real boundary disagreement at same level ───
 # Same count on both sides but heavy multi_candidate overlap signals
