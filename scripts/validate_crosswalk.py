@@ -158,7 +158,11 @@ def main() -> int:
     # Violations: multiple match, multiple fm_in_adam, mixed
     # definitive labels, lingering fragmented.
     DEFINITIVE = {"match", "adam_in_fm", "fm_in_adam"}
+    # Country-level policies under which an FM with no ADAM partner
+    # is *expected* — the lookup reader emits a FM row with NULL ADAM.
+    FM_ONLY_POLICIES = {"fm_adm1_only", "no_adam_source", "country_only"}
     uniqueness_violations = 0
+    coverage_violations = 0
     for (iso3, fm_pcode), g in xw[
         xw["row_kind"].isin(["overlap", "fm_only"])
     ].groupby(["iso3", "fm_pcode"]):
@@ -167,6 +171,8 @@ def main() -> int:
         n_adam_in_fm = statuses.get("adam_in_fm", 0)
         n_fm_in_adam = statuses.get("fm_in_adam", 0)
         n_fragmented = statuses.get("fragmented", 0)
+        n_fm_only = statuses.get("fm_only", 0)
+        n_keep = statuses.get("keep", 0)
         definitive_types = [
             t for t, n in [
                 ("match", n_match),
@@ -174,6 +180,12 @@ def main() -> int:
                 ("fm_in_adam", n_fm_in_adam),
             ] if n > 0
         ]
+        has_definitive = (
+            n_match + n_adam_in_fm + n_fm_in_adam
+            + n_fm_only + n_keep > 0
+        )
+        policy = g.iloc[0]["policy"]
+        # Uniqueness: exactly one definitive label kind per FM
         problem = None
         if n_fragmented > 0:
             problem = f"{n_fragmented} fragmented row(s) unresolved"
@@ -187,7 +199,6 @@ def main() -> int:
             problem = f"{n_fm_in_adam} fm_in_adam rows (expected 1)"
         if problem:
             uniqueness_violations += 1
-            first_idx = g.index[0]
             issues.append({
                 "iso3": iso3, "fm_pcode": fm_pcode,
                 "adam_admin_id": None,
@@ -195,10 +206,37 @@ def main() -> int:
             })
             for idx in g.index:
                 flag(idx, "fm_uniqueness")
+        # Coverage: every FM must produce a lookup row. Either via a
+        # definitive label, or via a country-level policy that says
+        # "no ADAM expected" (then lookup emits FM with NULL ADAM).
+        elif not has_definitive:
+            policy_ok = (
+                isinstance(policy, str) and policy in FM_ONLY_POLICIES
+            )
+            if not policy_ok:
+                coverage_violations += 1
+                issues.append({
+                    "iso3": iso3, "fm_pcode": fm_pcode,
+                    "adam_admin_id": None,
+                    "issue": (
+                        f"FM coverage: no definitive resolution and "
+                        f"policy={policy!r} doesn't explicitly waive "
+                        f"ADAM. This FM would silently disappear from "
+                        f"the lookup. Statuses present: {statuses}."
+                    ),
+                })
+                for idx in g.index:
+                    flag(idx, "fm_coverage")
     if uniqueness_violations:
         logger.warning(
             "%d FM polygons violate uniqueness invariant",
             uniqueness_violations,
+        )
+    if coverage_violations:
+        logger.warning(
+            "%d FM polygons would silently disappear from the lookup "
+            "(no definitive label, no fm-only policy)",
+            coverage_violations,
         )
 
     # --- Check 4: human-classified rows that match the spatial default ---

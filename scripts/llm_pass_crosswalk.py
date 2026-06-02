@@ -189,6 +189,59 @@ EDITS: list[tuple[str, str, float, str, str]] = [
         "Administration'. FM Wisconsin's canonical match is ADAM "
         "Wisconsin (IoU 0.85, adam_in_fm).",
     ),
+    # ── Size-asymmetric FMs (7) ─────────────────────────────────────
+    # FM polygon is small (island, city, reef) but lives inside a
+    # larger ADAM polygon. IoU is below noise because of the size
+    # asymmetry, not because the relationship is wrong. Without these
+    # the FM would silently disappear from the lookup (FM coverage
+    # invariant violation).
+    (
+        "BHS", "BHS-20201113-09", 901507.0, "fm_in_adam",
+        "FM 'City of Freeport' is the city-proper subdivision inside "
+        "ADAM 'Freeport' (which covers the wider Freeport region). "
+        "IoU 0.046 reflects size asymmetry (small city within a large "
+        "ADAM polygon), not lack of correspondence. ADAM Freeport also "
+        "covers FM 'West Grand Bahama' — share with that FM in the "
+        "lookup with a coarseness caveat.",
+    ),
+    (
+        "BHS", "BHS-20201113-13", 901511.0, "fm_in_adam",
+        "FM 'Grand Cay' is a tiny island within ADAM 'North Abaco' "
+        "coverage area. IoU 0.003 reflects size asymmetry. ADAM North "
+        "Abaco also covers FM North Abaco and FM Central Abaco — "
+        "lookup reports against ADAM North Abaco with caveat.",
+    ),
+    (
+        "BHS", "BHS-20201113-14", 901513.0, "fm_in_adam",
+        "FM 'Harbour Island' is a small island settlement inside "
+        "ADAM 'North Eleuthera' coverage area. IoU 0.027 reflects "
+        "size asymmetry. ADAM North Eleuthera covers multiple FM "
+        "Eleuthera-area polygons.",
+    ),
+    (
+        "BHS", "BHS-20201113-20", 901515.0, "fm_in_adam",
+        "FM 'Moore's Island' is a small island within ADAM 'South "
+        "Abaco' coverage area. IoU 0.019 reflects size asymmetry.",
+    ),
+    (
+        "BHS", "BHS-20201113-31", 901513.0, "fm_in_adam",
+        "FM 'Spanish Wells' is a small settlement on an island inside "
+        "ADAM 'North Eleuthera' coverage area. IoU 0.018 reflects size "
+        "asymmetry. Sibling FMs sharing ADAM North Eleuthera include "
+        "FM North Eleuthera and FM Harbour Island.",
+    ),
+    (
+        "UMI", "UMI_5-20250729", 902605.0, "match",
+        "FM 'Kingman Reef' ↔ ADAM 'Kingman Reef' is a clean name match "
+        "and sole partner. IoU 0.019 reflects the tiny size of the "
+        "reef (geometry-driven, not topology-driven). Treat as 1:1.",
+    ),
+    (
+        "VGB", "VGB-20200401-4", 39506.0, "fm_in_adam",
+        "FM 'Great Camanoe' is a small island within ADAM 'Tortola' "
+        "coverage area. IoU 0.045 reflects size asymmetry. Multiple "
+        "FM polygons share ADAM Tortola.",
+    ),
 ]
 
 
