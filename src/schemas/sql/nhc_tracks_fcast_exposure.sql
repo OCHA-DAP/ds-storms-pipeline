@@ -7,7 +7,7 @@
 -- Designed to hold exposure at any admin level. Current data is admin_level=0
 -- (country). Subnational rows (admin_level >= 1) use the same table.
 --
--- Populated by running: scripts/calc_nhc_wind_adm0_exp.py
+-- Populated by running: python run_pipeline.py nhc-track-exp
 -- Source: storms.nhc_tracks_fcast_buffers (geometry) x WorldPop 1km raster x
 --         FieldMaps ADM boundaries
 -- ============================================================================

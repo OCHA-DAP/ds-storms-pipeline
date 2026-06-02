@@ -1,322 +1,281 @@
 # Storms Pipeline
 
-This repository contains code to download and process storm forecasts and observations from various sources. 
+Download, process, and compute population exposure for tropical-cyclone data
+from three sources:
+
+| Source | Subcommand prefix | Coverage |
+|---|---|---|
+| **IBTrACS** | `ibtracs*`, `wind-buffers`, `ibtracs-track-exp` | Historical best-track, all basins |
+| **NHC** (National Hurricane Center) | `nhc*` | Realtime forecasts + archive, NA + EP basins |
+| **ECMWF** | `ecmwf` | Ensemble cyclone tracks |
+
+All tables live in the Postgres `storms` schema. Pipelines read from PROD and
+write to the target environment (default `dev`); the DBX bundle drives the
+NHC realtime cascade on a 3-hourly cron — see [`databricks/README.md`](databricks/README.md).
 
 ## Running pipelines
 
-The `run_pipeline.py` script provides a command-line interface for running data pipelines. Each pipeline has its own subcommand with relevant options.
+`run_pipeline.py` is a single argparse CLI. Every subcommand accepts:
 
-### IBTrACS pipeline
+| Flag | Notes |
+|---|---|
+| `--mode {dev,prod}` | Target DB. Default `dev`. |
+| `--chunksize N` | Rows per SQL insert batch. Default `10000`. |
 
-Downloads and processes historical storm track data from the IBTrACS dataset.
-```
-python run_pipeline.py ibtracs [OPTIONS]
-```
+Pipelines that work on rows keyed by `issued_time` / `valid_time` (every NHC
+buffer / WSP / exposure subcommand) share these time-filter flags:
 
-Options:
-- `--mode {dev,prod}`: Database environment (default: `dev`)
-- `--dataset-type {last3years,ACTIVE,ALL}`: Which dataset to download (default: `last3years`)
-- `--save-to-blob`: Upload the downloaded netcdf file to Azure blob storage
-- `--save-dir PATH`: Directory for downloaded files (default: `/tmp`)
-- `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
+| Flag | Notes |
+|---|---|
+| `--issued-time YYYY-MM-DDTHH` | Process exactly this single advisory. |
+| `--since YYYY-MM-DD` | Inclusive lower bound. |
+| `--until YYYY-MM-DD` | Exclusive upper bound. |
+| `--overwrite` | Recompute & upsert even if rows already exist. Without it, runs are resumable — already-written keys are skipped. |
+| `--basin NA\|EP` | Limit to one NHC basin (`genesis_basin` column). |
 
-For example: 
+Exposure subcommands additionally accept:
 
-Run the IBTrACS pipeline with default settings (last 3 years of data, dev mode):
-```
-python run_pipeline.py ibtracs
-```
+| Flag | Notes |
+|---|---|
+| `--countries ISO3 [ISO3…]` | Limit to specific countries. |
+| `--admin-level {0,1}` | Repeatable. Default: both. |
 
-Run the IBTrACS pipeline for all historical data in production mode:
-```
-python run_pipeline.py ibtracs --mode prod --dataset-type ALL
-```
+Use `uv run python run_pipeline.py <subcmd> --help` for the full per-subcommand list.
 
-
-### ECMWF pipeline
-
-Downloads and processes ECMWF storm forecast data for a specified date range.
-```
-python run_pipeline.py ecmwf [OPTIONS]
-```
-
-Options:
-- `--mode {dev,prod}`: Database environment (default: `dev`)
-- `--start-date YYYY-MM-DD`: Start of date range (default: yesterday)
-- `--end-date YYYY-MM-DD`: End of date range (default: yesterday)
-- `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
-
-For example:
-
-Run the ECMWF pipeline for yesterday's data (default):
-```
-python run_pipeline.py ecmwf
-```
-
-Run the ECMWF pipeline for a specific date range:
-```
-python run_pipeline.py ecmwf --start-date 2024-01-01 --end-date 2024-01-07
-```
-
-### Wind buffers pipelines
-
-Two pipelines compute wind buffer polygons from quadrant wind radii (34/50/64 kt) and store them in the database. Both read from PROD and write to the target environment (default: `dev`), and both require `PGSSLMODE=require`:
-
-```
-export PGSSLMODE=require
-```
-
-Both require the `usa-wind-buffers` branch of `ocha-lens` (provides `calculate_wind_buffers_gdf` and `expand_quad_col`). Buffers are written to the DB in batches of 50 as they are calculated, so a crash mid-run is recoverable — just rerun and it will skip already-computed entries.
-
-#### IBTrACS wind buffers (`wind-buffers`)
-
-One buffer polygon per (storm, wind speed threshold) across the full historical track. Uses USA agency quadrant radii from `storms.ibtracs_tracks_geo`. Run the IBTrACS pipeline first.
-
-```
-python run_pipeline.py wind-buffers [OPTIONS]
-```
-
-Options:
-- `--mode {dev,prod}`: Target database environment (default: `dev`). Always reads from PROD.
-- `--basin CODE`: Filter to a single basin (e.g. `NA`, `WP`, `EP`, `SI`, `SP`, `NI`, `SA`)
-- `--start-year YYYY`: Only process storms with track points from this year onwards
-- `--overwrite`: Recalculate even for storms already in the database
-- `--chunksize N`: Rows per SQL insert batch (default: `1000`)
+### IBTrACS
 
 ```bash
-# Full historical backfill
-python run_pipeline.py wind-buffers --mode dev
+# ETL: historical track data
+uv run python run_pipeline.py ibtracs --dataset-type {last3years|ACTIVE|ALL}
 
-# Subset for testing
-python run_pipeline.py wind-buffers --mode dev --basin NA --start-year 2020
+# Wind buffers from IBTrACS tracks (one polygon per (sid, wind_speed_kt))
+uv run python run_pipeline.py wind-buffers --basin NA --start-year 2020
+
+# Population exposure from IBTrACS wind buffers
+uv run python run_pipeline.py ibtracs-track-exp --since 2020 --countries HTI JAM
+
+# Realtime cascade: ETL + buffers + exposure for active storms only
+uv run python run_pipeline.py ibtracs-realtime
 ```
 
-#### NHC forecast wind buffers (`nhc-tracks-fcast-buffers`)
-
-One buffer polygon per (storm, forecast issuance, wind speed threshold) from NHC forecast tracks. Uses `storms.nhc_tracks_geo`. Run the NHC pipeline first.
-
-```
-python run_pipeline.py nhc-tracks-fcast-buffers [OPTIONS]
-```
-
-Options:
-- `--mode {dev,prod}`: Target database environment (default: `dev`). Always reads from PROD.
-- `--basin {NA,EP}`: Filter to a single basin
-- `--start-year YYYY`: Only process issuances from this year onwards
-- `--overwrite`: Recalculate even for issuances already in the database
-- `--chunksize N`: Rows per SQL insert batch (default: `1000`)
+### ECMWF
 
 ```bash
-# Full historical backfill
-python run_pipeline.py nhc-tracks-fcast-buffers --mode dev
-
-# Subset for testing
-python run_pipeline.py nhc-tracks-fcast-buffers --mode dev --basin NA --start-year 2023
+# Defaults to yesterday's data
+uv run python run_pipeline.py ecmwf --start-date 2024-10-01 --end-date 2024-10-07
 ```
 
-#### NHC observational track buffers (`nhc-tracks-obsv-buffers`)
-
-Cumulative wind buffer swaths built from observed (leadtime=0) NHC positions. For each storm and each advisory, the buffer is the union of all observed positions up to that advisory — a growing footprint over the storm's lifetime. Uses `storms.nhc_tracks_geo`. Run the NHC pipeline first.
-
-```
-python run_pipeline.py nhc-tracks-obsv-buffers [OPTIONS]
-```
-
-Options:
-- `--mode {dev,prod}`: Target database environment (default: `dev`). Always reads from PROD.
-- `--basin {NA,EP}`: Filter to a single basin
-- `--start-year YYYY`: Only process storms from this year onwards
-- `--overwrite`: Recalculate even for advisories already in the database
-- `--chunksize N`: Rows per SQL insert batch (default: `1000`)
+### NHC — ETL
 
 ```bash
-# Full historical backfill
-python run_pipeline.py nhc-tracks-obsv-buffers --mode dev
+# Current active storms (no args)
+uv run python run_pipeline.py nhc
 
-# Subset for testing
-python run_pipeline.py nhc-tracks-obsv-buffers --mode dev --basin NA --start-year 2023
+# Archive backfill for a year range
+uv run python run_pipeline.py nhc --start-year 2020 --end-year 2024
+
+# Test mode: fetch a frozen sample CurrentStorms JSON instead of the live endpoint
+uv run python run_pipeline.py nhc --sample-json https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json
 ```
 
-#### NHC forecast-only track buffers (`nhc-tracks-fcastonly-buffers`)
+The sample-JSON path is for end-to-end smoke tests. The URLs embedded in the
+sample JSON (forecast advisories, WSP zip) are live NHC paths that get
+rotated, so this path is only reliable while the sample is fresh.
 
-For each forecast advisory, the forecast wind buffer minus the cumulative observed track swath at that issued_time — i.e. only the area the storm is predicted to reach that it hasn't already passed through. Reads from `storms.nhc_tracks_fcast_buffers` and `storms.nhc_tracks_obsv_buffers` (both must be populated first). If no obsv buffer exists for an advisory (possible at storm start before leadtime=0 wind radii are available), the full forecast geometry is stored and a warning is logged.
+### NHC — track wind buffers
 
-```
-python run_pipeline.py nhc-tracks-fcastonly-buffers [OPTIONS]
-```
-
-Options:
-- `--mode {dev,prod}`: Target database environment (default: `dev`). Reads and writes to the same environment.
-- `--basin {NA,EP}`: Filter to a single basin
-- `--start-year YYYY`: Only process storms from this year onwards
-- `--overwrite`: Recalculate even for advisories already in the database
-- `--chunksize N`: Rows per SQL insert batch (default: `1000`)
+Three pipelines, each one buffer polygon per
+`(atcf_id, issued_time | valid_time, wind_speed_kt)`. Reads from
+`storms.nhc_tracks_geo`.
 
 ```bash
-# Full historical backfill
-python run_pipeline.py nhc-tracks-fcastonly-buffers --mode dev
-
-# Subset for testing
-python run_pipeline.py nhc-tracks-fcastonly-buffers --mode dev --basin NA --start-year 2023
+uv run python run_pipeline.py nhc-tracks-fcast-buffers       # forecast cone
+uv run python run_pipeline.py nhc-tracks-obsv-buffers        # cumulative observed swath
+uv run python run_pipeline.py nhc-tracks-fcastonly-buffers   # forecast minus observed
 ```
 
-### Note on backfilling
+`fcastonly-buffers` depends on the two above being populated for the same
+issued_time.
 
-These pipelines do not support automated backfilling. Unlike datasets with regular update schedules, cyclone data is published based on storm activity rather than a fixed cadence. When historical data needs to be reprocessed, it should be done manually using the appropriate date ranges or dataset types.
+### NHC — WSP (wind speed probability) polygons
 
-## Development setup
+```bash
+# Match raw basin-wide WSP polygons to individual storms (run after nhc ETL)
+uv run python run_pipeline.py nhc-wsp-polygon-matched
 
-1. Create a virtual environment
+# Fill rows with NULL atcf_id using containment-fallback against existing matches
+uv run python run_pipeline.py nhc-wsp-polygon-matched --fill-nulls
 
-```
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-2. Install Python dependencies
-
-```
-pip install -r requirements.txt
+# WSP minus cumulative observed swath (analogous to fcastonly-buffers)
+uv run python run_pipeline.py nhc-wsp-fcastonly-polygons
 ```
 
-3. Create a local `.env` file with the following (to write to the `dev` database):
+### NHC — exposure
 
-```
-DSCI_AZ_DB_DEV_PW_WRITE=<provided-on-request>
-DSCI_AZ_DB_DEV_UID_WRITE=<provided-on-request>
-DSCI_AZ_DB_DEV_HOST=<provided-on-request>
-```
+Five exposure pipelines, all keyed by `(admin_level, iso3, pcode)` plus the
+relevant polygon's identity columns:
 
-### Code quality 
-
-This project uses:
-- Ruff for linting and formatting
-- pre-commit hooks for code quality checks
-
-Set up pre-commit with:
-
-```
-pre-commit install
+```bash
+uv run python run_pipeline.py nhc-track-exp         # fcast buffers → fcast exposure
+uv run python run_pipeline.py nhc-obsv-exp          # obsv buffers → obsv exposure
+uv run python run_pipeline.py nhc-fcastonly-exp     # fcastonly buffers → fcastonly exposure
+uv run python run_pipeline.py nhc-wsp-exp           # matched WSP → WSP exposure
+uv run python run_pipeline.py nhc-wsp-fcastonly-exp # WSP fcastonly → WSP fcastonly exposure
 ```
 
+`nhc-obsv-exp` additionally accepts `--final-only` to keep just the last
+cumulative buffer per `(atcf_id, wind_speed_kt)` — useful for historical
+backfills where intermediate advisories aren't needed.
 
+### NHC — realtime composites
 
-### NHC pipeline
+One process per logical stage, sharing the WorldPop COG, FieldMaps boundaries,
+and DB engine across the inner pipelines. Used by the DBX bundle.
 
-Downloads and processes National Hurricane Center (NHC) storm forecast data. Supports two modes: current active storms or historical archive data.
+```bash
+# Full local cascade: ETL → buffers → tracks_exposure → wsp_processing → wsp_exposure
+uv run python run_pipeline.py nhc-realtime
+
+# Stage-level composites (accept the same time filters as inner pipelines)
+uv run python run_pipeline.py nhc-realtime-tracks-exp --issued-time 2024-10-09T18
+uv run python run_pipeline.py nhc-realtime-wsp-exp    --issued-time 2024-10-09T18
 ```
-python run_pipeline.py nhc [OPTIONS]
-```
 
-Options:
-- `--mode {dev,prod}`: Database environment (default: `dev`)
-- `--save-to-blob`: Upload downloaded files to Azure blob storage
-- `--save-dir PATH`: Directory for downloaded files (default: `/tmp`)
-- `--start-year YYYY`: Start year for archive processing (e.g., 2020). If not provided, processes current active storms.
-- `--end-year YYYY`: End year for archive processing (e.g., 2024). If not provided, only processes start-year.
-- `--chunksize N`: Number of records per SQL insert batch (default: `10000`)
+### NHC — scrub
 
-Examples:
-```
-# Process current active storms
-python run_pipeline.py nhc
+Cleanup utility for removing rows from every NHC table (storms, tracks_geo,
+buffers, WSP, exposure) for specific atcf_ids / issued_times:
 
-# Process archive data for a single year
-python run_pipeline.py nhc --start-year 2023
+```bash
+# Auto-resolve from the sample JSON (use after a sample-JSON test run)
+uv run python run_pipeline.py nhc-scrub --sample
 
-# Process archive data for a range of years
-python run_pipeline.py nhc --start-year 2020 --end-year 2024
+# Manual targeting
+uv run python run_pipeline.py nhc-scrub --atcf-id AL142024 --issued-time 2024-10-09T18
+
+# Dry-run shows counts without deleting
+uv run python run_pipeline.py nhc-scrub --sample --dry-run
 ```
 
 ## Database schema
 
-All tables live in the `storms` schema. The pipeline reads from PROD and writes to DEV by default.
+All tables live in the `storms` schema. Geometries are EPSG:4326.
 
-### `storms.ibtracs_storms`
-One row per storm. Primary key: `sid` (IBTrACS serial ID).
+### IBTrACS
 
-| Column | Type | Description |
+| Table | Key | Notes |
 |---|---|---|
-| `sid` | VARCHAR | IBTrACS serial identifier (e.g. `2023249N12323`) |
-| `atcf_id` | VARCHAR | ATCF identifier (e.g. `AL092023`) |
-| `name` | VARCHAR | Storm name (uppercase) |
-| `season` | BIGINT | Season year |
-| `genesis_basin` | VARCHAR | Basin where storm originated (NA, WP, EP, SI, SP, NI, SA) |
-| `provisional` | BOOLEAN | Whether data is provisional (not yet finalized in IBTrACS) |
-| `storm_id` | VARCHAR | Standardized ID: `{name}_{basin}_{season}` (lowercase) |
+| `ibtracs_storms` | `sid` | One row per storm. `genesis_basin` ∈ `{NA, WP, EP, SI, SP, NI, SA}`. |
+| `ibtracs_tracks_geo` | `(sid, valid_time)` | Track points. Includes WMO + USA agency quadrant wind radii. Point geometry. |
+| `ibtracs_wind_buffers` | `(sid, wind_speed_kt)` | Union of wind discs along the storm track. Polygon / MultiPolygon. |
+| `ibtracs_wind_exposure` | `(sid, wind_speed_kt, admin_level, pcode)` | Population exposed per admin unit. |
 
-### `storms.ibtracs_tracks_geo`
-One row per observation point. Populated by the IBTrACS pipeline.
+### NHC — core
 
-| Column | Type | Description |
+| Table | Key | Notes |
 |---|---|---|
-| `sid` | VARCHAR | FK → ibtracs_storms |
-| `valid_time` | TIMESTAMP | Observation time (UTC) |
-| `basin` | VARCHAR | Current basin at this point |
-| `wind_speed` | INTEGER | Max sustained wind speed (knots) |
-| `quadrant_radius_34/50/64` | TEXT | JSON array `[NE, SE, SW, NW]` — WMO best-track wind radii (nm) |
-| `usa_quadrant_radius_34/50/64` | TEXT | JSON array `[NE, SE, SW, NW]` — USA agency wind radii (nm), available ~2004+ |
-| `geometry` | geometry(Point, 4326) | Track point location |
+| `nhc_storms` | `atcf_id` (e.g. `AL142024`) | `genesis_basin` ∈ `{NA, EP}` (CP storms file under EP). |
+| `nhc_tracks_geo` | `(atcf_id, issued_time, leadtime)` | Forecast track points. `leadtime=0` is the observed position. |
 
-### `storms.ibtracs_wind_buffers`
-One row per (storm, wind speed threshold). Populated by the wind-buffers pipeline. Depends on `ibtracs_tracks_geo` being populated first.
+### NHC — track buffers
 
-| Column | Type | Description |
+All three keyed by storm × wind threshold × time, geometry is the wind-buffer
+union.
+
+| Table | Time key | Notes |
 |---|---|---|
-| `sid` | VARCHAR | IBTrACS storm ID |
-| `wind_speed_kt` | SMALLINT | Wind speed threshold: 34, 50, or 64 knots |
-| `geometry` | geometry(Geometry, 4326) | Union of all wind buffer discs along the storm track. Polygon or MultiPolygon (antimeridian-crossing storms are split at ±180°) |
+| `nhc_tracks_fcast_buffers` | `issued_time` | Forecast cone buffer. |
+| `nhc_tracks_obsv_buffers` | `valid_time` | Cumulative observed swath up to that advisory. |
+| `nhc_tracks_fcastonly_buffers` | `issued_time` | Forecast minus observed. NULL geometry when fully covered. |
 
-The buffers use USA agency quadrant radii and basin-appropriate map projections to correctly handle storms near the antimeridian (WP, SP, EP basins).
+### NHC — track exposure
 
-### `storms.nhc_storms`
-One row per NHC storm. Primary key: `atcf_id` (e.g. `AL092023`). Only covers NA and EP basins.
+Same key tuple in all three: `(atcf_id, issued_time | valid_time, wind_speed_kt, admin_level, iso3, pcode)`, plus `pop_exposed INTEGER`.
 
-### `storms.nhc_tracks_geo`
-One row per NHC forecast point. Populated by the NHC pipeline.
-
-| Column | Type | Description |
+| Table | Time key | Source buffers |
 |---|---|---|
-| `atcf_id` | VARCHAR | FK → nhc_storms |
-| `issued_time` | TIMESTAMP | When the forecast was issued (UTC) |
-| `valid_time` | TIMESTAMP | Forecast valid time (UTC) |
-| `leadtime` | INTEGER | Hours ahead of issuance (0 = observation) |
-| `basin` | VARCHAR | NA or EP |
-| `wind_speed` | REAL | Max sustained wind speed (knots) |
-| `quadrant_radius_34/50/64` | TEXT | JSON array `[NE, SE, SW, NW]` — wind radii (nm) |
-| `geometry` | geometry(Point, 4326) | Forecast track point location |
+| `nhc_tracks_fcast_exposure` | `issued_time` | `nhc_tracks_fcast_buffers` |
+| `nhc_tracks_obsv_exposure` | `valid_time` | `nhc_tracks_obsv_buffers` |
+| `nhc_tracks_fcastonly_exposure` | `issued_time` | `nhc_tracks_fcastonly_buffers` |
 
-### `storms.nhc_tracks_fcast_buffers`
-One row per (storm, forecast issuance, wind speed threshold). Populated by the `nhc-tracks-fcast-buffers` pipeline. Depends on `nhc_tracks_geo` being populated first.
+### NHC — WSP polygons
 
-| Column | Type | Description |
+| Table | Key | Notes |
 |---|---|---|
-| `atcf_id` | VARCHAR | ATCF storm identifier |
-| `issued_time` | TIMESTAMP | Forecast issuance time (UTC) |
-| `wind_speed_kt` | SMALLINT | Wind speed threshold: 34, 50, or 64 knots |
-| `geometry` | geometry(Geometry, 4326) | Union of wind buffer discs across the forecast track. Polygon or MultiPolygon. |
+| `nhc_wsp_polygon_raw` | `(issued_time, wind_threshold_kt, percentage)` | Raw basin-wide NHC 5km shapefile output. Multi-storm issuances are a single MultiPolygon — no atcf_id. |
+| `nhc_wsp_polygon_matched` | `(issued_time, wind_threshold_kt, percentage, atcf_id)` | Raw polygons split per storm via `ocha_lens.match_wsp_to_tracks`. `atcf_id` NULL when no track matched (treated as distinct via `NULLS NOT DISTINCT`). |
+| `nhc_wsp_fcastonly_polygon` | `(issued_time, wind_threshold_kt, percentage, atcf_id)` | Matched WSP minus cumulative observed swath. `obsv_valid_time` records which obsv buffer was actually used (issued_time + 3h normally, or NULL if no obsv buffer found). |
 
-### `storms.nhc_tracks_obsv_buffers`
-One row per (storm, advisory, wind speed threshold). Each row is the cumulative union of all observed (leadtime=0) wind buffer discs up to that advisory. Populated by the `nhc-tracks-obsv-buffers` pipeline. Depends on `nhc_tracks_geo` being populated first.
+### NHC — WSP exposure
 
-| Column | Type | Description |
+Same key tuple in both: `(issued_time, wind_threshold_kt, percentage, atcf_id, admin_level, iso3, pcode)`, plus `pop_exposed INTEGER`.
+
+| Table | Source polygons |
+|---|---|
+| `nhc_wsp_exposure` | `nhc_wsp_polygon_matched` |
+| `nhc_wsp_fcastonly_exposure` | `nhc_wsp_fcastonly_polygon` |
+
+### Shared
+
+| Table | Key | Notes |
 |---|---|---|
-| `atcf_id` | VARCHAR | ATCF storm identifier |
-| `valid_time` | TIMESTAMP | Most recent advisory included in this cumulative buffer (UTC) |
-| `wind_speed_kt` | SMALLINT | Wind speed threshold: 34, 50, or 64 knots |
-| `geometry` | geometry(Geometry, 4326) | Cumulative union of observed wind buffer discs up to valid_time. Polygon or MultiPolygon. |
+| `admin_population` | `(admin_level, iso3, pcode)` | Total WorldPop population per FieldMaps admin unit. Static — recompute via `scripts/compute_admin_population.py` when WorldPop is bumped. Use as the denominator for any exposure table (`pop_exposed / total_pop`). |
 
-### `storms.nhc_tracks_fcastonly_buffers`
-One row per (storm, forecast issuance, wind speed threshold). The forecast wind buffer minus the cumulative observed track swath at that issued_time — the area the storm is predicted to reach that it hasn't already passed through. Populated by the `nhc-tracks-fcastonly-buffers` pipeline. NULL geometry when the forecast is fully covered by the observed track.
+## Development setup
 
-| Column | Type | Description |
-|---|---|---|
-| `atcf_id` | VARCHAR | ATCF storm identifier |
-| `issued_time` | TIMESTAMP | Forecast issuance time (UTC) |
-| `wind_speed_kt` | SMALLINT | Wind speed threshold: 34, 50, or 64 knots |
-| `geometry` | geometry(Geometry, 4326) | Forecast buffer minus observed swath. NULL if forecast fully covered. |
+This project uses [`uv`](https://docs.astral.sh/uv/) for environment
+management. `requirements.txt` is kept for legacy tooling but `uv` is the
+canonical workflow.
 
-### `storms.nhc_wsp_polygon` *(pending — `add-wsp-data` PR)*
-Basin-wide NHC wind speed probability polygons. One row per (issued_time, wind_threshold_kt, percentage band).
+```bash
+# Install (creates .venv automatically)
+uv sync
 
-**TODO:** the ingested WSP polygons are currently truncated at longitude -180. The upstream NHC shapefiles (e.g. `https://www.nhc.noaa.gov/gis/forecast/archive/{YYYYMMDDhh}_wsp_120hr5km.zip`) actually extend past -180 into the western Pacific; our raw-download step lops that wraparound off. Not blocking today because it only matters for storms whose probability footprint crosses the dateline, which is beyond the CP basin coverage we care about right now. Revisit if/when we extend to WP or otherwise need full dateline-aware polygons.
+# Run any subcommand
+uv run python run_pipeline.py <subcmd> [...]
+```
+
+Create a local `.env` with the DB credentials (provided on request):
+
+```
+DSCI_AZ_DB_DEV_PW_WRITE=<...>
+DSCI_AZ_DB_DEV_UID_WRITE=<...>
+DSCI_AZ_DB_DEV_HOST=<...>
+```
+
+PostgreSQL requires SSL — usually `export PGSSLMODE=require` is needed.
+
+### Code quality
+
+Ruff + pre-commit:
+
+```bash
+pre-commit install
+```
+
+## Helper scripts
+
+In `scripts/`:
+
+| Script | Purpose |
+|---|---|
+| `compute_admin_population.py` | Build / refresh `storms.admin_population`. |
+| `mirror_fieldmaps_to_blob.py` | Mirror FieldMaps per-country adm0/adm1 parquets to the `global` blob container (one-time, re-run when FieldMaps refreshes). |
+| `cleanup_stale_exposure_rows.py` | Anti-join scrub: delete exposure rows whose key tuple the current code wouldn't produce. |
+| `backfill_tracks_prod_to_dev.py` / `backfill_wsp_polygons.py` | One-off DEV bootstrap from PROD. |
+| `init_db_ecmwf.py` | Create ECMWF tables. |
+
+## Known limitations
+
+- **WSP polygons truncated at -180**: upstream NHC 5km shapefiles extend
+  slightly past the dateline into the western Pacific; our raw download
+  step lops the wraparound off. Only matters for storms whose footprint
+  crosses ±180°, which is beyond current NA + EP coverage.
+- **Pre-2002 wind radii gap**: NHC didn't archive quadrant wind radii (the
+  R34/R50/R64 values) consistently before ~2002, so track buffers are
+  thin/missing for older storms. IBTrACS buffers (USA agency radii) have
+  similar coverage gaps before ~2004.
+- **KIR dateline coverage**: Kiribati's three island groups straddle the
+  dateline without any polygon vertex at ±180°, so its country bbox
+  spans ~351° "the long way around" and rio.clip's pixel window misses
+  the actual islands. Affects only KIR exposure.
