@@ -1294,7 +1294,7 @@ def run_nhc_tracks_fcast_buffers(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger.info("Starting NHC wind buffers pipeline...")
-    read_engine = stratus.get_engine(stage="prod")
+    read_engine = stratus.get_engine(stage=write_mode)
     write_engine = stratus.get_engine(stage=write_mode, write=True)
     try:
         process_nhc_tracks_fcast_buffers(
@@ -1465,7 +1465,7 @@ def run_nhc_tracks_obsv_buffers(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger.info("Starting NHC observational track buffers pipeline...")
-    read_engine = stratus.get_engine(stage="prod")
+    read_engine = stratus.get_engine(stage=write_mode)
     write_engine = stratus.get_engine(stage=write_mode, write=True)
     try:
         process_nhc_tracks_obsv_buffers(
@@ -3161,7 +3161,7 @@ def run_nhc_realtime(
 
     logger.info(f"Track issued_time: {track_issued_time}, WSP issued_time: {wsp_issued_time}")
 
-    read_engine = stratus.get_engine(stage="prod")
+    read_engine = stratus.get_engine(stage=mode)
     write_engine = stratus.get_engine(stage=mode, write=True)
 
     try:
