@@ -104,7 +104,14 @@ POLICY_OVERLAP_STATUS = {
     "country_only": "drop",
     "fm_adm1_only": "drop",
     "no_fm_source": "drop",
-    "needs_manual_mapping": "needs_review",
+    # NOTE: GDACS does NOT override needs_manual_mapping → needs_review
+    # (unlike ADAM). The existing storms.gdacs_fm_lookup already emits
+    # clean-match rows for needs_manual_mapping countries (CAN, NIC,
+    # CUB, PAN, ISL, GRL); the policy was a "this country needs
+    # review" flag, not a "suppress all rows" directive. The migration
+    # script preserves those decisions and the topology-derived status
+    # speaks for itself. Reviewers can filter on the `policy` column
+    # to find countries that still warrant attention.
 }
 
 logger = logging.getLogger(__name__)
