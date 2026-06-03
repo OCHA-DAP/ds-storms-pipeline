@@ -131,7 +131,7 @@ resources:
             - pypi:
                 # Pinned to commit; bump when ocha-lens@wsp-exp-calc moves
                 # so DBX's library cache forces a reinstall.
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@d48e6c3"
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@c4a0312"
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "rasterio" }
