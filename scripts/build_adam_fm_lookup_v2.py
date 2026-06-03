@@ -1,14 +1,16 @@
-"""Build storms.adam_fm_lookup from the human-curated crosswalk.
+"""Build storms.adam_fm_lookup from the human-reviewed crosswalk CSV.
 
-Reads `data/review/adam_fm_lookup_humrev.xlsx` (the authoritative
-post-review crosswalk) plus `config/adm_level_config.toml` (for
-country-level policy and caveats) plus FM adm0 polygons. Emits an
-FM-centric lookup with one adm0 row per country plus zero-to-many
-adm1 rows per FM polygon.
+Reads `data/review/adam_fm_crosswalk_humanreview.csv` (the
+authoritative post-review crosswalk; every row is one FM↔ADAM spatial
+relationship with the reviewer's decision attached) plus
+`config/adm_level_config.toml` (for country-level policy and caveats)
+plus FM adm0 polygons. Emits an FM-centric lookup with one adm0 row
+per country plus zero-to-many adm1 rows per FM polygon.
 
 Replaces the original `build_adam_fm_lookup.py` which drove the lookup
-from spatial + TOML alone. The new path is humrev-first: the human's
-row-level decisions in the xlsx are the source of truth for adm1.
+from spatial + TOML alone. The new path is human-review-first: the
+row-level decisions in the humanreview crosswalk are the source of
+truth for adm1.
 
 Schema (matches existing storms.adam_fm_lookup PK):
 
@@ -20,17 +22,17 @@ PK = (iso3, admin_level, fm_pcode, adam_admin_id). adam_admin_id is
 NULL for adm0 rows and for adm1 rows where FM has no ADAM partner.
 
 Caveat priority per row:
-    1. Per-row `caveat` from humrev (human-written, authoritative)
+    1. Per-row `caveat` from humanreview (human-written, authoritative)
     2. Country-level `policy_note` from TOML (for policy-driven rows)
     3. NULL (clean match, no caveat needed)
 
 Usage::
 
     uv run python scripts/build_adam_fm_lookup_v2.py
-        [--humrev PATH]              # default data/review/adam_fm_lookup_humrev.xlsx
-        [--out PATH]                 # default data/adam_fm_lookup.csv
-        [--mode dev|prod]            # which DB stage if --write-db
-        [--write-db]                 # write to storms.adam_fm_lookup
+        [--humrev PATH]   # default data/review/adam_fm_crosswalk_humanreview.csv
+        [--out PATH]      # default data/adam_fm_lookup.csv
+        [--mode dev|prod] # which DB stage if --write-db
+        [--write-db]      # write to storms.adam_fm_lookup
 """
 
 import argparse
@@ -58,7 +60,9 @@ from src.static.adam.inputs import (  # noqa: E402
     load_level_config,
 )
 
-DEFAULT_HUMREV = REPO_ROOT / "data" / "review" / "adam_fm_lookup_humrev.xlsx"
+DEFAULT_HUMREV = (
+    REPO_ROOT / "data" / "review" / "adam_fm_crosswalk_humanreview.csv"
+)
 DEFAULT_OUT = REPO_ROOT / "data" / "adam_fm_lookup.csv"
 DB_SCHEMA = "storms"
 DB_TABLE = "adam_fm_lookup"
@@ -322,7 +326,9 @@ def main() -> int:
     ).setLevel(logging.WARNING)
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--humrev", type=Path, default=DEFAULT_HUMREV)
+    ap.add_argument("--humrev", type=Path, default=DEFAULT_HUMREV,
+                    help="human-reviewed crosswalk CSV (the source of "
+                         "truth for reviewer decisions)")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--mode", choices=["dev", "prod"], default="dev")
@@ -330,8 +336,8 @@ def main() -> int:
                     help="write the lookup to storms.adam_fm_lookup")
     args = ap.parse_args()
 
-    logger.info("Loading humrev from %s", args.humrev)
-    humrev = pd.read_excel(args.humrev)
+    logger.info("Loading humanreview crosswalk from %s", args.humrev)
+    humrev = pd.read_csv(args.humrev)
     logger.info("  %d rows across %d iso3s",
                 len(humrev), humrev["iso3"].nunique())
 
