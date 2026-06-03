@@ -96,7 +96,8 @@ def main() -> int:
     logger.info("  %d rows from xlsx", len(humrev))
 
     logger.info("Loading source CSV %s", args.source)
-    source = pd.read_csv(args.source)
+    # utf-8-sig: transparent BOM-strip if present (defensive)
+    source = pd.read_csv(args.source, encoding="utf-8-sig")
     logger.info("  %d rows from source", len(source))
 
     # ── Step 1: ftfy on user-typed text columns in humrev ──────────
@@ -168,7 +169,10 @@ def main() -> int:
     merged = merged[final_cols]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(args.out, index=False)
+    # utf-8-sig writes a leading BOM so Excel-on-Mac recognizes the
+    # file as UTF-8 (without it, Excel defaults to Mac Roman and
+    # re-introduces mojibake on save).
+    merged.to_csv(args.out, index=False, encoding="utf-8-sig")
     logger.info("Wrote %d rows to %s", len(merged), args.out)
     logger.info(
         "Going forward, edit %s directly (NEVER open in Excel — use a "

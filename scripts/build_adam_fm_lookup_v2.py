@@ -337,7 +337,11 @@ def main() -> int:
     args = ap.parse_args()
 
     logger.info("Loading humanreview crosswalk from %s", args.humrev)
-    humrev = pd.read_csv(args.humrev)
+    # utf-8-sig: transparently strips a leading BOM if present. Lets
+    # us write CSVs with a BOM (so Excel-on-Mac doesn't misinterpret
+    # them as Mac Roman) without leaking `﻿` into the first
+    # column name on read.
+    humrev = pd.read_csv(args.humrev, encoding="utf-8-sig")
     logger.info("  %d rows across %d iso3s",
                 len(humrev), humrev["iso3"].nunique())
 
@@ -355,7 +359,10 @@ def main() -> int:
                 (df["admin_level"] == 1).sum())
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(args.out, index=False)
+    # utf-8-sig prepends a BOM so Excel-on-Mac doesn't misinterpret
+    # this as Mac Roman. Other tools (pandas, jq, awk, VS Code) strip
+    # or ignore the BOM transparently.
+    df.to_csv(args.out, index=False, encoding="utf-8-sig")
     logger.info("Wrote CSV to %s", args.out)
 
     if args.write_db:
