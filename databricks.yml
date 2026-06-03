@@ -251,20 +251,12 @@ resources:
           spark_python_task:
             python_file: databricks/dispatch.py
             source: GIT
-            # Positional args mirror the dispatcher's expected layout
-            # (subcommand, mode, issued_time, since, until, overwrite,
-            # fill_nulls, subcommand_override, sample_json, admin_level).
+            # Dispatcher positional args: subcommand, mode, then a
+            # bunch of optional filters. We only need the first two; the
+            # dispatcher's _arg() defaults missing positionals to "".
             # mode is hardcoded to "prod" so this job is stable even when
-            # deployed from a dev workspace target; the rest are empty.
+            # deployed from a dev workspace target.
             parameters:
               - "nhc"
               - "prod"
-              - ""
-              - ""
-              - ""
-              - ""
-              - ""
-              - ""
-              - ""
-              - ""
           libraries: *storm_libs
