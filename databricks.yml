@@ -1,0 +1,208 @@
+# Databricks Asset Bundle — source-controlled definition of the GDACS/ADAM
+# ETL + matching pipeline job.
+#
+#   databricks bundle validate -t dev -p DEFAULT
+#   databricks bundle deploy   -t dev -p DEFAULT
+#   databricks bundle run gdacs_adam_pipeline -t dev -p DEFAULT
+#
+# Bundle docs: https://docs.databricks.com/dev-tools/bundles/
+#
+# NOTE: This is a SECOND bundle in this repo (the NHC pipeline bundle lives
+# on the `wsp-adm0-exp` branch). They use distinct bundle names so they don't
+# collide in the workspace. When the two branches eventually merge, consolidate
+# into ONE databricks.yml with two jobs (or `include: resources/*.yml`) and a
+# single shared databricks/dispatch.py — see databricks/README_gdacs_adam.md.
+
+bundle:
+  name: ds-storms-gdacs-adam
+
+variables:
+  mode:
+    description: Pipeline --mode (dev | prod)
+    default: dev
+  git_branch:
+    description: Branch the cluster pulls run_pipeline.py / dispatch.py from
+    default: gdacs-adam
+  dev_cluster_id:
+    description: Interactive cluster the dev target runs tasks on
+    default: "0604-214501-kq22m39c"   # zarno GDACS-ADAM dev (single-node, isolated lib env)
+
+# =====================================================================
+# Single job, 3 chained tasks mirroring `run_pipeline.py` `all`:
+#
+#   gdacs -> adam -> match
+#
+# Each task delegates to databricks/dispatch.py, which turns the job
+# parameters into one `python run_pipeline.py <sub> --mode … ` call.
+# The pipeline code itself (run_pipeline.py, src/) is plain argparse
+# Python and runs identically locally and in DBX.
+#
+# Realtime (default params): gdacs + adam run in "current" mode
+# (rolling window — gdacs --days-back 7, adam --days-back 14), then
+# match retries ATCF linkage for any GDACS event still missing an
+# atcf_id.
+#
+# Backfill: "Run with different parameters" and set from_date/to_date
+# to run gdacs + adam in archive mode over a date range. match always
+# operates on whatever the DB currently holds.
+# =====================================================================
+resources:
+  jobs:
+    gdacs_adam_pipeline:
+      name: GDACS/ADAM Pipeline
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      # Manual for now — cadence TBD (mirrors run-storm-pipelines.yml).
+      # PAUSED so the cron is documented but inert; flip to UNPAUSED to
+      # enable. In `dev` (development mode) DAB force-pauses schedules
+      # regardless.
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"   # daily 06:00 UTC (paused)
+        timezone_id: UTC
+        pause_status: PAUSED
+
+      max_concurrent_runs: 1
+
+      parameters:
+        - name: mode
+          default: ${var.mode}
+        # Archive-mode date range for gdacs + adam. When from_date is set,
+        # both run in archive mode; otherwise they run current/rolling mode.
+        - name: from_date      # YYYY-MM-DD; archive lower bound
+          default: ""
+        - name: to_date        # YYYY-MM-DD; archive upper bound (defaults today)
+          default: ""
+        # Current-mode rolling window. Empty => pipeline defaults
+        # (gdacs 7d, adam 14d). Ignored when from_date is set.
+        - name: days_back
+          default: ""
+        - name: source         # NOAA | JTWC
+          default: "NOAA"
+        - name: all_episodes   # "true" => fetch every episode, not just latest
+          default: ""
+
+      tasks:
+        # Compute (existing_cluster_id vs job_cluster_key) is supplied per
+        # target below: dev -> Tristan's interactive cluster, prod ->
+        # ephemeral single-node job cluster.
+        - task_key: gdacs
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "gdacs"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.from_date}}"
+              - "{{job.parameters.to_date}}"
+              - "{{job.parameters.days_back}}"
+              - "{{job.parameters.source}}"
+              - "{{job.parameters.all_episodes}}"
+          libraries: &storm_libs
+            - pypi: { package: "ocha-stratus" }
+            - pypi:
+                # Pinned to the gdacs-adam-funcs branch HEAD. Bump this
+                # commit when that branch moves so DBX's library cache
+                # forces a reinstall.
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@cc333ee"
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+            - pypi: { package: "geoalchemy2" }
+            - pypi: { package: "databricks-sdk" }
+
+        - task_key: adam
+          depends_on:
+            - task_key: gdacs
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "adam"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.from_date}}"
+              - "{{job.parameters.to_date}}"
+              - "{{job.parameters.days_back}}"
+              - "{{job.parameters.source}}"
+              - "{{job.parameters.all_episodes}}"
+          libraries: *storm_libs
+
+        - task_key: match
+          depends_on:
+            - task_key: adam
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            # match only takes --mode; dispatch.py ignores the date/source
+            # params for this subcommand. Positional slots still passed so
+            # the argv contract is uniform across tasks.
+            parameters:
+              - "match"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.from_date}}"
+              - "{{job.parameters.to_date}}"
+              - "{{job.parameters.days_back}}"
+              - "{{job.parameters.source}}"
+              - "{{job.parameters.all_episodes}}"
+          libraries: *storm_libs
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      profile: DEFAULT
+    variables:
+      mode: dev
+    # dev runs on the existing interactive cluster for fast iteration.
+    resources:
+      jobs:
+        gdacs_adam_pipeline:
+          tasks:
+            - task_key: gdacs
+              existing_cluster_id: ${var.dev_cluster_id}
+            - task_key: adam
+              existing_cluster_id: ${var.dev_cluster_id}
+            - task_key: match
+              existing_cluster_id: ${var.dev_cluster_id}
+
+  prod:
+    mode: production
+    workspace:
+      profile: DEFAULT
+      # production mode requires an explicit root_path so the bundle
+      # deploys to exactly one known location.
+      root_path: /Workspace/Users/adm.zarno1@global.un.org/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      mode: prod
+    # prod runs on an ephemeral single-node job cluster — self-contained,
+    # spun up per run, torn down after. The GDACS/ADAM/match work is plain
+    # Python (HTTP + pandas + DB writes), so a single node is sufficient.
+    resources:
+      jobs:
+        gdacs_adam_pipeline:
+          job_clusters:
+            - job_cluster_key: gdacs_adam_cluster
+              new_cluster:
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS3_v2"
+                num_workers: 0
+                spark_conf:
+                  spark.databricks.cluster.profile: singleNode
+                  spark.master: "local[*]"
+                custom_tags:
+                  ResourceClass: SingleNode
+                data_security_mode: SINGLE_USER
+                azure_attributes:
+                  availability: ON_DEMAND_AZURE
+                  first_on_demand: 1
+                  spot_bid_max_price: -1
+          tasks:
+            - task_key: gdacs
+              job_cluster_key: gdacs_adam_cluster
+            - task_key: adam
+              job_cluster_key: gdacs_adam_cluster
+            - task_key: match
+              job_cluster_key: gdacs_adam_cluster
