@@ -199,6 +199,26 @@ targets:
                   availability: ON_DEMAND_AZURE
                   first_on_demand: 1
                   spot_bid_max_price: -1
+                # Credentials: ocha_stratus reads these 14 vars from the
+                # environment. They live in the `dsci` secret scope and are
+                # resolved at cluster launch. Ephemeral clusters start bare,
+                # so the block must live here (the dev target's existing
+                # cluster carries the same vars via its own spark_env_vars).
+                spark_env_vars:
+                  DSCI_AZ_DB_DEV_HOST: "{{secrets/dsci/DSCI_AZ_DB_DEV_HOST}}"
+                  DSCI_AZ_DB_DEV_UID: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID}}"
+                  DSCI_AZ_DB_DEV_PW: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW}}"
+                  DSCI_AZ_DB_DEV_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID_WRITE}}"
+                  DSCI_AZ_DB_DEV_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW_WRITE}}"
+                  DSCI_AZ_DB_PROD_HOST: "{{secrets/dsci/DSCI_AZ_DB_PROD_HOST}}"
+                  DSCI_AZ_DB_PROD_UID: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID}}"
+                  DSCI_AZ_DB_PROD_PW: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW}}"
+                  DSCI_AZ_DB_PROD_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID_WRITE}}"
+                  DSCI_AZ_DB_PROD_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW_WRITE}}"
+                  DSCI_AZ_BLOB_DEV_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS}}"
+                  DSCI_AZ_BLOB_DEV_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS_WRITE}}"
+                  DSCI_AZ_BLOB_PROD_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS}}"
+                  DSCI_AZ_BLOB_PROD_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS_WRITE}}"
           tasks:
             - task_key: gdacs
               job_cluster_key: gdacs_adam_cluster
