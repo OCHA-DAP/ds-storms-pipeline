@@ -131,16 +131,20 @@ def _ingest_event_range(
             i, len(events), event_id, episode_id, ev["name"],
         )
 
+        # Record the cross-source identity link for every event ADAM
+        # returns. adam_eventid == gdacs_eventid is known from
+        # get_events alone — it does not depend on the exposure CSV
+        # downloading. A WFP 403 on the CSV costs us the population
+        # rows, not the identity. Deduped by gdacs_eventid before the
+        # upsert, which leaves any existing atcf_id/sid untouched.
+        storm_links.append({
+            "gdacs_eventid": event_id,
+            "adam_eventid": event_id,
+        })
+
         if (event_id, episode_id) in already_ingested:
             logger.info("  already ingested, skipping CSV download")
             n_skipped += 1
-            # Still record the linkage — a prior run could have written
-            # exposure rows but failed before the storm_id_lookup upsert
-            # (orphan case). Re-running repairs it via dedupe at upsert.
-            storm_links.append({
-                "gdacs_eventid": event_id,
-                "adam_eventid": event_id,
-            })
             continue
 
         try:
@@ -179,14 +183,6 @@ def _ingest_event_range(
             sum(1 for r in rows if r["admin_level"] == 1),
             sum(1 for r in rows if r["admin_level"] == 2),
         )
-
-        # ADAM event_id IS the GDACS gdacs_eventid (shared identifier space).
-        # Record the linkage; the row's atcf_id stays untouched if GDACS
-        # pipeline already populated it.
-        storm_links.append({
-            "gdacs_eventid": event_id,
-            "adam_eventid": event_id,
-        })
 
     logger.info(
         "Done: %d events ingested, %d skipped (already in DB), %d skipped (no CSV)",
