@@ -1,10 +1,11 @@
 """GDACS → NHC ATCF matching.
 
-Resolves the NHC atcf_id for GDACS events via genesis-advisory
-matching: look for an NHC row at the exact valid_time of the GDACS
-event's first advisory (smallest advisory_number); pick the
-spatially closest atcf_id under a rounding-only tolerance
-(ocha_lens.datasources.gdacs.match_to_atcf).
+Resolves the NHC atcf_id for GDACS events with
+``ocha_lens.datasources.gdacs.match_to_atcf``, which matches the
+shared NHC forecast cone (GDACS forecast points vs NHC tracks at the
+same valid_time) and falls back to the genesis observed advisory for
+storms with no forecast cone left. Both run under a rounding-only
+spatial tolerance.
 
 Two entry points share the same per-event logic:
 
@@ -48,16 +49,30 @@ logger = logging.getLogger(__name__)
 
 
 def _load_unmatched_eventids(engine) -> List[int]:
-    """GDACS events present in gdacs_exposure but not yet linked
-    in storm_id_lookup."""
+    """GDACS events that still need an atcf_id, from either source:
+
+    - events seen in gdacs_exposure but not yet linked, and
+    - storm_id_lookup rows written by another pipeline (e.g. ADAM
+      sets adam_eventid and leaves atcf_id NULL) that may have no
+      gdacs_exposure rows at all.
+
+    attempt_match fetches the timeline by eventid, so an event needs
+    no exposure rows to be matchable.
+    """
     with engine.connect() as conn:
         df = pd.read_sql(
             """
-            SELECT DISTINCT g.gdacs_eventid
+            SELECT g.gdacs_eventid
             FROM storms.gdacs_exposure g
             LEFT JOIN storms.storm_id_lookup l
                 ON g.gdacs_eventid = l.gdacs_eventid
             WHERE l.atcf_id IS NULL
+
+            UNION
+
+            SELECT gdacs_eventid
+            FROM storms.storm_id_lookup
+            WHERE atcf_id IS NULL
             """,
             conn,
         )
@@ -82,14 +97,12 @@ def load_freshest_nhc_tracks(engine) -> pd.DataFrame:
     """NHC tracks deduped to one row per ``(atcf_id, valid_time)``
     at the freshest issuance.
 
-    The genesis-based ``gdacs.match_to_atcf`` requires an exact
-    ``valid_time`` match. At a TCM cycle (e.g. 21Z) the relevant
-    NHC row is typically A-deck OFCL's TAU=3 forecast from the
-    prior synoptic (18Z) — a leadtime>0 row. Filtering to
-    leadtime=0 would miss those, so we keep all leadtimes here
-    and let the matcher pick by valid_time. The DISTINCT ON keeps
-    the freshest issuance per ``(atcf_id, valid_time)`` so a stale
-    forecast can't shadow the canonical row.
+    ``gdacs.match_to_atcf`` matches GDACS forecast points against the
+    NHC forecast cone, which lives at ``leadtime > 0`` — so we keep
+    all leadtimes here rather than filtering to the observed t=0 row.
+    The DISTINCT ON keeps the freshest issuance per
+    ``(atcf_id, valid_time)`` so a stale forecast can't shadow the
+    canonical row.
     """
     with engine.connect() as conn:
         return pd.read_sql(
