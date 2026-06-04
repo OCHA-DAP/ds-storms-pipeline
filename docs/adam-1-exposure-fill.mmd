@@ -1,0 +1,23 @@
+flowchart TD
+    START(["1 · run_pipeline adam<br/>--mode (dev | prod)"]):::entry
+    GETEV[["2 · ocha_lens.datasources.adam<br/>get_events"]]:::lens
+    SKIP[["3 · _load_ingested_episodes"]]:::local
+    LOOP{{"4 · for each event"}}:::loop
+    GETEXP[["5 · ocha_lens.datasources.adam<br/>get_exposure<br/>(event_id, population_csv_url)"]]:::lens
+    EMIT[["6 · _emit_rows<br/>long-format exposure rows"]]:::local
+    NOCSV(["WFP 403 or no CSV<br/>skip exposure for this event"]):::loop
+    AE[("storms.adam_exposure")]:::tbl
+
+    START --> GETEV --> SKIP --> LOOP
+    AE -. "read: already-ingested<br/>(event_id, episode_id) pairs" .-> SKIP
+    SKIP -. "skip if episode<br/>already on file" .-> LOOP
+    LOOP --> GETEXP
+    GETEXP -- "CSV ok" --> EMIT
+    GETEXP -- "403 / fetch error" --> NOCSV
+    EMIT == "7 · write: upsert all rows<br/>(adam_exposure_unique)" ==> AE
+
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px

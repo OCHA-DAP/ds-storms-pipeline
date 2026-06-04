@@ -1,148 +1,162 @@
 # GDACS / ADAM data model & pipeline wiring
 
-How the `ocha-lens` data clients, the `run_pipeline.py` pipelines, and the
-`storms.*` tables fit together — and how a single storm is linked across
-sources.
+How the GDACS and ADAM pipelines (`run_pipeline.py gdacs` / `adam`) fill the
+`storms.*` tables, and how a single storm gets linked across sources. Each
+pipeline does two distinct jobs, so each gets two diagrams:
 
-## Two layers
+1. **ETL** — fetch exposure and fill the exposure table.
+2. **Storm ID lookup** — record the storm's cross-source ids in
+   `storms.storm_id_lookup`.
 
-- **`ocha-lens`** (`ocha_lens.datasources.*`) is the library layer: HTTP/parse
-  clients that turn NHC / GDACS / ADAM sources into DataFrames. It owns no
-  tables.
-- **`ds-storms-pipeline`** (`run_pipeline.py <cmd>`) is the orchestration layer:
-  it calls the clients and writes/reads the `storms.*` Postgres tables.
+**Reading the diagrams**
 
-## Dataflow
+| symbol | meaning |
+|---|---|
+| `[[ ... ]]` subroutine, purple | `ocha_lens.datasources.*` library call |
+| `[[ ... ]]` subroutine, amber | pipeline / `match.py` helper function |
+| `[( ... )]` cylinder, green | Postgres table (`storms.*`) |
+| stadium | CLI entry point |
+| hexagon | per-event loop |
+| dotted edge | **read** from a table |
+| thick edge | **write** (upsert) to a table |
+
+Steps are numbered in execution order. The same exposure/lookup table is often
+**read early** (skip cache) and **written late** (upsert) — watch the step
+numbers on its two edges.
+
+---
+
+## 1. GDACS & ADAM ETL
+
+How the exposure tables get filled. Same skeleton on both sides — fetch events,
+load a skip cache, loop, fetch per-event exposure, upsert — but ADAM fetches a
+single population CSV per event (which WFP often 403s) where GDACS fetches the
+adm0/adm1 exposure off the event detail.
+
+### GDACS → `storms.gdacs_exposure`
 
 ```mermaid
 flowchart TD
-    %% ---------- external sources ----------
-    subgraph SRC[External sources]
-        NHCsrc[NHC: A-deck OFCL + TCM advisory]
-        GDACSsrc[GDACS RSS/API]
-        ADAMsrc[WFP ADAM API + CSV]
-        FMsrc[FieldMaps admin polygons]
-    end
+    START(["1 · run_pipeline gdacs<br/>--mode (dev | prod)"]):::entry
+    GETEV[["2 · ocha_lens.datasources.gdacs<br/>get_events"]]:::lens
+    SKIP[["3 · _load_skip_info"]]:::local
+    LOOP{{"4 · for each event in window"}}:::loop
+    DETAIL[["5 · ocha_lens.datasources.gdacs<br/>get_event_detail"]]:::lens
+    EPID[["6 · ocha_lens.datasources.gdacs<br/>latest_episode_id"]]:::lens
+    EXP[["7 · ocha_lens.datasources.gdacs<br/>get_exposure_adm0 / adm1"]]:::lens
+    EMIT[["8 · _emit_rows<br/>buffer to kt, to_iso3, wide to long"]]:::local
+    GE[("storms.gdacs_exposure")]:::tbl
 
-    %% ---------- ocha-lens clients ----------
-    subgraph LENS["ocha-lens (library)"]
-        Lnhc["lens.nhc<br/>download/load/get_tracks"]
-        Lgdacs["lens.gdacs<br/>get_timeline · match_to_atcf · get_exposure_adm0/adm1"]
-        Ladam["lens.adam<br/>get_events · get_exposure"]
-    end
+    START --> GETEV --> SKIP --> LOOP
+    GE -. "read: latest stored<br/>snapshot per event" .-> SKIP
+    SKIP -. "skip if already fresh" .-> LOOP
+    LOOP --> DETAIL --> EPID --> EXP --> EMIT
+    EMIT == "9 · write: upsert<br/>(gdacs_exposure_unique)" ==> GE
 
-    NHCsrc --> Lnhc
-    GDACSsrc --> Lgdacs
-    ADAMsrc --> Ladam
-
-    %% ---------- pipelines ----------
-    subgraph PIPE["run_pipeline.py pipelines"]
-        Pnhc[nhc]
-        Pgdacs[gdacs]
-        Padam[adam]
-        Pmatch[match]
-    end
-
-    Lnhc --> Pnhc
-    Lgdacs --> Pgdacs
-    Ladam --> Padam
-    Lgdacs -. "match_to_atcf<br/>(forecast-cone)" .-> Pgdacs
-    Lgdacs -. "match_to_atcf" .-> Pmatch
-
-    %% ---------- tables ----------
-    subgraph TBL[storms.* tables]
-        Tnhcstorms[(nhc_storms)]
-        Tnhctracks[(nhc_tracks_geo)]
-        Tgdacsexp[(gdacs_exposure)]
-        Tadamexp[(adam_exposure)]
-        Tlookup[(storm_id_lookup)]
-        Tibtracs[(ibtracs_storms)]
-    end
-
-    Pnhc --> Tnhcstorms
-    Pnhc --> Tnhctracks
-    Pgdacs --> Tgdacsexp
-    Pgdacs -- "atcf_id (inline match)" --> Tlookup
-    Padam --> Tadamexp
-    Padam -- "adam_eventid (identity, CSV-independent)" --> Tlookup
-    Pmatch -- "atcf_id (retry)" --> Tlookup
-
-    %% match reads the NHC forecast cone + lookup gaps
-    Tnhctracks -. "forecast cone read by match" .-> Pmatch
-    Tlookup -. "rows with atcf_id IS NULL" .-> Pmatch
-
-    %% ---------- static FieldMaps crosswalks (offline) ----------
-    subgraph STATIC["scripts/build_*_fm_lookup_v2.py (offline, static)"]
-        Bg[build_gdacs_fm_lookup]
-        Ba[build_adam_fm_lookup]
-    end
-    FMsrc --> Bg
-    FMsrc --> Ba
-    Bg --> Tgdacsfm[(gdacs_fm_lookup)]
-    Ba --> Tadamfm[(adam_fm_lookup)]
-
-    Tgdacsfm -. "join on gmi_admin -> fm_pcode" .-> Tgdacsexp
-    Tadamfm -. "join on admin_name -> fm_pcode/pcode" .-> Tadamexp
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px
 ```
 
-## The linking hub: `storm_id_lookup`
-
-One storm, one row, keyed on `gdacs_eventid` (PK in the current shape). The
-other columns are the same storm's id in each source:
+### ADAM → `storms.adam_exposure`
 
 ```mermaid
-erDiagram
-    storm_id_lookup {
-        int    gdacs_eventid PK "GDACS event id"
-        string atcf_id       "NHC id e.g. AL092024 — from gdacs/match"
-        string sid           "IBTrACS id — reserved, not yet populated"
-        int    adam_eventid  "WFP ADAM id (== gdacs_eventid) — from adam"
-    }
-    nhc_storms     { string atcf_id PK }
-    ibtracs_storms { string sid PK }
-    adam_exposure  { int adam_eventid }
-    gdacs_exposure { int gdacs_eventid }
+flowchart TD
+    START(["1 · run_pipeline adam<br/>--mode (dev | prod)"]):::entry
+    GETEV[["2 · ocha_lens.datasources.adam<br/>get_events"]]:::lens
+    SKIP[["3 · _load_ingested_episodes"]]:::local
+    LOOP{{"4 · for each event"}}:::loop
+    GETEXP[["5 · ocha_lens.datasources.adam<br/>get_exposure<br/>(event_id, population_csv_url)"]]:::lens
+    EMIT[["6 · _emit_rows<br/>long-format exposure rows"]]:::local
+    NOCSV(["WFP 403 or no CSV<br/>skip exposure for this event"]):::loop
+    AE[("storms.adam_exposure")]:::tbl
 
-    storm_id_lookup }o--|| nhc_storms     : "atcf_id"
-    storm_id_lookup }o--|| ibtracs_storms : "sid"
-    storm_id_lookup ||--o{ gdacs_exposure : "gdacs_eventid"
-    storm_id_lookup ||--o{ adam_exposure  : "adam_eventid"
+    START --> GETEV --> SKIP --> LOOP
+    AE -. "read: already-ingested<br/>(event_id, episode_id) pairs" .-> SKIP
+    SKIP -. "skip if episode<br/>already on file" .-> LOOP
+    LOOP --> GETEXP
+    GETEXP -- "CSV ok" --> EMIT
+    GETEXP -- "403 / fetch error" --> NOCSV
+    EMIT == "7 · write: upsert all rows<br/>(adam_exposure_unique)" ==> AE
+
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px
 ```
 
-How each column gets filled:
+---
 
-| column | written by | how |
-|---|---|---|
-| `gdacs_eventid` | `gdacs`, `adam` | PK; every row originates from a GDACS/ADAM event ingest |
-| `atcf_id` | `gdacs` (inline), `match` (retry) | `lens.gdacs.match_to_atcf` — forecast-cone match of the GDACS timeline against `nhc_tracks_geo`, genesis fallback for dissipated storms |
-| `adam_eventid` | `adam` | identity link `adam_eventid = event_id`, recorded for every event `get_events` returns (independent of whether the exposure CSV downloads) |
-| `sid` | — | reserved for a future IBTrACS-side enrichment step |
+## 2. Storm ID lookup
 
-## FieldMaps crosswalks (`*_fm_lookup`)
+How `storms.storm_id_lookup` gets each storm's cross-source ids. The two sides
+are fundamentally different: GDACS resolves its NHC `atcf_id` by **spatial
+matching** (the forecast cone against `nhc_tracks_geo`), while ADAM's link is a
+pure **identity** — the ADAM API's `event_id` already equals `gdacs_eventid`
+(shared id space), so no matching is needed.
 
-`gdacs_fm_lookup` and `adam_fm_lookup` are **static reference tables**, not
-produced by the runtime pipelines. They are rebuilt offline by
-`scripts/build_gdacs_fm_lookup_v2.py` / `build_adam_fm_lookup_v2.py`, which run
-the IoU spatial matchers in `src/static/{gdacs,adam}/matcher.py` to pair each
-GDACS/ADAM admin unit with its canonical FieldMaps p-code.
+### GDACS → `atcf_id` (spatial match)
 
-- `gdacs_fm_lookup`: join `gdacs_exposure.gmi_admin → gdacs_fm_lookup.gmi_admin`
-  to attach `fm_pcode` / `fm_name`.
-- `adam_fm_lookup`: join `adam_exposure.admin_name → adam_fm_lookup.adam_admin_name`
-  to attach `fm_pcode` (→ `adam_exposure.pcode`). Built per-ADAM-admin so each
-  ADAM unit maps to exactly one FM p-code (no name fan-out).
+```mermaid
+flowchart TD
+    START(["1 · gdacs inline match<br/>/ run_pipeline match"]):::entry
+    LFNT[["2 · load_freshest_nhc_tracks"]]:::local
+    LME[["3 · load_matched_eventids"]]:::local
+    LOOP{{"4 · for each unmatched event"}}:::loop
+    AM[["5 · attempt_match"]]:::local
+    TL[["6 · ocha_lens.datasources.gdacs<br/>get_timeline"]]:::lens
+    M2A[["7 · ocha_lens.datasources.gdacs<br/>match_to_atcf<br/>forecast-cone vote, genesis fallback"]]:::lens
+    UM[["8 · upsert_matches"]]:::local
+    SKIPN(["leave unmatched, retry later"]):::loop
+    NT[("storms.nhc_tracks_geo")]:::tbl
+    SL[("storms.storm_id_lookup")]:::tbl
 
-`caveat_kind` flags non-clean matches (admin-level mismatches, aggregation,
-manual-mapping needs); `NULL` = clean 1:1.
+    START --> LFNT --> LME --> LOOP
+    NT -. "read: freshest per<br/>atcf, valid_time" .-> LFNT
+    SL -. "read: already matched<br/>(atcf_id not null)" .-> LME
+    LOOP --> AM --> TL --> M2A
+    M2A -- "atcf_id" --> UM
+    M2A -- "None" --> SKIPN
+    UM == "9 · write: upsert atcf_id<br/>(storm_id_lookup_pkey)" ==> SL
 
-## Schema files
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px
+```
 
-DDL lives in `src/schemas/sql/`. Tables relevant to the linking system:
-`storm_id_lookup.sql`, `gdacs_exposure.sql`, `adam_exposure.sql`,
-`nhc_tables.sql` (`nhc_storms`, `nhc_tracks_geo`), `gdacs_fm_lookup.sql`,
-`adam_fm_lookup.sql`.
+### ADAM → `adam_eventid` (identity)
 
-> Note: several other `storms.*` tables exist in the DB without schema files yet
-> (e.g. `admin_population`, the `nhc_wsp_*` and `nhc_tracks_*_buffers/exposure`
-> wind/exposure tables, `ibtracs_wind_*`). Those belong to other subsystems and
-> are out of scope here.
+```mermaid
+flowchart TD
+    START(["1 · run_pipeline adam<br/>--mode (dev | prod)"]):::entry
+    GETEV[["2 · ocha_lens.datasources.adam<br/>get_events"]]:::lens
+    LOOP{{"3 · for each event"}}:::loop
+    LINK[["4 · record link<br/>(every event, even if the CSV 403s)<br/>adam_eventid = event_id from get_events"]]:::local
+    DEDUP[["5 · drop_duplicates<br/>on gdacs_eventid"]]:::local
+    SL[("storms.storm_id_lookup")]:::tbl
+    NOTE["the ADAM API event_id already equals<br/>gdacs_eventid (ADAM ingests GDACS upstream,<br/>shared id space) so no spatial match is needed"]:::note
+
+    START --> GETEV --> LOOP --> LINK --> DEDUP
+    DEDUP == "6 · write: upsert<br/>set adam_eventid, leave atcf_id untouched<br/>(storm_id_lookup_pkey)" ==> SL
+    GETEV -. "why no match step" .-> NOTE
+
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px
+    classDef note fill:#fffbe6,stroke:#caa300,color:#5b4a00,stroke-dasharray:4 3
+```
+
+---
+
+The standalone diagram sources live alongside this doc as
+`gdacs-1-exposure-fill.mmd`, `adam-1-exposure-fill.mmd`,
+`gdacs-2-atcf-match.mmd`, `adam-2-eventid-link.mmd`. Table DDL is in
+`src/schemas/sql/` (`gdacs_exposure.sql`, `adam_exposure.sql`,
+`storm_id_lookup.sql`, `nhc_tables.sql`).
