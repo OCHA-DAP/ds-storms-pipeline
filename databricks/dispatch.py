@@ -130,8 +130,14 @@ COMPOSITES: dict[str, list[list[str]]] = {
         ["nhc-realtime-tracks-exp"],
     ],
     "realtime-wsp-processing": [
-        ["nhc-wsp-polygon-matched", "--overwrite"],
-        ["nhc-wsp-fcastonly-polygons", "--overwrite"],
+        # No --overwrite here: process_nhc_wsp_polygon_matched and
+        # process_nhc_wsp_fcastonly_polygons short-circuit when rows
+        # for the requested issued_time already exist, so a 30-min-
+        # later rerun stays cheap. New WSP issuances still process
+        # (no rows yet → no short-circuit). For a forced rebuild of
+        # an existing issuance, set overwrite=true at the job level.
+        ["nhc-wsp-polygon-matched"],
+        ["nhc-wsp-fcastonly-polygons"],
     ],
     "realtime-wsp-exposure": [
         ["nhc-realtime-wsp-exp"],
