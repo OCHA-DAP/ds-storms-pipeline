@@ -399,8 +399,8 @@ action = "fm_adm1_only"
 note = "Bad GDACS↔FM matching (GDACS units split across multiple FM); MAR is not a priority country. Emit FM adm1 in the lookup; GDACS adm1 deliberately doesn't attach."
 
 [gdacs_policy.NOR]
-action = "country_only"
-note = "Country-level only. GDACS-finer-than-FM (20 GDACS counties vs 11 FM regions, post-2020 reform). Country-only is the safe default until per-county exposure becomes a priority."
+action = "fm_adm1_only"
+note = "Post-2020 county reform: 20 GDACS pre-reform counties → 11 FM post-reform regions. The aggregation is tractable (~5 clean 1:1 + ~6 clean N:1 aggregations) but not currently a priority. fm_adm1_only emits FM adm1 rows with NULL gmi_admin so consumers can attach NHC / ADAM numbers via fm_pcode; GDACS adm1 deliberately doesn't attach to avoid replicating whole-country numbers. Upgrade to aggregate_gdacs_to_fm later if per-county GDACS exposure becomes important."
 
 [gdacs_policy.RUS]
 action = "fm_adm1_only"
