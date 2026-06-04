@@ -112,6 +112,21 @@ def _patch_current_storms_url(url: str):
         _lens_nhc._fetch_current_storms_json = original
 
 
+def _peek_wsp_issuance_from_current_storms_json() -> pd.Timestamp | None:
+    """Read just the WSP issuance from CurrentStorms.json, without
+    downloading the (multi-MB) zip. Honors any _patch_current_storms_url
+    override. Returns a naive UTC Timestamp to match the DB schema."""
+    data = _lens_nhc._fetch_current_storms_json()
+    if data is None:
+        return None
+    for s in data.get("activeStorms", []):
+        gis = s.get("windSpeedProbabilitiesGIS") or {}
+        iss = gis.get("issuance")
+        if iss:
+            return pd.to_datetime(iss, utc=True).tz_localize(None)
+    return None
+
+
 def retrieve_nhc_current(stage="local", save_to_blob=False, save_dir=None):
     """
     Download current NHC storms JSON, optionally upload to Azure, and return loaded DataFrame.
@@ -537,6 +552,23 @@ def process_nhc_wsp_polygon_matched(
     Processes one issued_time at a time, committing after each. Keeps peak
     memory bounded by the largest single issuance.
     """
+    # Realtime short-circuit.
+    if issued_time is not None and not overwrite:
+        with engine.connect() as conn:
+            exists = bool(conn.execute(
+                text(
+                    "SELECT 1 FROM storms.nhc_wsp_polygon_matched "
+                    "WHERE issued_time = :it LIMIT 1"
+                ),
+                {"it": issued_time},
+            ).scalar())
+        if exists:
+            logger.info(
+                f"nhc_wsp_polygon_matched already has rows for "
+                f"issued_time={issued_time}; skipping."
+            )
+            return
+
     issued_times = _list_wsp_issued_times(
         engine, since=since, until=until, basin=basin, issued_time=issued_time,
     )
@@ -894,18 +926,43 @@ def run_nhc_current(
             if "issued_time" in df_raw.columns:
                 track_issued_time = pd.to_datetime(df_raw["issued_time"]).max()
 
-            logger.info("Fetching current WSP polygons...")
-            wsp_gdf = lens.nhc.get_wsp()
-            if wsp_gdf is not None and len(wsp_gdf) > 0:
-                process_wsp_polygons(
-                    gdf=wsp_gdf, engine=engine, chunksize=chunksize
+            # Peek at the JSON's WSP issuance and short-circuit the
+            # (multi-MB) zip download when those rows are already in DB.
+            # The 3h realtime cron commonly fires before NHC publishes
+            # the cycle's WSP zip, so a manual rerun 30 min later
+            # otherwise wastes the entire WSP fetch + parse just to
+            # upsert no-op rows.
+            advertised_wsp_iss = _peek_wsp_issuance_from_current_storms_json()
+            already_have_wsp = False
+            if advertised_wsp_iss is not None:
+                with engine.connect() as conn:
+                    already_have_wsp = bool(conn.execute(
+                        text(
+                            "SELECT 1 FROM storms.nhc_wsp_polygon_raw "
+                            "WHERE issued_time = :it LIMIT 1"
+                        ),
+                        {"it": advertised_wsp_iss.to_pydatetime()},
+                    ).scalar())
+
+            if already_have_wsp:
+                logger.info(
+                    f"WSP issuance {advertised_wsp_iss} already in DB; "
+                    "skipping download."
                 )
-                if "issued_time" in wsp_gdf.columns:
-                    wsp_issued_time = pd.to_datetime(
-                        wsp_gdf["issued_time"]
-                    ).max()
+                wsp_issued_time = advertised_wsp_iss
             else:
-                logger.info("No current WSP data available.")
+                logger.info("Fetching current WSP polygons...")
+                wsp_gdf = lens.nhc.get_wsp()
+                if wsp_gdf is not None and len(wsp_gdf) > 0:
+                    process_wsp_polygons(
+                        gdf=wsp_gdf, engine=engine, chunksize=chunksize
+                    )
+                    if "issued_time" in wsp_gdf.columns:
+                        wsp_issued_time = pd.to_datetime(
+                            wsp_gdf["issued_time"]
+                        ).max()
+                else:
+                    logger.info("No current WSP data available.")
 
         logger.info("Pipeline successfully finished!")
         logger.info(
@@ -1218,6 +1275,26 @@ def process_nhc_tracks_fcast_buffers(
     overwrite=False,
     issued_time=None,
 ):
+    # Realtime short-circuit: if a single issued_time was requested and
+    # buffer rows for it already exist, skip the source load + per-issuance
+    # geometry work entirely. Range backfills (--since/--until) fall
+    # through to the load-then-filter path below.
+    if issued_time is not None and not overwrite:
+        with write_engine.connect() as conn:
+            exists = bool(conn.execute(
+                text(
+                    "SELECT 1 FROM storms.nhc_tracks_fcast_buffers "
+                    "WHERE issued_time = :it LIMIT 1"
+                ),
+                {"it": issued_time},
+            ).scalar())
+        if exists:
+            logger.info(
+                f"nhc_tracks_fcast_buffers already has rows for "
+                f"issued_time={issued_time}; skipping."
+            )
+            return
+
     logger.info("Loading NHC tracks with wind radii...")
     gdf_tracks = _load_nhc_tracks_fcast_buffer_tracks(
         read_engine, basin=basin, since=since, until=until, issued_time=issued_time
@@ -1400,6 +1477,25 @@ def process_nhc_tracks_obsv_buffers(
     overwrite=False,
     issued_time=None,
 ):
+    # Realtime short-circuit. In realtime, valid_time == issued_time for
+    # the just-fetched observation, so an existing row at that valid_time
+    # means there's nothing to add.
+    if issued_time is not None and not overwrite:
+        with write_engine.connect() as conn:
+            exists = bool(conn.execute(
+                text(
+                    "SELECT 1 FROM storms.nhc_tracks_obsv_buffers "
+                    "WHERE valid_time = :it LIMIT 1"
+                ),
+                {"it": issued_time},
+            ).scalar())
+        if exists:
+            logger.info(
+                f"nhc_tracks_obsv_buffers already has rows for "
+                f"valid_time={issued_time}; skipping."
+            )
+            return
+
     logger.info("Loading NHC observational (leadtime=0) track points...")
     gdf_obsv = _load_nhc_tracks_obsv_buffer_tracks(
         read_engine, basin=basin, since=since, until=until, issued_time=issued_time
@@ -1562,6 +1658,23 @@ def process_nhc_tracks_fcastonly_buffers(
 ):
     from shapely import wkt as shapely_wkt
 
+    # Realtime short-circuit.
+    if issued_time is not None and not overwrite:
+        with write_engine.connect() as conn:
+            exists = bool(conn.execute(
+                text(
+                    "SELECT 1 FROM storms.nhc_tracks_fcastonly_buffers "
+                    "WHERE issued_time = :it LIMIT 1"
+                ),
+                {"it": issued_time},
+            ).scalar())
+        if exists:
+            logger.info(
+                f"nhc_tracks_fcastonly_buffers already has rows for "
+                f"issued_time={issued_time}; skipping."
+            )
+            return
+
     logger.info("Loading fcast and obsv buffer inputs...")
     df = _load_nhc_fcastonly_inputs(
         read_engine, basin=basin, since=since, until=until, issued_time=issued_time
@@ -1659,6 +1772,42 @@ def run_nhc_tracks_fcastonly_buffers(
 _TRACK_EXP_KEY_COLS = ["atcf_id", "issued_time", "wind_speed_kt", "admin_level", "pcode"]
 _WSP_EXP_KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id", "admin_level", "pcode"]
 _DEFAULT_ADMIN_LEVELS = [0, 1]
+
+
+def _exposure_already_done(
+    *,
+    out_table: str,
+    key_col: str,
+    key_val,
+    admin_levels: list[int] | None,
+    mode: str,
+    session: "_ExposureSession | None" = None,
+) -> bool:
+    """Realtime short-circuit helper for exposure pipelines.
+
+    Returns True only when EVERY requested admin_level has at least one
+    row in `out_table` at `key_col = key_val`. The all-levels check is
+    what makes this safe to call before kicking off an exposure run —
+    a half-done state (adm0 done, adm1 killed mid-way) is not skipped.
+    """
+    requested = set(admin_levels or _DEFAULT_ADMIN_LEVELS)
+    own_engine = session is None
+    engine = session.engine if session is not None else stratus.get_engine(stage=mode)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"SELECT DISTINCT admin_level "
+                    f"FROM storms.{out_table} "
+                    f"WHERE {key_col} = :v"
+                ),
+                {"v": key_val},
+            )
+            present = {row[0] for row in rows}
+    finally:
+        if own_engine:
+            engine.dispose()
+    return requested.issubset(present)
 
 
 # ---------------------------------------------------------------------------
@@ -2012,6 +2161,20 @@ def run_nhc_tracks_fcast_exp(
     admin_levels: list[int] | None = None,
     session: _ExposureSession | None = None,
 ) -> None:
+    if issued_time is not None and not overwrite and _exposure_already_done(
+        out_table="nhc_tracks_fcast_exposure",
+        key_col="issued_time",
+        key_val=issued_time,
+        admin_levels=admin_levels,
+        mode=mode,
+        session=session,
+    ):
+        logger.info(
+            f"nhc_tracks_fcast_exposure already has rows for all requested "
+            f"admin_levels at issued_time={issued_time}; skipping."
+        )
+        return
+
     _run_track_exp(
         load_buffers=lambda eng: _load_nhc_tracks_fcast_exp_buffers(
             eng, since=since, until=until, basin=basin, issued_time=issued_time,
@@ -2119,6 +2282,20 @@ def run_nhc_tracks_obsv_exp(
     final_only: bool = False,
     session: _ExposureSession | None = None,
 ) -> None:
+    if valid_time is not None and not overwrite and _exposure_already_done(
+        out_table="nhc_tracks_obsv_exposure",
+        key_col="valid_time",
+        key_val=valid_time,
+        admin_levels=admin_levels,
+        mode=mode,
+        session=session,
+    ):
+        logger.info(
+            f"nhc_tracks_obsv_exposure already has rows for all requested "
+            f"admin_levels at valid_time={valid_time}; skipping."
+        )
+        return
+
     def _load(engine):
         gdf = _load_nhc_tracks_obsv_exp_buffers(
             engine, since=since, until=until, basin=basin, valid_time=valid_time,
@@ -2237,6 +2414,20 @@ def run_nhc_tracks_fcastonly_exp(
     admin_levels: list[int] | None = None,
     session: _ExposureSession | None = None,
 ) -> None:
+    if issued_time is not None and not overwrite and _exposure_already_done(
+        out_table="nhc_tracks_fcastonly_exposure",
+        key_col="issued_time",
+        key_val=issued_time,
+        admin_levels=admin_levels,
+        mode=mode,
+        session=session,
+    ):
+        logger.info(
+            f"nhc_tracks_fcastonly_exposure already has rows for all requested "
+            f"admin_levels at issued_time={issued_time}; skipping."
+        )
+        return
+
     _run_track_exp(
         load_buffers=lambda eng: _load_nhc_tracks_fcastonly_exp_buffers(
             eng, since=since, until=until, basin=basin, issued_time=issued_time,
@@ -2601,6 +2792,20 @@ def run_nhc_wsp_exp(
     session: _ExposureSession | None = None,
 ) -> None:
     """WSP exposure, chunked by year so peak memory stays bounded."""
+    if issued_time is not None and not overwrite and _exposure_already_done(
+        out_table="nhc_wsp_exposure",
+        key_col="issued_time",
+        key_val=issued_time,
+        admin_levels=admin_levels,
+        mode=mode,
+        session=session,
+    ):
+        logger.info(
+            f"nhc_wsp_exposure already has rows for all requested "
+            f"admin_levels at issued_time={issued_time}; skipping."
+        )
+        return
+
     _run_exp_year_chunk(
         table_label="WSP exposure",
         load_chunk=lambda eng, year: _load_wsp_for_exposure(
@@ -2706,6 +2911,24 @@ def process_nhc_wsp_fcastonly_polygons(
                 )
         logger.info("WSP fcastonly polygons: all issued_times processed.")
         return
+
+    # Realtime short-circuit: bail before the WSP load + per-storm obsv
+    # lookup if this issuance is already done.
+    if not overwrite:
+        with engine.connect() as conn:
+            exists = bool(conn.execute(
+                text(
+                    "SELECT 1 FROM storms.nhc_wsp_fcastonly_polygon "
+                    "WHERE issued_time = :it LIMIT 1"
+                ),
+                {"it": issued_time},
+            ).scalar())
+        if exists:
+            logger.info(
+                f"nhc_wsp_fcastonly_polygon already has rows for "
+                f"issued_time={issued_time}; skipping."
+            )
+            return
 
     logger.info(f"Loading WSP polygons for fcastonly cut-out @ {issued_time}...")
     gdf_wsp = _load_wsp_for_exposure(engine, issued_time=issued_time, basin=basin)
@@ -3002,6 +3225,20 @@ def run_nhc_wsp_fcastonly_exp(
     session: _ExposureSession | None = None,
 ) -> None:
     """WSP fcastonly exposure, chunked by year so peak memory stays bounded."""
+    if issued_time is not None and not overwrite and _exposure_already_done(
+        out_table="nhc_wsp_fcastonly_exposure",
+        key_col="issued_time",
+        key_val=issued_time,
+        admin_levels=admin_levels,
+        mode=mode,
+        session=session,
+    ):
+        logger.info(
+            f"nhc_wsp_fcastonly_exposure already has rows for all requested "
+            f"admin_levels at issued_time={issued_time}; skipping."
+        )
+        return
+
     _run_exp_year_chunk(
         table_label="WSP fcastonly exposure",
         load_chunk=lambda eng, y: _load_wsp_fcastonly_for_exposure(
