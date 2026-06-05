@@ -1,0 +1,217 @@
+# Databricks Asset Bundle — source-controlled definition of the NHC
+# pipeline job.
+#
+#   databricks bundle validate -t dev -p default
+#   databricks bundle deploy   -t dev -p default
+#   databricks bundle run nhc_pipeline -t dev -p default
+#
+# Bundle docs: https://docs.databricks.com/dev-tools/bundles/
+
+bundle:
+  name: ds-storms-pipeline
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      profile: default
+    variables:
+      mode: dev
+  prod:
+    mode: production
+    workspace:
+      profile: default
+    variables:
+      mode: prod
+
+variables:
+  mode:
+    description: Pipeline --mode (dev | prod)
+    default: dev
+  git_branch:
+    description: Branch the cluster pulls run_pipeline.py from
+    default: main
+  existing_cluster_id:
+    description: ID of the interactive cluster to run tasks on
+    default: "0515-161935-i2w5mxhc"
+
+# =====================================================================
+# Single job, 5 chained tasks. Each task = one logical pipeline stage,
+# with its own status / retry in the DBX UI.
+#
+# Realtime cron (default params) — full cascade runs:
+#   etl → tracks_processing → {tracks_exposure, wsp_processing → wsp_exposure}
+#
+# Backfill — three ways:
+#
+#   1. Backfill the whole cascade for a specific issued_time:
+#      "Run with different parameters" → set issued_time. The etl task
+#      still fires (cheap re-fetch of the live JSON); downstream tasks
+#      use the user-provided issued_time instead of etl's task value.
+#
+#   2. Backfill a single stage:
+#      Right-click the stage task → "Run task" → set whichever filter
+#      applies (issued_time, since, year, overwrite). Only
+#      that task runs. The dispatcher picks up the parameters directly.
+#
+#   3. Run a specific subcommand from the local CLI:
+#      `uv run python run_pipeline.py <subcommand> [...]` — identical
+#      to what the dispatcher would invoke.
+# =====================================================================
+resources:
+  jobs:
+    nhc_pipeline:
+      name: NHC Pipeline
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      schedule:
+        quartz_cron_expression: "0 0 0/3 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1
+
+      parameters:
+        - name: mode
+          default: ${var.mode}
+        - name: issued_time    # YYYY-MM-DDTHH; backfill override for a single advisory
+          default: ""
+        - name: since          # YYYY-MM-DD; inclusive lower bound on issued_time
+          default: ""
+        - name: until          # YYYY-MM-DD; exclusive upper bound on issued_time
+          default: ""
+        - name: overwrite      # "true" / ""
+          default: ""
+        # Override the task's hardcoded subcommand at run-time. Empty
+        # (default) → task runs its realtime composite. Non-empty →
+        # task runs that single CLI subcommand instead. E.g. set
+        # subcommand=nhc-wsp-exp to backfill just full-WSP exposure.
+        - name: subcommand
+          default: ""
+        # Test mode: when non-empty, the etl task pulls CurrentStorms JSON
+        # from this URL instead of the live endpoint. WSP follows the GIS
+        # URL inside the sample JSON, so the whole cascade runs end-to-end
+        # against fixture data. Recommended:
+        #   https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json
+        # Pair with `subcommand=nhc-scrub` to clean up the test rows after.
+        - name: sample_json
+          default: ""
+        # Exposure-only filter: limit to admin level(s) 0 and/or 1.
+        # "" → both (default). "0" or "1" → just that level. "0,1" or
+        # "0 1" → both, explicitly. Used to resume an exposure backfill
+        # after one half (e.g. adm0) already wrote rows.
+        - name: admin_level
+          default: ""
+
+      tasks:
+        - task_key: etl
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "nhc"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.until}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
+          libraries: &storm_libs
+            - pypi: { package: "ocha-stratus" }
+            - pypi:
+                # Pinned to commit; bump when ocha-lens@wsp-exp-calc moves
+                # so DBX's library cache forces a reinstall.
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@5c6123f"
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
+            - pypi: { package: "antimeridian" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+            - pypi: { package: "geoalchemy2" }
+            - pypi: { package: "databricks-sdk" }
+
+        - task_key: tracks_processing
+          depends_on:
+            - task_key: etl
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-tracks-processing"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.until}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
+          libraries: *storm_libs
+
+        - task_key: tracks_exposure
+          depends_on:
+            - task_key: tracks_processing
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-tracks-exposure"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.until}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
+          libraries: *storm_libs
+
+        - task_key: wsp_processing
+          depends_on:
+            - task_key: tracks_processing
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-wsp-processing"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.until}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
+          libraries: *storm_libs
+
+        - task_key: wsp_exposure
+          depends_on:
+            - task_key: wsp_processing
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/dispatch.py
+            source: GIT
+            parameters:
+              - "realtime-wsp-exposure"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.since}}"
+              - "{{job.parameters.until}}"
+              - "{{job.parameters.overwrite}}"
+              - "{{job.parameters.subcommand}}"
+              - "{{job.parameters.sample_json}}"
+              - "{{job.parameters.admin_level}}"
+          libraries: *storm_libs

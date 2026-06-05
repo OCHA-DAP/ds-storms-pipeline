@@ -156,3 +156,6 @@ scratch/*
 
 examples/*
 storm/*
+
+# Local benchmarks / scratch scripts (kept out of the repo)
+bench_*.py
