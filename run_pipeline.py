@@ -58,7 +58,6 @@ from src.pipelines.nhc import (
     run_nhc_wsp_fcastonly_polygons,
     run_nhc_wsp_fcastonly_exp,
     run_nhc_wsp_polygon_matched,
-    run_fill_null_wsp_polygon_matched,
 )
 
 
@@ -308,20 +307,10 @@ def main():
     # ------------------------------------------------------------------ #
     # NHC WSP polygon matched (raw WSP + tracks -> per-storm MultiPolygons)
     # ------------------------------------------------------------------ #
-    nhc_wsp_polygon_matched_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "nhc-wsp-polygon-matched",
         parents=[common, time_filter_common, basin_common],
         help="Build storms.nhc_wsp_polygon_matched from raw WSP + tracks",
-    )
-    nhc_wsp_polygon_matched_parser.add_argument(
-        "--fill-nulls",
-        action="store_true",
-        help=(
-            "Surgically re-match only the rows with atcf_id IS NULL in"
-            " nhc_wsp_polygon_matched, using existing non-NULL rows as"
-            " containment-fallback donors. Implies per-issued_time"
-            " transactions; ignores --overwrite."
-        ),
     )
 
     # ------------------------------------------------------------------ #
@@ -557,23 +546,14 @@ def main():
             admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-wsp-polygon-matched":
-        it_arg = _parse_it(getattr(args, "issued_time", None))
-        if getattr(args, "fill_nulls", False):
-            run_fill_null_wsp_polygon_matched(
-                mode=args.mode,
-                since=args.since,
-                until=args.until,
-                issued_time=it_arg,
-            )
-        else:
-            run_nhc_wsp_polygon_matched(
-                mode=args.mode,
-                since=args.since,
-                until=args.until,
-                basin=args.basin,
-                issued_time=it_arg,
-                overwrite=args.overwrite,
-            )
+        run_nhc_wsp_polygon_matched(
+            mode=args.mode,
+            since=args.since,
+            until=args.until,
+            basin=args.basin,
+            issued_time=_parse_it(getattr(args, "issued_time", None)),
+            overwrite=args.overwrite,
+        )
     elif args.pipeline == "nhc-wsp-fcastonly-polygons":
         run_nhc_wsp_fcastonly_polygons(
             mode=args.mode,

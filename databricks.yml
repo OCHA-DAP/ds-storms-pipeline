@@ -52,7 +52,7 @@ variables:
 #
 #   2. Backfill a single stage:
 #      Right-click the stage task → "Run task" → set whichever filter
-#      applies (issued_time, since, year, overwrite, fill_nulls). Only
+#      applies (issued_time, since, year, overwrite). Only
 #      that task runs. The dispatcher picks up the parameters directly.
 #
 #   3. Run a specific subcommand from the local CLI:
@@ -85,8 +85,6 @@ resources:
         - name: until          # YYYY-MM-DD; exclusive upper bound on issued_time
           default: ""
         - name: overwrite      # "true" / ""
-          default: ""
-        - name: fill_nulls     # "true" / ""; nhc-wsp-polygon-matched only
           default: ""
         # Override the task's hardcoded subcommand at run-time. Empty
         # (default) → task runs its realtime composite. Non-empty →
@@ -122,7 +120,6 @@ resources:
               - "{{job.parameters.since}}"
               - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
-              - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
               - "{{job.parameters.admin_level}}"
@@ -157,7 +154,6 @@ resources:
               - "{{job.parameters.since}}"
               - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
-              - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
               - "{{job.parameters.admin_level}}"
@@ -177,7 +173,6 @@ resources:
               - "{{job.parameters.since}}"
               - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
-              - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
               - "{{job.parameters.admin_level}}"
@@ -197,7 +192,6 @@ resources:
               - "{{job.parameters.since}}"
               - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
-              - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
               - "{{job.parameters.admin_level}}"
@@ -217,7 +211,6 @@ resources:
               - "{{job.parameters.since}}"
               - "{{job.parameters.until}}"
               - "{{job.parameters.overwrite}}"
-              - "{{job.parameters.fill_nulls}}"
               - "{{job.parameters.subcommand}}"
               - "{{job.parameters.sample_json}}"
               - "{{job.parameters.admin_level}}"

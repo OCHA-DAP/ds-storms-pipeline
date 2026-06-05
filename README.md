@@ -103,9 +103,6 @@ issued_time.
 # Match raw basin-wide WSP polygons to individual storms (run after nhc ETL)
 uv run python run_pipeline.py nhc-wsp-polygon-matched
 
-# Fill rows with NULL atcf_id using containment-fallback against existing matches
-uv run python run_pipeline.py nhc-wsp-polygon-matched --fill-nulls
-
 # WSP minus cumulative observed swath (analogous to fcastonly-buffers)
 uv run python run_pipeline.py nhc-wsp-fcastonly-polygons
 ```

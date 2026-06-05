@@ -22,10 +22,9 @@ databricks.yml):
     sys.argv[4] = since          # YYYY-MM-DD or "" (inclusive lower)
     sys.argv[5] = until          # YYYY-MM-DD or "" (exclusive upper)
     sys.argv[6] = overwrite      # "true" or ""
-    sys.argv[7] = fill_nulls     # "true" or ""
-    sys.argv[8] = subcommand_override  # non-empty overrides argv[1]
-    sys.argv[9] = sample_json    # URL for test-mode CurrentStorms JSON, or ""
-    sys.argv[10] = admin_level   # "0", "1", "0,1", or "" — exposure subcmds only
+    sys.argv[7] = subcommand_override  # non-empty overrides argv[1]
+    sys.argv[8] = sample_json    # URL for test-mode CurrentStorms JSON, or ""
+    sys.argv[9] = admin_level    # "0", "1", "0,1", or "" — exposure subcmds only
 
 Composite ``realtime-…`` subcommands expand to multiple
 run_pipeline.py invocations — used by the DBX task chain so each task
@@ -66,10 +65,9 @@ ISSUED_TIME = _arg(3)
 SINCE = _arg(4)
 UNTIL = _arg(5)
 OVERWRITE = _arg(6)
-FILL_NULLS = _arg(7)
-SUBCOMMAND_OVERRIDE = _arg(8)
-SAMPLE_JSON = _arg(9)
-ADMIN_LEVEL = _arg(10)
+SUBCOMMAND_OVERRIDE = _arg(7)
+SAMPLE_JSON = _arg(8)
+ADMIN_LEVEL = _arg(9)
 
 # A non-empty override (from job.parameters.subcommand) trumps the task's
 # hardcoded default. Lets you pick a specific CLI subcommand at run-time
@@ -178,8 +176,6 @@ def build_cmd(sub: str, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
     # (always upserts). Skip the append to avoid "unrecognized arguments".
     if OVERWRITE.lower() == "true" and sub != "nhc":
         cmd += ["--overwrite"]
-    if FILL_NULLS.lower() == "true":
-        cmd += ["--fill-nulls"]
     # Test mode: only meaningful for the nhc ETL subcommand. Downstream
     # tasks ignore SAMPLE_JSON — they read the resulting issued_time from
     # the etl task value, no different from a realtime run.

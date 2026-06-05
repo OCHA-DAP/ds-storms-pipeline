@@ -12,9 +12,9 @@ of which delegates to `databricks/dispatch.py`. The dispatcher turns the
 job-level parameters into one or more `python run_pipeline.py …` invocations.
 
 ```
-                    Job parameters (10):
+                    Job parameters (9):
                     mode, issued_time, since, until, overwrite,
-                    fill_nulls, subcommand, sample_json, admin_level
+                    subcommand, sample_json, admin_level
                                  │
                                  ▼
                        ┌─────────────────────┐
@@ -58,7 +58,6 @@ The bundle YAML lives one level up at [`../databricks.yml`](../databricks.yml).
 | `since` | `""` | `YYYY-MM-DD`. Inclusive lower bound for backfills. |
 | `until` | `""` | `YYYY-MM-DD`. Exclusive upper bound for backfills. |
 | `overwrite` | `""` | `"true"` to force upsert of existing rows. |
-| `fill_nulls` | `""` | `"true"` for `nhc-wsp-polygon-matched` rematch-NULLs mode. |
 | `subcommand` | `""` | Non-empty overrides the task's hardcoded composite — lets you reuse a task slot for any single CLI subcommand (e.g. `subcommand=nhc-wsp-exp` on the `wsp_exposure` task). |
 | `sample_json` | `""` | URL of a frozen CurrentStorms JSON. ETL fetches this instead of the live NHC endpoint. End-to-end smoke test only — embedded URLs in the sample rot. |
 | `admin_level` | `""` | `"0"`, `"1"`, or `"0,1"` (default both). Exposure subcommands only. |
@@ -101,9 +100,6 @@ uv run python run_pipeline.py nhc-realtime-wsp-exp           --issued-time 2024-
 
 # Backfill a specific stage
 uv run python run_pipeline.py nhc-wsp-fcastonly-exp --since 2024-01-01 --until 2025-01-01 --mode dev --overwrite
-
-# Surgically fill rows with NULL atcf_id
-uv run python run_pipeline.py nhc-wsp-polygon-matched --fill-nulls --mode dev
 ```
 
 ### In DBX
@@ -114,7 +110,6 @@ uv run python run_pipeline.py nhc-wsp-polygon-matched --fill-nulls --mode dev
 | Replay one advisory through the whole cascade | `issued_time=2024-10-09T18`, `overwrite=true` |
 | Replay skipping ETL (no live JSON fetch) | CLI: `databricks jobs run-now --json '{"job_id":…, "only":["tracks_processing","tracks_exposure","wsp_processing","wsp_exposure"], "job_parameters":{"issued_time":"2024-10-09T18","overwrite":"true"}}'` |
 | Backfill WSP fcastonly exposure for a date range | Right-click `wsp_exposure` → Run task → `subcommand=nhc-wsp-fcastonly-exp`, `since=2024-01-01`, `until=2025-01-01`, `overwrite=true` |
-| Fill NULL atcf_ids in matched WSP | Right-click `wsp_processing` → Run task → `subcommand=nhc-wsp-polygon-matched`, `fill_nulls=true` |
 | End-to-end smoke test on fixture | `sample_json=https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json`, then `subcommand=nhc-scrub` to clean up |
 | Resume one half of an exposure backfill (adm1 only) | `admin_level=1` |
 
@@ -144,7 +139,7 @@ Anything `run_pipeline.py` accepts. Common picks for one-off DBX runs:
 - `nhc` — ETL only
 - `nhc-tracks-fcast-buffers`, `nhc-tracks-obsv-buffers`, `nhc-tracks-fcastonly-buffers`
 - `nhc-track-exp`, `nhc-obsv-exp`, `nhc-fcastonly-exp`
-- `nhc-wsp-polygon-matched` (with optional `fill_nulls=true`)
+- `nhc-wsp-polygon-matched`
 - `nhc-wsp-fcastonly-polygons`
 - `nhc-wsp-exp`, `nhc-wsp-fcastonly-exp`
 - `nhc-realtime`, `nhc-realtime-tracks-exp`, `nhc-realtime-wsp-exp`
