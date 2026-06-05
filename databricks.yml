@@ -55,15 +55,14 @@ resources:
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
-      # Enabled, daily at 06:00 UTC. (Tristan's NHC job runs every 3h;
-      # GDACS/ADAM update far more slowly — current-mode looks back 7d
-      # (gdacs) / 14d (adam) and is idempotent — so daily is plenty and
-      # avoids hammering the GDACS/WFP APIs.) An explicit per-schedule
+      # Enabled, every 3h — same cadence as the NHC pipeline. (GDACS/ADAM
+      # current-mode is idempotent and looks back 7d/14d, so re-runs are
+      # cheap and skip existing rows.) An explicit per-schedule
       # pause_status: UNPAUSED is honored even in development mode (and
       # survives redeploy); only the presets.trigger_pause_status override
       # is disallowed for dev targets.
       schedule:
-        quartz_cron_expression: "0 0 6 * * ?"   # daily 06:00 UTC
+        quartz_cron_expression: "0 0 0/3 * * ?"   # every 3h, on the hour
         timezone_id: UTC
         pause_status: UNPAUSED
 
