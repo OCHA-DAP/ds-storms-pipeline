@@ -27,14 +27,6 @@ variables:
     description: Interactive cluster the dev target runs tasks on
     default: "0604-214501-kq22m39c"   # zarno GDACS-ADAM dev (single-node, isolated lib env)
 
-# Share the job with the team. Without this, only the owner + workspace
-# admins can see it; non-admin teammates (e.g. Tristan, who is in `dsci`
-# but not `admins`) would have no access. CAN_MANAGE lets dsci members
-# see, run, and manage it.
-permissions:
-  - group_name: dsci
-    level: CAN_MANAGE
-
 # =====================================================================
 # Single job, 3 chained tasks mirroring `run_pipeline.py` `all`:
 #
@@ -58,6 +50,14 @@ resources:
   jobs:
     gdacs_adam_pipeline:
       name: GDACS/ADAM Pipeline
+      # Scoped to the job (NOT a top-level bundle permission): this
+      # workspace tier has directory ACLs disabled, so a bundle-wide
+      # permission fails trying to ACL the deployment folder. Granting on
+      # the job alone works. dsci members (incl. Tristan, who isn't a
+      # workspace admin) can then see, run, and manage it.
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
       git_source:
         git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
         git_provider: gitHub
