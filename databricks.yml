@@ -27,6 +27,14 @@ variables:
     description: Interactive cluster the dev target runs tasks on
     default: "0604-214501-kq22m39c"   # zarno GDACS-ADAM dev (single-node, isolated lib env)
 
+# Share the job with the team. Without this, only the owner + workspace
+# admins can see it; non-admin teammates (e.g. Tristan, who is in `dsci`
+# but not `admins`) would have no access. CAN_MANAGE lets dsci members
+# see, run, and manage it.
+permissions:
+  - group_name: dsci
+    level: CAN_MANAGE
+
 # =====================================================================
 # Single job, 3 chained tasks mirroring `run_pipeline.py` `all`:
 #
