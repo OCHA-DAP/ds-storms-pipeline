@@ -31,7 +31,7 @@ variables:
     default: dev
   git_branch:
     description: Branch the cluster pulls run_pipeline.py from
-    default: wsp-adm0-exp
+    default: main
   existing_cluster_id:
     description: ID of the interactive cluster to run tasks on
     default: "0515-161935-i2w5mxhc"
