@@ -1,5 +1,11 @@
 """Regenerate the per-country review artifacts the review qmd consumes.
 
+⚠️  EXPLORATORY / REVIEW-ONLY — NOT live production monitoring, not run by
+the Databricks bundle or CI. Manual aid for producing/checking the
+human-reviewed crosswalk. Calls the review-only matcher in
+`src/static/gdacs/matcher.py` (the production lookup does not).
+
+
 Produces (under ``data/review/`` — gitignored, alongside the
 canonical lookup CSV the production builder writes):
   - gdacs_fm_summary.csv         per-country match stats

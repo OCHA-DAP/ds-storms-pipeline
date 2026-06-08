@@ -4,7 +4,8 @@ History
 -------
 The existing `storms.gdacs_fm_lookup` table in dev Postgres is the
 cumulative output of the prior GDACS pipeline (policies +
-per-row-notes + LLM iterations via scripts/build_canonical_lookup.py).
+per-row-notes + LLM iterations via the v1 GDACS lookup builder, now
+archived at scripts/_archive/build_canonical_lookup.py).
 The decisions baked into it are scattered across the TOML, the build
 script logic, and the table itself.
 

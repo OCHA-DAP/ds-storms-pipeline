@@ -1,5 +1,11 @@
 """GDACS → NHC ATCF matching.
 
+✅ LIVE PRODUCTION (monitoring) — runs on the Databricks schedule as the
+`match` task of the gdacs_adam_pipeline job, via `run_pipeline.py match` →
+`databricks/dispatch.py`. Writes the `atcf_id` link in
+`storms.storm_id_lookup`. (Distinct from the EXPLORATORY FM↔source spatial
+matchers in `src/static/{gdacs,adam}/matcher.py` — unrelated code.)
+
 Resolves the NHC atcf_id for GDACS events with
 ``ocha_lens.datasources.gdacs.match_to_atcf``, which matches the
 shared NHC forecast cone (GDACS forecast points vs NHC tracks at the
@@ -22,7 +28,6 @@ gdacs_eventid is not yet linked in storms.storm_id_lookup.
 """
 
 import logging
-from functools import partial
 from typing import Any, Dict, List, Optional, Set
 
 import coloredlogs
@@ -32,6 +37,8 @@ import requests
 from dotenv import load_dotenv
 
 from ocha_lens.datasources import gdacs as gdacs_api
+
+from ._upsert import upsert_storm_id_lookup
 
 
 load_dotenv()
@@ -152,22 +159,17 @@ def attempt_match(
 
 def upsert_matches(matches: List[dict], engine) -> None:
     """matches: list of {'gdacs_eventid': int, 'atcf_id': str}.
-    No-op when empty."""
+    No-op when empty.
+
+    Writes only the ``atcf_id`` column (and bumps ``last_updated``); any
+    existing ``adam_eventid``/``sid`` on the row are preserved. This goes
+    through the column-scoped helper rather than ``stratus.postgres_upsert``
+    — see :mod:`src.pipelines._upsert` for why that matters here."""
     if not matches:
         return
     df = pd.DataFrame(matches)
-    upsert = partial(
-        stratus.postgres_upsert, constraint="storm_id_lookup_pkey"
-    )
     logger.info("Upserting %d matches into storm_id_lookup", len(df))
-    df.to_sql(
-        "storm_id_lookup",
-        engine,
-        schema="storms",
-        if_exists="append",
-        index=False,
-        method=upsert,
-    )
+    upsert_storm_id_lookup(df, engine)
 
 
 def run_match(mode: str = "dev") -> None:

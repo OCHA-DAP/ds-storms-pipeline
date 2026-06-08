@@ -1,5 +1,11 @@
 """Regenerate the per-country review artifacts the ADAM review qmd reads.
 
+⚠️  EXPLORATORY / REVIEW-ONLY — NOT live production monitoring, not run by
+the Databricks bundle or CI. Manual aid for producing/checking the
+human-reviewed crosswalk. Calls the review-only matcher in
+`src/static/adam/matcher.py` (the production lookup does not).
+
+
 Mirror of :mod:`scripts.build_review_artifacts` but for the FM↔ADAM
 bridge. Produces under ``data/review/`` (gitignored):
 

@@ -17,8 +17,9 @@ Three pieces of input:
    the upstream ``data.fieldmaps.io`` global parquet).
 
 GDACS-side inputs (the admin shapefile) live in
-:mod:`src.static.gdacs.admin`. ``scripts/build_canonical_lookup.py``
-pulls from both modules.
+:mod:`src.static.gdacs.admin`. The GDACS build scripts
+(``scripts/build_gdacs_fm_crosswalk.py``, ``scripts/build_gdacs_fm_lookup.py``)
+pull from both modules.
 """
 
 from __future__ import annotations

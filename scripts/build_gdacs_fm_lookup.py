@@ -1,25 +1,26 @@
-"""Build storms.adam_fm_lookup from the human-reviewed crosswalk CSV.
+"""Build storms.gdacs_fm_lookup from the human-reviewed crosswalk CSV.
 
-Reads `data/review/adam_fm_crosswalk_humanreview.csv` (the
-authoritative post-review crosswalk; every row is one FM↔ADAM spatial
-relationship with the reviewer's decision attached) plus
+Sibling of `build_adam_fm_lookup.py`. Reads
+`data/review/gdacs_fm_crosswalk_humanreview.csv` (the authoritative
+post-review crosswalk; every row is one FM↔GDACS spatial relationship
+with the reviewer's decision attached) plus
 `config/adm_level_config.toml` (for country-level policy and caveats)
 plus FM adm0 polygons. Emits an FM-centric lookup with one adm0 row
 per country plus zero-to-many adm1 rows per FM polygon.
 
-Replaces the original `build_adam_fm_lookup.py` which drove the lookup
-from spatial + TOML alone. The new path is human-review-first: the
-row-level decisions in the humanreview crosswalk are the source of
-truth for adm1.
+Supersedes the v1 builder (archived at
+`scripts/_archive/build_canonical_lookup.py`), which drove the lookup from
+spatial + TOML alone. This path is human-review-first: the row-level
+decisions in the humanreview crosswalk are the source of truth for adm1.
 
-Schema (matches existing storms.adam_fm_lookup PK):
+Schema (matches existing storms.gdacs_fm_lookup PK):
 
     iso3, admin_level, fm_pcode, fm_name,
-    adam_admin_id, adam_admin_name,
-    iou, caveat_kind, caveat_note
+    gmi_admin, gdacs_admin_name,
+    caveat_kind, caveat_note
 
-PK = (iso3, admin_level, fm_pcode, adam_admin_id). adam_admin_id is
-NULL for adm0 rows and for adm1 rows where FM has no ADAM partner.
+PK = (iso3, admin_level, fm_pcode, gmi_admin). gmi_admin is NULL for
+adm0 rows and for adm1 rows where FM has no GDACS partner.
 
 Caveat priority per row:
     1. Per-row `caveat` from humanreview (human-written, authoritative)
@@ -28,11 +29,11 @@ Caveat priority per row:
 
 Usage::
 
-    uv run python scripts/build_adam_fm_lookup_v2.py
-        [--humrev PATH]   # default data/review/adam_fm_crosswalk_humanreview.csv
-        [--out PATH]      # default data/adam_fm_lookup.csv
+    uv run python scripts/build_gdacs_fm_lookup.py
+        [--humrev PATH]   # default data/review/gdacs_fm_crosswalk_humanreview.csv
+        [--out PATH]      # default data/gdacs_fm_lookup.csv
         [--mode dev|prod] # which DB stage if --write-db
-        [--write-db]      # write to storms.adam_fm_lookup
+        [--write-db]      # write to storms.gdacs_fm_lookup
 """
 
 import argparse
@@ -47,49 +48,49 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.static.adam.admin import (  # noqa: E402
-    filter_adam_country,
-    load_adam_admin,
+from src.static.gdacs.admin import (  # noqa: E402
+    filter_gdacs_country,
+    load_gdacs_admin,
 )
-from src.static.adam.inputs import (  # noqa: E402
+from src.static.gdacs.inputs import (  # noqa: E402
     ATLANTIC_ISO3,
     DEFAULT_CONFIG,
-    FM_ADM1_NAME_FALLBACK_ISOS,
-    fallback_fm_name_from_adm0,
     load_fieldmaps_adm,
     load_level_config,
 )
+from validate_crosswalk import validate  # noqa: E402
 
 DEFAULT_HUMREV = (
-    REPO_ROOT / "data" / "review" / "adam_fm_crosswalk_humanreview.csv"
+    REPO_ROOT / "data" / "review"
+    / "gdacs_fm_crosswalk_humanreview.csv"
 )
-DEFAULT_OUT = REPO_ROOT / "data" / "adam_fm_lookup.csv"
+DEFAULT_OUT = REPO_ROOT / "data" / "gdacs_fm_lookup.csv"
 DB_SCHEMA = "storms"
-DB_TABLE = "adam_fm_lookup"
+DB_TABLE = "gdacs_fm_lookup"
 
 LOOKUP_COLUMNS = [
     "iso3", "admin_level", "fm_pcode", "fm_name",
-    "adam_admin_id", "adam_admin_name",
-    "iou", "caveat_kind", "caveat_note",
+    "gmi_admin", "gdacs_admin_name",
+    "caveat_kind", "caveat_note",
 ]
 
 # Status values that produce a lookup row (others are excluded).
-EMIT_STATUS = {"match", "adam_in_fm", "fm_in_adam", "fm_only"}
+EMIT_STATUS = {"match", "gdacs_in_fm", "fm_in_gdacs", "fm_only"}
 
 # Country-level policies that suppress adm1 emit entirely.
-SUPPRESS_ADM1 = {"country_only", "no_adam_source"}
+SUPPRESS_ADM1 = {"country_only", "no_fm_source"}
 
 # Status → caveat_kind controlled vocabulary mapping.
 STATUS_TO_KIND = {
-    "match": None,                         # clean 1:1, no caveat
-    "adam_in_fm": "aggregating_from_adam",  # FM aggregates N ADAMs
-    "fm_in_adam": "aggregated_in_adam",    # ADAM aggregates N FMs
-    "fm_only": "no_adam_at_adm1",          # no ADAM partner
+    "match": None,                          # clean 1:1, no caveat
+    "gdacs_in_fm": "aggregating_from_gdacs",  # FM aggregates N GDACS
+    "fm_in_gdacs": "aggregated_in_gdacs",   # GDACS aggregates N FMs
+    "fm_only": "no_gdacs_at_adm1",          # no GDACS partner
 }
 POLICY_TO_KIND = {
     "country_only": "country_only",
     "fm_adm1_only": "fm_adm1_only",
-    "no_adam_source": "no_adam_source",
+    "no_fm_source": "no_fm_source",
     "needs_manual_mapping": "needs_manual_mapping",
 }
 
@@ -103,7 +104,7 @@ logger = logging.getLogger(__name__)
 def build_adm0_row(
     iso3: str,
     fm_adm0: "gpd.GeoDataFrame | pd.DataFrame | None",
-    adam_country: gpd.GeoDataFrame,
+    gdacs_country: gpd.GeoDataFrame,
     policy_action: str | None,
     policy_note: str | None,
 ) -> dict:
@@ -113,23 +114,23 @@ def build_adm0_row(
         row = fm_adm0.iloc[0]
         if "adm0_name" in fm_adm0.columns and pd.notna(row.get("adm0_name")):
             fm_name = row["adm0_name"]
-    adam_adm0_name = None
-    if len(adam_country) and "adm0_name" in adam_country.columns:
-        v = adam_country.iloc[0]["adm0_name"]
-        if pd.notna(v):
-            adam_adm0_name = v
+    gdacs_country_name = None
+    gmi_country = None
+    if len(gdacs_country):
+        first = gdacs_country.iloc[0]
+        if "CNTRY_NAME" in gdacs_country.columns:
+            gdacs_country_name = first.get("CNTRY_NAME")
+        if "GMI_CNTRY" in gdacs_country.columns:
+            gmi_country = first.get("GMI_CNTRY")
     if not fm_name:
-        fm_name = adam_adm0_name or iso3
-    # If country has no ADAM at all, adam_adm0_name is the country name
-    # alias which we still surface for downstream joins.
+        fm_name = gdacs_country_name or iso3
     return {
         "iso3": iso3,
         "admin_level": 0,
         "fm_pcode": iso3,
         "fm_name": fm_name,
-        "adam_admin_id": None,
-        "adam_admin_name": adam_adm0_name or iso3,
-        "iou": None,
+        "gmi_admin": gmi_country,
+        "gdacs_admin_name": gdacs_country_name or iso3,
         "caveat_kind": POLICY_TO_KIND.get(policy_action),
         "caveat_note": policy_note or None,
     }
@@ -145,8 +146,8 @@ def emit_adm1_rows_for_country(
     policy_action: str | None,
     policy_note: str | None,
 ) -> list[dict]:
-    """Emit adm1 lookup rows for one country from its humrev crosswalk
-    rows."""
+    """Emit adm1 lookup rows for one country from its humanreview
+    crosswalk rows."""
     if policy_action in SUPPRESS_ADM1:
         return []
 
@@ -154,16 +155,14 @@ def emit_adm1_rows_for_country(
     # Group by FM polygon — each group decides its own emit behavior
     for fm_pcode, g in country_xw.groupby("fm_pcode"):
         if pd.isna(fm_pcode):
-            continue  # adam_only orphan rows have no FM
+            continue  # gdacs_only orphan rows have no FM
         emit = g[g["status"].isin(EMIT_STATUS)]
         fm_name = g.iloc[0]["fm_name"]
 
         if len(emit) == 0:
             # No definitive row. If country has fm_adm1_only policy
             # (or humrev policy column says so for this country),
-            # emit a single FM-only row with NULL ADAM. Caveat
-            # priority: any humrev `caveat` on this FM's rows wins,
-            # else fall back to the country-level policy_note.
+            # emit a single FM-only row with NULL GDACS attach.
             row_policy = (
                 g.iloc[0]["policy"] if "policy" in g.columns else None
             )
@@ -171,6 +170,8 @@ def emit_adm1_rows_for_country(
                 policy_action == "fm_adm1_only"
                 or row_policy == "fm_adm1_only"
             ):
+                # Prefer any humrev caveat the reviewer set on this
+                # FM's rows; else fall back to TOML policy_note.
                 humrev_caveat = next(
                     (str(c).strip() for c in g["caveat"]
                      if pd.notna(c) and str(c).strip()),
@@ -178,12 +179,10 @@ def emit_adm1_rows_for_country(
                 )
                 rows.append(_build_adm1_row(
                     iso3, fm_pcode, fm_name,
-                    adam_id=None, adam_name=None, iou=None,
+                    gmi_admin=None, gdacs_admin_name=None,
                     caveat_kind="fm_adm1_only",
                     caveat_note=humrev_caveat or policy_note,
                 ))
-            # else: FM silently disappears. The validator's coverage
-            # check should have caught this; log a warning here too.
             else:
                 logger.warning(
                     "FM %s/%s has no definitive row and no fm-only "
@@ -193,28 +192,24 @@ def emit_adm1_rows_for_country(
             continue
 
         # One or more definitive rows. Emit one lookup row per
-        # definitive row. For status=fm_only, dedupe to a single row
-        # (humrev might have multiple fm_only rows per FM).
+        # definitive row. For status=fm_only, dedupe to a single row.
         statuses = set(emit["status"])
         if "fm_only" in statuses and len(statuses) == 1:
-            # All definitive rows are fm_only — dedupe to one.
             chosen = emit.iloc[0]
             rows.append(_build_adm1_row(
                 iso3, fm_pcode, fm_name,
-                adam_id=None, adam_name=None, iou=None,
+                gmi_admin=None, gdacs_admin_name=None,
                 caveat_kind=STATUS_TO_KIND["fm_only"],
                 caveat_note=_caveat(chosen),
             ))
             continue
 
-        # Otherwise emit one lookup row per emit-status row. For
-        # adam_in_fm this is many rows; for match/fm_in_adam it's one.
+        # Otherwise emit one lookup row per emit-status row.
         for _, r in emit.iterrows():
             rows.append(_build_adm1_row(
                 iso3, fm_pcode, fm_name,
-                adam_id=r["adam_admin_id"],
-                adam_name=r["adam_admin_name"],
-                iou=r["iou"],
+                gmi_admin=r["gmi_admin"],
+                gdacs_admin_name=r["gdacs_admin_name"],
                 caveat_kind=STATUS_TO_KIND.get(r["status"]),
                 caveat_note=_caveat(r),
             ))
@@ -224,29 +219,23 @@ def emit_adm1_rows_for_country(
 
 def _build_adm1_row(
     iso3, fm_pcode, fm_name,
-    adam_id, adam_name, iou,
+    gmi_admin, gdacs_admin_name,
     caveat_kind, caveat_note,
 ) -> dict:
     """Construct an adm1 lookup row dict."""
-    # Coerce types — adam_admin_id is float in the crosswalk because
-    # pandas reads NaN-containing int columns as float. We want
-    # nullable int in the DB.
-    if adam_id is not None and pd.notna(adam_id):
-        adam_id = int(adam_id)
+    if gmi_admin is not None and pd.notna(gmi_admin):
+        gmi_admin = str(gmi_admin)
     else:
-        adam_id = None
-    if iou is not None and pd.notna(iou):
-        iou = float(iou)
-    else:
-        iou = None
+        gmi_admin = None
     return {
         "iso3": iso3,
         "admin_level": 1,
         "fm_pcode": fm_pcode,
         "fm_name": fm_name,
-        "adam_admin_id": adam_id,
-        "adam_admin_name": adam_name if pd.notna(adam_name) else None,
-        "iou": iou,
+        "gmi_admin": gmi_admin,
+        "gdacs_admin_name": (
+            gdacs_admin_name if pd.notna(gdacs_admin_name) else None
+        ),
         "caveat_kind": caveat_kind,
         "caveat_note": caveat_note,
     }
@@ -255,17 +244,16 @@ def _build_adm1_row(
 def _caveat(row: pd.Series) -> str | None:
     """Pick the right caveat text for a per-row emit.
 
-    Only the humrev `caveat` column is honored. We deliberately do
-    NOT fall back to the country-level policy_note for per-row emits
-    — when the row exists in the crosswalk, the human/LLM has already
-    made the call. An empty caveat means "no caveat needed" (e.g. a
-    clean match). policy_note is only the right fallback for the
-    *policy-driven* FM-only emit path (no humrev row exists).
-
-    The row's `note` column is internal LLM/build reasoning and is
-    NOT used as a consumer-facing caveat.
+    Only the humanreview `caveat` column is honored (verbatim). We
+    deliberately do NOT fall back to the country-level policy_note
+    for per-row emits — an empty caveat means "no caveat needed"
+    (e.g. a clean match). policy_note is only used by the policy-
+    driven FM-only fallback path.
     """
-    if "caveat" in row and pd.notna(row["caveat"]) and str(row["caveat"]).strip():
+    if (
+        "caveat" in row and pd.notna(row["caveat"])
+        and str(row["caveat"]).strip()
+    ):
         return str(row["caveat"]).strip()
     return None
 
@@ -277,11 +265,11 @@ def _caveat(row: pd.Series) -> str | None:
 def build_lookup(
     humrev: pd.DataFrame,
     cfg: dict,
-    adam_admin: gpd.GeoDataFrame,
+    gdacs_admin: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
     """Produce the full lookup DataFrame in one pass."""
     rows: list[dict] = []
-    policies = cfg.get("adam_policy", {})
+    policies = cfg.get("gdacs_policy", {})
 
     for iso3 in ATLANTIC_ISO3:
         policy = policies.get(iso3, {})
@@ -294,12 +282,12 @@ def build_lookup(
         except Exception as e:
             logger.warning("FM adm0 load failed for %s: %s", iso3, e)
             fm_adm0 = None
-        adam_country = filter_adam_country(adam_admin, iso3)
+        gdacs_country = filter_gdacs_country(gdacs_admin, iso3)
         rows.append(build_adm0_row(
-            iso3, fm_adm0, adam_country, policy_action, policy_note,
+            iso3, fm_adm0, gdacs_country, policy_action, policy_note,
         ))
 
-        # adm1 from humrev
+        # adm1 from humanreview
         country_xw = humrev[humrev["iso3"] == iso3]
         if len(country_xw) == 0:
             continue
@@ -309,7 +297,7 @@ def build_lookup(
 
     df = pd.DataFrame(rows, columns=LOOKUP_COLUMNS)
     df.sort_values(
-        ["iso3", "admin_level", "fm_pcode", "adam_admin_id"],
+        ["iso3", "admin_level", "fm_pcode", "gmi_admin"],
         inplace=True, kind="stable", na_position="last",
     )
     df.reset_index(drop=True, inplace=True)
@@ -333,47 +321,66 @@ def main() -> int:
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--mode", choices=["dev", "prod"], default="dev")
     ap.add_argument("--write-db", action="store_true",
-                    help="write the lookup to storms.adam_fm_lookup")
+                    help="write the lookup to storms.gdacs_fm_lookup")
+    ap.add_argument("--skip-validation", action="store_true",
+                    help="bypass the crosswalk validation gate "
+                         "(emergencies only)")
     args = ap.parse_args()
 
+    if args.write_db and not args.skip_validation:
+        blocking = validate(args.humrev, "gdacs")
+        if blocking:
+            logger.error(
+                "%d blocking validation violation(s) in %s — refusing to "
+                "write DB. Fix the crosswalk or pass --skip-validation.",
+                blocking, args.humrev,
+            )
+            return 1
+
     logger.info("Loading humanreview crosswalk from %s", args.humrev)
-    # utf-8-sig: transparently strips a leading BOM if present. Lets
-    # us write CSVs with a BOM (so Excel-on-Mac doesn't misinterpret
-    # them as Mac Roman) without leaking `﻿` into the first
-    # column name on read.
+    # utf-8-sig: transparently strips BOM if present
     humrev = pd.read_csv(args.humrev, encoding="utf-8-sig")
     logger.info("  %d rows across %d iso3s",
                 len(humrev), humrev["iso3"].nunique())
 
     cfg = load_level_config(args.config)
-    n_policies = len(cfg.get("adam_policy", {}))
-    logger.info("Loaded %d adam_policy entries from %s",
+    n_policies = len(cfg.get("gdacs_policy", {}))
+    logger.info("Loaded %d gdacs_policy entries from %s",
                 n_policies, args.config)
 
-    adam = load_adam_admin()
-    logger.info("Loaded ADAM admin layer: %d polygons", len(adam))
+    gdacs = load_gdacs_admin()
+    logger.info("Loaded GDACS admin layer: %d polygons", len(gdacs))
 
-    df = build_lookup(humrev, cfg, adam)
+    df = build_lookup(humrev, cfg, gdacs)
     logger.info("Built lookup: %d rows (%d adm0 + %d adm1)",
                 len(df), (df["admin_level"] == 0).sum(),
                 (df["admin_level"] == 1).sum())
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    # utf-8-sig prepends a BOM so Excel-on-Mac doesn't misinterpret
-    # this as Mac Roman. Other tools (pandas, jq, awk, VS Code) strip
-    # or ignore the BOM transparently.
+    # utf-8-sig: BOM so Excel-on-Mac doesn't misread the file
     df.to_csv(args.out, index=False, encoding="utf-8-sig")
     logger.info("Wrote CSV to %s", args.out)
 
     if args.write_db:
         import ocha_stratus as stratus  # noqa: E402
+        from sqlalchemy import text  # noqa: E402
+
+        # Full rebuild into the PRE-CREATED typed/constrained table (run
+        # scripts/init_db_gdacs_lookup.py first). TRUNCATE + append in one
+        # transaction: atomic (no visible-empty window) and preserves the
+        # DDL types/UNIQUE constraint — unlike if_exists="replace", which
+        # drops the table and re-infers dtypes / drops the constraint.
         engine = stratus.get_engine(stage=args.mode, write=True)
-        df.to_sql(
-            DB_TABLE, engine,
-            schema=DB_SCHEMA,
-            if_exists="replace",
-            index=False,
-        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(f"TRUNCATE TABLE {DB_SCHEMA}.{DB_TABLE}")
+            )
+            df.to_sql(
+                DB_TABLE, conn,
+                schema=DB_SCHEMA,
+                if_exists="append",
+                index=False,
+            )
         logger.info("Wrote %d rows to %s.%s (stage=%s)",
                     len(df), DB_SCHEMA, DB_TABLE, args.mode)
 

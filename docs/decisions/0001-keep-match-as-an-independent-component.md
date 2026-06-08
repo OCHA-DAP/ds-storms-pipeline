@@ -75,10 +75,15 @@ pipeline's run and fragment the cross-run retry logic.
 * `match`'s `_load_unmatched_eventids` selects unmatched events from
   `gdacs_exposure` (ADAM-independent) UNION any `storm_id_lookup` row with
   `atcf_id IS NULL`, so it provably matches whatever is present.
-* All write paths upsert on `storm_id_lookup_pkey` and only touch unmatched
-  rows → re-running is a no-op (idempotent).
-* Verified by a live dev run (gdacs → adam → match): GDACS matched inline,
-  ADAM wrote the identity link, `match` reported "No unmatched GDACS events."
+* Each writer's upsert is **column-scoped** (`src/pipelines/_upsert.py`):
+  ADAM writes only `adam_eventid`, `match`/GDACS write only `atcf_id`, and
+  `last_updated` is bumped — so cross-source links accumulate on the row
+  instead of clobbering each other, and re-running is idempotent. (An
+  earlier implementation routed these partial writes through
+  `stratus.postgres_upsert`, whose all-columns `SET` silently NULLed the
+  siblings; the column-scoped helper fixes that.)
+* Guarded by `tests/test_storm_id_lookup_upsert.py`, which asserts each
+  writer's generated `SET` clause touches only its own column.
 
 ## Pros and Cons of the Options
 

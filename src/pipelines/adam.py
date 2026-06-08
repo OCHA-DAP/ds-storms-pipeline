@@ -1,12 +1,19 @@
 """WFP ADAM ETL pipeline (current / archive), mirroring the GDACS pattern.
 
+✅ LIVE PRODUCTION (monitoring) — runs on the Databricks schedule as the
+`adam` task of the gdacs_adam_pipeline job (every 3h), via
+`run_pipeline.py adam` → `databricks/dispatch.py`. Writes
+`storms.adam_exposure` and the `adam_eventid` link in
+`storms.storm_id_lookup`.
+
 Per event we call ``ocha_lens.datasources.adam.get_exposure`` to download
 the per-episode population CSV (long-form rows for admin levels 0/1/2,
 cumulative ≥ threshold) and write to ``storms.adam_exposure``. ADAM
 event_id is the same identifier GDACS uses, so we also upsert
 ``storms.storm_id_lookup`` with ``adam_eventid = event_id`` — a boolean
-"have we ingested ADAM data for this event?" signal that leaves
-``atcf_id`` untouched.
+"have we ingested ADAM data for this event?" signal. The upsert is
+column-scoped (see :mod:`src.pipelines._upsert`), so it leaves any
+existing ``atcf_id``/``sid`` on the row untouched.
 
 Idempotency: pre-load (event_id, episode_id) pairs already in
 ``adam_exposure`` and skip CSV download for any event whose latest
@@ -26,6 +33,8 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from ocha_lens.datasources import adam as adam_api
+
+from ._upsert import upsert_storm_id_lookup
 
 
 load_dotenv()
@@ -118,10 +127,27 @@ def _ingest_event_range(
         len(already_ingested),
     )
 
-    all_rows = []
+    exposure_upsert = partial(
+        stratus.postgres_upsert, constraint="adam_exposure_unique",
+    )
+
+    def _upsert_rows(rows: list) -> int:
+        """Per-event upsert to adam_exposure: durable as soon as the event
+        is processed, so a crash mid-backfill keeps prior events' work
+        (mirrors the GDACS pipeline). No-op on empty."""
+        if not rows:
+            return 0
+        pd.DataFrame(rows).to_sql(
+            "adam_exposure", engine, schema="storms",
+            if_exists="append", index=False, method=exposure_upsert,
+            chunksize=chunksize,
+        )
+        return len(rows)
+
     storm_links = []
     n_skipped = 0
     n_no_csv = 0
+    n_rows_written = 0
 
     for i, (_, ev) in enumerate(events.iterrows(), start=1):
         event_id = int(ev["event_id"])
@@ -136,7 +162,8 @@ def _ingest_event_range(
         # get_events alone — it does not depend on the exposure CSV
         # downloading. A WFP 403 on the CSV costs us the population
         # rows, not the identity. Deduped by gdacs_eventid before the
-        # upsert, which leaves any existing atcf_id/sid untouched.
+        # upsert (the batch can't carry duplicate conflict keys); the
+        # column-scoped upsert is what preserves any existing atcf_id/sid.
         storm_links.append({
             "gdacs_eventid": event_id,
             "adam_eventid": event_id,
@@ -175,7 +202,8 @@ def _ingest_event_range(
 
         valid_time = pd.to_datetime(ev["to_date"])
         rows = _emit_rows(event_id, episode_id, valid_time, exposure)
-        all_rows.extend(rows)
+        # Per-event upsert (durable mid-backfill), not end-of-run bulk.
+        n_rows_written += _upsert_rows(rows)
         logger.info(
             "  +%d rows (adm0:%d, adm1:%d, adm2:%d)",
             len(rows),
@@ -185,23 +213,11 @@ def _ingest_event_range(
         )
 
     logger.info(
-        "Done: %d events ingested, %d skipped (already in DB), %d skipped (no CSV)",
-        len(events) - n_skipped - n_no_csv, n_skipped, n_no_csv,
+        "Done: %d events ingested, %d rows written, %d skipped (already in "
+        "DB), %d skipped (no CSV)",
+        len(events) - n_skipped - n_no_csv, n_rows_written, n_skipped,
+        n_no_csv,
     )
-
-    if all_rows:
-        df = pd.DataFrame(all_rows)
-        upsert = partial(
-            stratus.postgres_upsert, constraint="adam_exposure_unique",
-        )
-        logger.info(
-            "Upserting %d rows -> storms.adam_exposure (%s)", len(df), mode,
-        )
-        df.to_sql(
-            "adam_exposure", engine, schema="storms",
-            if_exists="append", index=False, method=upsert, chunksize=chunksize,
-        )
-        logger.info("Wrote %d rows", len(df))
 
     if storm_links:
         # In all-episodes mode the same (gdacs_eventid, adam_eventid)
@@ -210,16 +226,12 @@ def _ingest_event_range(
         df_links = pd.DataFrame(storm_links).drop_duplicates(
             subset="gdacs_eventid",
         )
-        upsert = partial(
-            stratus.postgres_upsert, constraint="storm_id_lookup_pkey",
-        )
         logger.info(
             "Upserting %d storm_id_lookup rows (adam_eventid)", len(df_links),
         )
-        df_links.to_sql(
-            "storm_id_lookup", engine, schema="storms",
-            if_exists="append", index=False, method=upsert,
-        )
+        # Column-scoped upsert: writes only adam_eventid (+ last_updated),
+        # preserving any atcf_id/sid already on the row. See _upsert.py.
+        upsert_storm_id_lookup(df_links, engine)
 
 
 def run_adam_current(

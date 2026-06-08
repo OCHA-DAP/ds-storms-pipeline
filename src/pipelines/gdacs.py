@@ -1,5 +1,10 @@
 """GDACS ETL pipeline.
 
+✅ LIVE PRODUCTION (monitoring) — runs on the Databricks schedule as the
+`gdacs` task of the gdacs_adam_pipeline job (every 3h), via
+`run_pipeline.py gdacs` → `databricks/dispatch.py`. Writes
+`storms.gdacs_exposure` and the `atcf_id` link in `storms.storm_id_lookup`.
+
 Two modes (mirroring NHC pipeline pattern):
 
 1. Current: Real-time GDACS Tropical Cyclone events (recent window)

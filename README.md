@@ -2,6 +2,25 @@
 
 This repository contains code to download and process storm forecasts and observations from various sources. 
 
+## Code map: production vs build vs exploratory
+
+Not all code here runs in production. Three tiers, kept explicit so the
+exploratory↔production boundary is unambiguous (each module also carries a
+banner saying which tier it is):
+
+| Tier | What it is | Where |
+|---|---|---|
+| ✅ **Live production (monitoring)** | Real-time ingestion/linking that runs **on the Databricks schedule** (every 3h) | `src/pipelines/{gdacs,adam,match,nhc,ecmwf,ibtracs}.py`, `run_pipeline.py`, `databricks/` + `databricks.yml` |
+| 🛠️ **Offline build tooling** | Run **on demand** to (re)build the static FM lookup tables and DB schema — produces production tables but is **not** real-time | `scripts/build_{gdacs,adam}_fm_crosswalk.py`, `scripts/build_{gdacs,adam}_fm_lookup.py`, `scripts/validate_crosswalk.py`, `scripts/init_db_*.py`, `src/static/{gdacs,adam}/{admin,inputs}.py`, `src/schemas/sql/*.sql` |
+| ⚠️ **Exploratory / review-only** | Research + human-review aids; **not** wired into `run_pipeline.py`, the bundle, or CI | `src/static/{gdacs,adam}/matcher.py`, `scripts/build_review_artifacts.py`, `scripts/build_adam_review_artifacts.py`, `exploration/*.qmd`, `artefacts/` |
+
+Key non-obvious point: the FM↔source spatial **matchers** in
+`src/static/*/matcher.py` are **review-only** — the production
+`storms.{gdacs,adam}_fm_lookup` tables are built from the human-reviewed
+crosswalk by the `*_fm_lookup.py` builders, which do not use those
+matchers. (A later PR will relocate the matchers out of `src/static/` to make
+this structural.)
+
 ## Running pipelines
 
 The `run_pipeline.py` script provides a command-line interface for running data pipelines. Each pipeline has its own subcommand with relevant options.

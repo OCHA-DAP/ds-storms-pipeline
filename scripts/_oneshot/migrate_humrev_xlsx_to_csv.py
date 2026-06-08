@@ -26,7 +26,7 @@ What it does
    take everything else from humrev.
 5. Write to `data/review/adam_fm_crosswalk_humanreview.csv` (gitignored).
 
-After this runs, `build_adam_fm_lookup_v2.py` reads the new
+After this runs, `build_adam_fm_lookup.py` reads the new
 humanreview.csv directly. No rejoin step needed in the regular
 pipeline.
 

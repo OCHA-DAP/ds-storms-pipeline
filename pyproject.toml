@@ -50,3 +50,9 @@ ocha-lens = { path = "../ocha-lens", editable = true }
 
 [tool.ruff]
 line-length = 79
+# Archived/frozen scripts are kept for reference only — don't lint or
+# auto-fix them (ruff --fix runs in pre-commit and would edit frozen code).
+extend-exclude = ["scripts/_archive"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
