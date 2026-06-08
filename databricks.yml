@@ -68,8 +68,18 @@ resources:
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
+      # Fires at :00 AND :30 of every 3rd hour. The :30 run is a WSP
+      # late-arrival retry: NHC frequently publishes the cycle's WSP zip
+      # after the on-time :00 run, which then finds no WSP and skips it.
+      # Re-running the whole cascade 30 min later is fill-only, not a
+      # rebuild — every stage either short-circuits on an already-present
+      # issued_time (buffers, wsp-matched; the WSP-peek in nhc.py also
+      # skips the multi-MB re-download) or upserts identical rows for the
+      # same advisory (exposure). So the :30 run picks up late WSP without
+      # clobbering anything written on time. To force a rebuild, run with
+      # overwrite=true.
       schedule:
-        quartz_cron_expression: "0 0 0/3 * * ?"
+        quartz_cron_expression: "0 0,30 0/3 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
