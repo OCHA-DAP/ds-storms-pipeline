@@ -116,7 +116,7 @@ resources:
                 # Pinned to the gdacs-adam-funcs branch HEAD. Bump this
                 # commit when that branch moves so DBX's library cache
                 # forces a reinstall.
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@d873d49"
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@7cf90e8"
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
