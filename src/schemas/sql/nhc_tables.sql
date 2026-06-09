@@ -2,11 +2,16 @@
 -- NHC (National Hurricane Center) Database Schema
 -- ============================================================================
 -- This SQL script creates the PostgreSQL tables for storing NHC tropical
--- cyclone data, including both storm metadata and track data.
+-- cyclone data, including storm metadata, track data, and wind speed
+-- probability polygons.
 --
--- Tables:
---   - storms.nhc_storms: Storm-level metadata (one row per storm)
---   - storms.nhc_tracks_geo: Track points with geometry (one row per forecast point)
+-- Tables (defined here):
+--   - storms.nhc_storms:        Storm-level metadata (one row per storm)
+--   - storms.nhc_tracks_geo:    Track points with geometry (one row per forecast point)
+--
+-- WSP probability polygons live in dedicated files:
+--   - storms.nhc_wsp_polygon_raw      (nhc_wsp_polygon_raw.sql) — raw NHC output
+--   - storms.nhc_wsp_polygon_matched  (nhc_wsp_polygon_matched.sql) — per-storm
 --
 -- Compatible with ocha-lens NHC module schemas
 -- ============================================================================
@@ -176,3 +181,6 @@ CREATE INDEX IF NOT EXISTS idx_nhc_tracks_geo_basin
     ON storms.nhc_tracks_geo (basin)
     TABLESPACE pg_default;
 
+-- The NHC WSP polygon tables have been moved to dedicated schema files:
+--   - storms.nhc_wsp_polygon_raw     (nhc_wsp_polygon_raw.sql)
+--   - storms.nhc_wsp_polygon_matched (nhc_wsp_polygon_matched.sql)

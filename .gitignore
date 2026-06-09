@@ -164,8 +164,12 @@ scratch/*
 .scrap/
 
 examples/*
+storm/*
 
 artefacts/
 
 # Large GADM boundary downloads sometimes land at the repo root
 gadm_*
+
+# Local benchmarks / scratch scripts (kept out of the repo)
+bench_*.py
