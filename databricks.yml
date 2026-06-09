@@ -113,10 +113,11 @@ resources:
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
             - pypi:
-                # Pinned to the gdacs-adam-funcs branch HEAD. Bump this
-                # commit when that branch moves so DBX's library cache
-                # forces a reinstall.
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@7cf90e8"
+                # Pinned to an ocha-lens main commit (PR #42 merged
+                # 2026-06-09, merge commit 710c4a4). A commit pin — not
+                # @main — so DBX's library cache forces a reinstall; bump it
+                # when ocha-lens main advances with changes we need.
+                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@710c4a4"
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
