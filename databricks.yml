@@ -112,12 +112,11 @@ resources:
               - "{{job.parameters.all_episodes}}"
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
-            - pypi:
-                # Pinned to an ocha-lens main commit (PR #42 merged
-                # 2026-06-09, merge commit 710c4a4). A commit pin — not
-                # @main — so DBX's library cache forces a reinstall; bump it
-                # when ocha-lens main advances with changes we need.
-                package: "ocha-lens @ git+https://github.com/OCHA-DAP/ocha-lens.git@710c4a4"
+            # ocha-lens 0.5.0 is the first release carrying the GDACS/ADAM
+            # APIs (get_exposure_adm0/adm1, match_to_atcf, …); it's a
+            # superset of the earlier gdacs-adam-funcs commit and matches
+            # the pin on main. Bump when a newer release adds what we need.
+            - pypi: { package: "ocha-lens==0.5.0" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
