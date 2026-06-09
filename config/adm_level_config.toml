@@ -1,0 +1,853 @@
+# Per-ISO3 admin-level overrides for FieldMaps ↔ GADM crosswalk.
+#
+# Default behavior is FM adm1 ↔ GADM adm1. Use this file only when that
+# default produces a bad crosswalk because FieldMaps and GADM disagree
+# on what "admin 1" means for a particular country.
+#
+# Each [overrides.<ISO3>] block sets `fm_level` and `gadm_level` for
+# that country. The `note` field documents WHY this override exists —
+# add one when you change anything here so future readers can audit.
+
+[defaults]
+fm_level = 1
+gadm_level = 1
+
+# ── FieldMaps data gaps ──────────────────────────────────────────────
+# FieldMaps stores these territories as a single polygon at every level
+# (adm1 and adm2 both have count = 1), so there's no finer FM unit to
+# crosswalk. GADM has subdivisions (18 districts for AIA, 12 parishes
+# for JEY, 2 for BLM) but they're unreachable from the FM side.
+#
+# We match FM adm1 ↔ GADM adm0 here, which gives us a clean 1:1
+# whole-territory crosswalk. The trade-off: sub-territory impact
+# reporting is unavailable for these countries until FieldMaps adds the
+# subdivisions upstream.
+
+[overrides.AIA]
+fm_level = 1
+gadm_level = 0
+note = "FM has 1 polygon for the whole island; GADM has 18 districts. No finer FM unit exists — collapse to whole-country crosswalk."
+
+[overrides.BLM]
+fm_level = 1
+gadm_level = 0
+note = "FM has 1 polygon for the whole territory; GADM has 2 sub-areas. No finer FM unit exists — collapse to whole-country crosswalk."
+
+[overrides.JEY]
+fm_level = 1
+gadm_level = 0
+note = "FM has 1 polygon for the whole island; GADM has 12 parishes. No finer FM unit exists — collapse to whole-country crosswalk."
+
+# ── Admin-level skew ─────────────────────────────────────────────────
+# FieldMaps stores Puerto Rico's 78 municipios at admin LEVEL 2 (with
+# adm1 = the whole territory). GADM stores the same 78 municipios at
+# admin LEVEL 1. So FM adm2 ↔ GADM adm1 lines up cleanly (77/78 match).
+#
+# Without this override the default (1,1) pairs FM's island-wide polygon
+# against random GADM municipios, scoring IoU ~ 0.04 across the board.
+
+[overrides.PRI]
+fm_level = 2
+gadm_level = 1
+note = "FM puts 78 municipios at adm2; GADM puts them at adm1. Swap levels so the units line up. **FieldMaps data-quality issue worth raising upstream**: most authoritative sources (GADM, ISO 3166-2, GDACS, US Census MAF/TIGER) treat municipios as admin-1. FM's adm1 for PRI is a single whole-territory polygon — there is no real adm1 subdivision in FM's data."
+
+# ─────────────────────────────────────────────────────────────────────
+# GDACS bridge overrides
+# ─────────────────────────────────────────────────────────────────────
+# These apply ONLY to the FieldMaps ↔ GDACS crosswalk (the
+# `match_gdacs_fieldmaps.py` script). The GADM script ignores them.
+#
+# The GDACS admin layer (`W_ADM_ADMIN2010_V2021`) was built from 2010
+# boundaries and treats many small countries as a single polygon at
+# admin-1. For those countries the only sensible FM crosswalk is at
+# adm0 (whole-country) — see entries below.
+#
+# Resolution order in the script:
+#   1. `[gdacs_overrides.<ISO3>]` (bridge-specific)
+#   2. `[overrides.<ISO3>]` (shared/GADM defaults)
+#   3. `[defaults]`
+
+# ─────────────────────────────────────────────────────────────────────
+# Known FieldMaps data-quality issues
+# ─────────────────────────────────────────────────────────────────────
+# Not consumed by any script — for human reference and tracking what
+# should be raised upstream with FieldMaps.
+
+[data_quality.PRI]
+issue = "PRI adm1 in FieldMaps is a single whole-territory polygon. The 78 municipios — the actual conventional admin-1 subdivision recognized by ISO 3166-2, GADM, US Census MAF/TIGER — are stored at FM adm2 instead. GDACS in turn uses 8 Senatorial Districts (neither layer matches)."
+implication = "Forces every consumer to special-case PRI with an admin-level offset. Affects FM↔GADM and FM↔GDACS crosswalks here."
+action = "Workaround in place: gdacs_policy.PRI uses aggregate_gdacs_to_fm, mapping all 8 GDACS senatorial districts into the single FM adm1 polygon via reverse spatial join. Still worth raising upstream with FieldMaps maintainers — request they promote the 78 municipios to adm1 to align with other authoritative sources."
+
+[gdacs_overrides.PRI]
+fm_level = 1
+note = "Override the [overrides.PRI] fm_level=2 (which is for the GADM bridge). For GDACS bridge use FM adm1 (1 polygon = whole island) so the country_only policy collapses 8 senatorial districts to a single PR unit."
+
+# DOM gdacs_overrides removed 2026-05-20: we previously set fm_level=2
+# for DOM (32 FM provinces ↔ 31 GDACS provinces, clean 1:1). Reverted to
+# fm_level=1 (default) for consistency with BEL and FRA, which face the
+# same "GDACS finer than FM adm1" pattern. All three are now handled via
+# the `aggregate_gdacs_to_fm` policy → reverse spatial join + sum at
+# runtime. Trade-off: lose municipio-level resolution in DOM-side reports
+# in exchange for uniform "1 row per FM adm1 unit affected" framing across
+# the basin.
+
+# ─────────────────────────────────────────────────────────────────────
+# Runtime per-country policy for the FieldMaps ↔ GDACS bridge
+# ─────────────────────────────────────────────────────────────────────
+# The pipeline enrichment step reads these to decide what to do with
+# each `storms.gdacs_exposure` admin1 row. Action vocabulary:
+#
+#   accept                 — trust the crosswalk best-match. Apply
+#                            gmi_admin → fm_pcode directly.
+#   country_only           — admin1 not separable. Map all admin1 rows
+#                            for this country to the FM adm0 pcode.
+#                            Used for: gdacs_empty + 1↔1 single-poly.
+#   aggregate_gdacs_to_fm  — GDACS is finer than FM. Run a one-shot
+#                            spatial join (gmi_admin centroid →
+#                            containing FM polygon) to build a
+#                            many-to-one gmi_admin → fm_pcode lookup,
+#                            then aggregate exposure on the fm_pcode.
+#   report_at_gdacs_level  — FM finer than GDACS. Can't subdivide;
+#                            report this country's exposure at the
+#                            GDACS granularity (using gmi_admin as
+#                            the unit identifier downstream).
+#   needs_manual_mapping   — real boundary disagreement or unresolved
+#                            FM-side issue. Flag to user; per-row
+#                            override CSV may be needed.
+
+[gdacs_policy.ABW]
+action = "country_only"
+note = "single-polygon territory, 1:1 with GDACS"
+
+[gdacs_policy.AIA]
+action = "country_only"
+note = "FM has 1 polygon for AIA; GDACS also 1 (whole island)"
+
+[gdacs_policy.ATG]
+action = "fm_adm1_only"
+note = "GDACS treats ATG as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.BEL]
+action = "aggregate_gdacs_to_fm"
+note = "3 FM regions vs 11 GDACS provinces. Sum GDACS provinces up to FM regions via reverse spatial join (gmi_admin → containing fm_pcode)."
+
+[gdacs_policy.BES]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.BHS]
+action = "fm_adm1_only"
+note = "GDACS treats BHS as a single whole-country polygon; FM has 1 districts at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each district."
+
+[gdacs_policy.BLM]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.BLZ]
+action = "accept"
+note = "all 6 districts align by name; multiple_candidates flags are 2010 vs current boundary noise"
+
+[gdacs_policy.BMU]
+action = "fm_adm1_only"
+note = "GDACS treats BMU as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.BRB]
+action = "fm_adm1_only"
+note = "GDACS treats BRB as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.CAN]
+action = "needs_manual_mapping"
+note = "FM-side load error on adm1; FieldMaps likely doesn't include CAN at adm1. Verify and consider country_only."
+
+[gdacs_policy.COL]
+action = "accept"
+note = "33↔33 departments; 91% names align, mean IoU 0.93"
+
+[gdacs_policy.CPV]
+action = "fm_adm1_only"
+note = "GDACS treats CPV as a single whole-country polygon; FM has 1 concelhos at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each concelho."
+
+[gdacs_policy.CRI]
+action = "accept"
+note = "7↔7 provinces; 100% names align, mean IoU 0.92"
+
+[gdacs_policy.CUB]
+action = "needs_manual_mapping"
+note = "16 FM vs 15 GDACS provinces. 14 GDACS provinces match cleanly to a single FM province. The 15th — GDACS 'La Habana' (CUB-LHB) — predates the 2011 split into modern Artemisa + Mayabeque, so it maps to BOTH (see per_row_notes). GDACS also uses pre-2011 name 'Ciudad de la Habana' for what FM calls 'La Habana'."
+
+[gdacs_policy.CUW]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.CYM]
+action = "fm_adm1_only"
+note = "GDACS treats CYM as a single whole-country polygon; FM has 1 districts at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each district."
+
+[gdacs_policy.DEU]
+action = "accept"
+note = "16↔16 federal states; 100% names align, mean IoU 0.94"
+
+[gdacs_policy.DMA]
+action = "fm_adm1_only"
+note = "GDACS treats DMA as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.DOM]
+action = "aggregate_gdacs_to_fm"
+note = "10 FM adm1 regions ↔ 31 GDACS provinces. GDACS reports at what's effectively FM adm2 granularity (the 32 provinces). For consistency with BEL and FRA (same shape), we report at FM adm1 and aggregate GDACS provinces up via reverse spatial join. The fm_level=2 alignment is documented as the alternative path in case the reporting layer ever wants finer DOM granularity."
+
+[gdacs_policy.ESP]
+action = "accept"
+note = "19↔19 autonomous communities; every region matched by name. The 1 flagged row is Ceuta (~18 km² enclave) — pure tiny-territory IoU noise."
+
+[gdacs_policy.FRA]
+action = "aggregate_gdacs_to_fm"
+note = "13 FM regions vs 22 GDACS regions (pre-2016 consolidation). Same shape as BEL — needs reverse spatial join to aggregate GDACS up to current FM regions."
+
+[gdacs_policy.GBR]
+action = "accept"
+note = "4↔4 countries-of-UK; 100% names align, mean IoU 0.96"
+
+[gdacs_policy.GLP]
+action = "fm_adm1_only"
+note = "GDACS treats GLP as a single whole-country polygon; FM has 1 arrondissements at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each arrondissement."
+
+[gdacs_policy.GRD]
+action = "fm_adm1_only"
+note = "GDACS treats GRD as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.GTM]
+action = "accept"
+note = "22↔22 departments; 95% names align, mean IoU 0.84. Boundary edges disagree but identifiers correct."
+
+[gdacs_policy.GUF]
+action = "accept"
+note = "2↔2 admin units; 100% names align, mean IoU 0.95"
+
+[gdacs_policy.GUY]
+action = "accept"
+note = "10↔10 regions; 100% names align, mean IoU 0.95"
+
+[gdacs_policy.HND]
+action = "accept"
+note = "18↔18 departments; 100% names align, mean IoU 0.90. Many multiple_candidates flags but best-match per row is correct."
+
+[gdacs_policy.HTI]
+action = "accept"
+note = "10↔10 departments; heuristic name-match failed on French/English (West/Ouest etc.) but every department matches by ID. All 10 are correct."
+
+[gdacs_policy.IRL]
+action = "accept"
+note = "4↔4 (provinces or country-level groupings); 100% names align"
+
+[gdacs_policy.JAM]
+action = "accept"
+note = "16 FM vs 14 GDACS parishes; 88% names align. Two recent FM parishes likely absorbed into neighbors on GDACS side."
+
+[gdacs_policy.JEY]
+action = "country_only"
+note = "fm_level=1 override (FM only has 1 unit total); 1:1 country match"
+
+[gdacs_policy.KNA]
+action = "fm_adm1_only"
+note = "GDACS treats KNA as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.LCA]
+action = "fm_adm1_only"
+note = "GDACS treats LCA as a single whole-country polygon; FM has 1 quarters at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each quarter."
+
+[gdacs_policy.LUX]
+action = "fm_adm1_only"
+note = "GDACS uses Luxembourg's 3 abolished-2015 districts (Diekirch, Grevenmacher, Luxembourg) which the country itself no longer recognizes. FM has 12 modern cantons. Same shape as the fm_adm1_only countries — emit FM cantons in the lookup; GDACS adm1 deliberately doesn't attach."
+
+[gdacs_policy.MAF]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.MEX]
+action = "accept"
+note = "32↔32 states; 100% names align, mean IoU 0.92"
+
+[gdacs_policy.MSR]
+action = "fm_adm1_only"
+note = "GDACS treats MSR as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.MTQ]
+action = "fm_adm1_only"
+note = "GDACS treats MTQ as a single whole-country polygon; FM has 1 arrondissements at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each arrondissement."
+
+[gdacs_policy.NIC]
+action = "needs_manual_mapping"
+note = "17 FM vs 16 GDACS — 15 GDACS regions match a single FM region cleanly. The 16th — GDACS 'Zelaya' (NIC-ZEL) — predates a 1987 split into RAAN/RAAS (renamed RACCN/RACCS in 2014), so it maps to BOTH modern Caribbean autonomous regions (see per_row_notes). Same pattern as CUB Artemisa/Mayabeque, just older."
+
+[gdacs_policy.NLD]
+action = "accept"
+note = "12↔12 provinces; 92% names align, mean IoU 0.88"
+
+[gdacs_policy.PAN]
+action = "needs_manual_mapping"
+note = "13 FM vs 10 GDACS provinces. 3 FM provinces are post-2010 splits with no clean GDACS partner. Per-row override CSV needed for those 3."
+
+[gdacs_policy.PRI]
+action = "aggregate_gdacs_to_fm"
+note = "GDACS's 8 PRI polygons are Puerto Rico's Senatorial Districts (1917 Jones–Shafroth Act electoral subdivisions, group municipios for state-senate representation). They sit between FM's adm1 (1 whole-territory polygon) and FM's adm2 (78 municipios) — neither layer. Use FM adm1 (the single whole-island polygon) as the target and aggregate all 8 GDACS senatorial-district exposure rows into that one FM unit via reverse spatial join. Each GDACS poly's representative point falls inside the single FM polygon → 8 lookup rows, all pointing to the same fm_pcode. At runtime, summing across rows with the same fm_pcode gives the national PR exposure (equivalent to GDACS admin0 totals). Equivalent in effect to country_only but keeps PR on the adm1 reporting path with the rest of the basin."
+
+[gdacs_policy.PRT]
+action = "accept"
+note = "20↔20 admin units; 70% names align, mean IoU 0.85. Azores/Madeira split slightly differently between sources; mainland districts clean."
+
+[gdacs_policy.SUR]
+action = "accept"
+note = "10↔10 districts; 100% names align, mean IoU 0.88"
+
+[gdacs_policy.SXM]
+action = "country_only"
+note = "not in GDACS 2010 layer (post-2010 territory split)"
+
+[gdacs_policy.TCA]
+action = "fm_adm1_only"
+note = "GDACS treats TCA as a single whole-country polygon; FM has 1 districts at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each district."
+
+[gdacs_policy.TTO]
+action = "fm_adm1_only"
+note = "GDACS treats TTO as a single whole-country polygon; FM has 1 regions at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each region."
+
+[gdacs_policy.USA]
+action = "accept"
+note = "51 FM vs 52 GDACS states/DC; 100% names align, mean IoU 0.98. One extra GDACS row absorbed at edges."
+
+[gdacs_policy.VCT]
+action = "fm_adm1_only"
+note = "GDACS treats VCT as a single whole-country polygon; FM has 1 parishes at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each parishe."
+
+[gdacs_policy.VEN]
+action = "accept"
+note = "25 FM vs 24 GDACS states; 84% names align, mean IoU 0.92"
+
+[gdacs_policy.VGB]
+action = "fm_adm1_only"
+note = "GDACS treats VGB as a single whole-country polygon; FM has 1 admin units at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each admin unit."
+
+[gdacs_policy.VIR]
+action = "fm_adm1_only"
+note = "GDACS treats VIR as a single whole-country polygon; FM has 1 districts at adm1. Emit FM adm1 rows in the lookup so per-unit numbers from other sources (NHC, ADAM) can attach via fm_pcode; GDACS adm1 deliberately doesn't attach (gmi_admin=NULL) to avoid replicating the whole-country number across each district."
+
+[data_quality.BEL]
+issue = "FM BEL adm2 has parent-region swap errors: 'Henegouwen' (a Walloon province) is listed under adm1_name='Vlaams Gewest' (Flanders), and 'West-Vlaanderen' (a Flemish province) is listed under adm1_name='Wallonne Gewest' (Wallonia). Each province appears once correctly placed and once incorrectly placed, so the adm2 layer has 13 rows instead of the actual 11 provinces."
+implication = "Tested fm_level=2 for BEL — got 9/13 clean with IoU 0.78, but the 2 bogus duplicates produce IoU ≈ 0.005 (geometry doesn't overlap the wrong-region GDACS counterpart). Doesn't block our chosen policy (aggregate_gdacs_to_fm at fm_level=1) but worth fixing upstream."
+action = "Raise with FieldMaps maintainers — fix the two province-region swap rows in the BEL adm2 layer."
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-row notes
+# ─────────────────────────────────────────────────────────────────────
+# Caveats attached to specific (iso3, fm_pcode) rows in the crosswalk.
+# Used to surface known limitations of the 2010 GDACS boundaries when
+# they intersect admin reforms that happened after 2010.
+#
+# Array-of-tables format so a single country can have multiple notes.
+# The QMD loads these and renders them as visible callouts so colleagues
+# reviewing the report can't miss them.
+#
+# `kind` is one of:
+#   pre_split_boundary  — GDACS unit predates an admin split; same
+#                         GDACS exposure number maps to multiple FM
+#                         units. Do NOT sum across these FM rows.
+#   rename              — pure naming change; same geometry,
+#                         informational only.
+
+
+[[per_row_notes]]
+iso3 = "JAM"
+fm_pcode = "JAM_2-20250729"
+fm_name = "Pedro Bank"
+gmi_admin = ""
+kind = "fm_offshore_orphan"
+note = "FM adm1 record for Pedro Bank — a submerged bank ~80 km SSW of Jamaica with two tiny emerging cays (~33 acres total). Jamaican sovereign territory but not assigned to any parish. FM puts the name in adm0_name ('Pedro Bank (Jam.)') rather than adm1_name. Not represented in GDACS, hence no_overlap. Effectively uninhabited so practical impact on exposure reporting is zero; safe to ignore at runtime."
+
+[[per_row_notes]]
+iso3 = "JAM"
+fm_pcode = "JAM_3-20250729"
+fm_name = "Morant Cays"
+gmi_admin = ""
+kind = "fm_offshore_orphan"
+note = "FM adm1 record for Morant Cays — 4 small islets ~50 km SE of Jamaica. Jamaican sovereign territory but not a parish. FM puts the name in adm0_name ('Morant Cays (Jam.)') rather than adm1_name. Not represented in GDACS, hence no_overlap. Uninhabited; practical impact on exposure reporting is zero."
+
+# ─────────────────────────────────────────────────────────────────────
+# Added 2026-05-25: out-of-scope ISO3s newly added to ATLANTIC_ISO3.
+# Default to country_only as a starting policy; per-country review
+# pending for the multi-poly GDACS cases (GRL, ISL, MAR, NOR, RUS,
+# SJM, SLV, SWE, UMI) to decide accept / aggregate / fm_adm1_only.
+# ─────────────────────────────────────────────────────────────────────
+
+[gdacs_policy.FRO]
+action = "country_only"
+note = "Faroe Islands — extratropical transition recipient. 1 GDACS poly = 1 FM poly. country_only is the right shape."
+
+[gdacs_policy.GIB]
+action = "country_only"
+note = "Gibraltar — Atlantic edge / Mediterranean entrance. 1 GDACS poly = 1 FM poly."
+
+[gdacs_policy.GRL]
+action = "needs_manual_mapping"
+note = "Post-2009 Greenland reform mismatch. GDACS uses pre-reform Vestgrønland (GRL-VST) + Ostgrønland (GRL-OST) districts; FM uses 5 modern municipalities + Northeast Greenland National Park. Multiple FM units share the same GDACS gmi_admin — see per_row_notes; GDACS exposure for GRL-VST/OST fans out across the modern municipalities, do not sum across rows with the same gmi_admin."
+
+[gdacs_policy.ISL]
+action = "needs_manual_mapping"
+note = "6 of 8 FM regions match GDACS 1:1 (Eastern, Northeastern, Northwestern, Southern, Western, Westfjords). GDACS's 'Reykjavik' (ISL-RYK) was split into FM's 'Capital Region' + 'Southern Peninsula' — same shape as CUB's pre-split La Habana. GDACS exposure for ISL-RYK applies to both FM units; do not sum."
+
+[gdacs_policy.MAR]
+action = "fm_adm1_only"
+note = "Bad GDACS↔FM matching (GDACS units split across multiple FM); MAR is not a priority country. Emit FM adm1 in the lookup; GDACS adm1 deliberately doesn't attach."
+
+[gdacs_policy.NOR]
+action = "fm_adm1_only"
+note = "Post-2020 county reform: 20 GDACS pre-reform counties → 11 FM post-reform regions. The aggregation is tractable (~5 clean 1:1 + ~6 clean N:1 aggregations) but not currently a priority. fm_adm1_only emits FM adm1 rows with NULL gmi_admin so consumers can attach NHC / ADAM numbers via fm_pcode; GDACS adm1 deliberately doesn't attach to avoid replicating whole-country numbers. Upgrade to aggregate_gdacs_to_fm later if per-county GDACS exposure becomes important."
+
+[gdacs_policy.RUS]
+action = "fm_adm1_only"
+note = "GDACS uses 87 oblasts/republics, FM has 8 federal districts. Cross-basin leak (Kamchatka shows up). Emit FM adm1 in lookup; GDACS adm1 deliberately doesn't attach to avoid fanning the wrong subdivision across federal districts."
+
+[gdacs_policy.SJM]
+action = "fm_adm1_only"
+note = "Svalbard + Jan Mayen — 2 GDACS polys = 2 FM polys. FM has a data-quality issue: adm1_name is NULL (subdivision names sit in adm0_name instead). Using fm_adm1_only until FM data improves; GDACS adm1 lands as by-design unmatched."
+
+[gdacs_policy.SLV]
+action = "accept"
+note = "14 GDACS departments = 14 FM departments, names align cleanly. Pacific coast — leaks into Atlantic-basin scope via cross-basin event reporting."
+
+[gdacs_policy.SPM]
+action = "country_only"
+note = "St. Pierre & Miquelon — NW Atlantic. 1 GDACS poly = 1 FM poly. country_only fits."
+
+[gdacs_policy.SWE]
+action = "accept"
+note = "24 GDACS län ↔ 21 FM län. GDACS uses pre-1997/1998 boundaries; FM uses post-merger län. Most match cleanly; two FM units (Skåne län, Västra Götalands län) are the post-merger consolidations of older GDACS län — see per_row_notes."
+
+[gdacs_policy.UMI]
+action = "accept"
+note = "6 GDACS islands (Jarvis, Baker, Howland, Johnston Atoll, Midway, Wake) match 6 of FM's 9 (FM also has Kingman Reef, Palmyra Atoll, Navassa Island which GDACS doesn't list). FM has the same null-adm1_name data quirk as SJM — fallback to adm0_name handled in the build script."
+# ─────────────────────────────────────────────────────────────────────
+# no_fm_source: GDACS reports these iso3s but FieldMaps has no
+# adm0 parquet for them. Deliberately excluded from the lookup
+# and from the alert pipeline.
+# ─────────────────────────────────────────────────────────────────────
+
+[gdacs_policy.ANT]
+action = "no_fm_source"
+note = "Netherlands Antilles — dissolved 2010-10-10. FieldMaps has no ANT parquet (the entity no longer exists; successor states CUW, SXM, BES are independently tracked). GDACS still surfaces ANT for historical events. We deliberately don't attach any exposure for this iso3."
+
+[gdacs_policy.XIM]
+action = "no_fm_source"
+note = "Isle of Man — no FieldMaps source available. GDACS reports it via extratropical-transition events. Deliberately not attached."
+# ─────────────────────────────────────────────────────────────────────
+# Per-row notes added in Phase 2 — pre-split / rename caveats
+# for ISL/GRL/SWE; orphan-no-fm-unit for USA-PS1 / VEN-DFR.
+# ─────────────────────────────────────────────────────────────────────
+
+[[per_row_notes]]
+iso3 = "SWE"
+fm_pcode = "SWE-20230119-11"
+fm_name = "Skåne län"
+gmi_admin = "SWE-KRS"
+kind = "rename"
+note = "Skåne län was created in 1997 by MERGING the pre-existing Kristianstads + Malmöhus län. GDACS still uses the pre-1997 names so this match picks ONE of the two (Kristianstads); the underlying GDACS exposure attaches to the modern Skåne län but the gmi_admin label is historical."
+
+[[per_row_notes]]
+iso3 = "SWE"
+fm_pcode = "SWE-20230119-19"
+fm_name = "Västra Götalands län"
+gmi_admin = "SWE-ALV"
+kind = "rename"
+note = "Västra Götalands län was created in 1998 by MERGING Älvsborg + Göteborg och Bohus + Skaraborg län. GDACS still uses the pre-1998 names; this match picks one (Älvsborg). Modern exposure attaches but the gmi_admin label is historical."
+
+[[per_row_notes]]
+iso3 = "USA"
+fm_pcode = ""
+fm_name = ""
+gmi_admin = "USA-PS1"
+kind = "orphan_no_fm_unit"
+note = "GDACS USA-PS1 = 'Guantanamo Bay' (US naval base on Cuban soil, not a US state). No counterpart in FieldMaps US adm1. GDACS exposure for this admin is dropped at runtime — intentional, since it's a US lease territory inside CUB."
+
+[[per_row_notes]]
+iso3 = "VEN"
+fm_pcode = ""
+fm_name = ""
+gmi_admin = "VEN-DFR"
+kind = "orphan_no_fm_unit"
+note = "GDACS VEN-DFR = 'Dependencias Federales' (Venezuelan offshore islands, ~1500 people total). Not in FieldMaps VEN adm1. GDACS exposure for this admin is dropped at runtime — known orphan, negligible population impact."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FM ↔ ADAM bridge policy
+# ──────────────────────────────────────────────────────────────────────
+# Mirror of [gdacs_policy.<ISO3>] but for the FM↔ADAM lookup. ADAM
+# (WFP) emits exposure rows by admin name; the intermediate boundary
+# layer is the ADAM source boundary file (the ADAM source layer's filename) (WFP's published global adm1 layer, same
+# vendor). Policy choices reflect the ADAM ↔ FM relationship, NOT
+# the ADAM ↔ FM relationship — because ADAM's CSVs use ADAM admin layer names
+# verbatim. Same six actions as gdacs_policy:
+#   accept, country_only, aggregate_adam_to_fm, fm_adm1_only,
+#   needs_manual_mapping, no_adam_source
+# This is a first-pass seed — most ISO3s default to country_only
+# (no entry) until reviewed.
+
+# Clean 1:1 ADAM ↔ FM at adm1 (matcher IoU ≥ 0.99 in smoke run)
+# ADAM admin layer finer than FM — reverse spatial join rolls ge polygons up
+# to the containing FM polygon. Each FM region gets multiple
+# (the ADAM admin layer_id, adam_admin_name) lookup rows.
+# Same pre-2011 Cuba reform that affects the GDACS lookup — ADAM
+# inherits the issue because the ADAM admin layer still carries the old La Habana
+# boundary that became Artemisa + Mayabeque.
+[adam_policy.CUB]
+action = "needs_manual_mapping"
+note = "Same Artemisa/Mayabeque pre-split caveat as gdacs_policy.CUB. the ADAM admin layer has 16 provinces (matching FM count) but a couple of names lag the modern boundary — see [[adam_per_row_notes]]."
+
+# ADAM has no usable source for these — same exclusion list as
+# gdacs_policy. ANT dissolved 2010; XIM has no FM parquet either.
+[adam_policy.ANT]
+action = "no_adam_source"
+note = "Netherlands Antilles dissolved 2010-10-10."
+
+[adam_policy.XIM]
+action = "no_adam_source"
+note = "No FM parquet for XIM."
+
+
+# ── accept: clean 1:1 ADAM ↔ FM ────────────────────────────────────
+# Auto-classified by build_adam_review_artifacts.py. Mean IoU ≥ 0.6 and
+# fm_count ≈ ge_count (within 2×). Mild noise (low_iou, multiple_
+# candidates) is fine; the matcher picks best-IoU which is the right
+# behaviour. Anything ADAM emits that doesn't match an adam_admin_name
+# in the lookup simply fails to attach (left-join) — that includes the
+# upstream iso3-misattribution bug surfacing on UMI / SPM / FRO etc.,
+# which we ignore at this layer because the bad data won't match.
+
+
+# ── aggregate_adam_to_fm: ADAM admin layer finer than FM ──────────────────────
+# Reverse spatial join: each ge polygon → its containing FM polygon.
+# Triggered when ge_count >= 2 * fm_count, or when FM has 1 polygon
+# and ge has many.
+
+
+# ── fm_adm1_only: ADAM admin layer too coarse to disambiguate FM ──────────────
+# FM has real adm1 units but the ADAM admin layer has 1 polygon (or few) for the
+# country. Surfaces FM rows with the ADAM admin layer_id=NULL so other sources can
+# still attach via fm_pcode; ADAM adm1 deliberately doesn't attach.
+
+[adam_policy.GLP]
+action = "fm_adm1_only"
+note = "FM has 2 polygons (mainland Guadeloupe + offshore); the ADAM admin layer has 1. ADAM rows for GLP are also affected by the upstream iso3-misattribution bug (admin_names that belong to other countries), so the disable-adm1-attach behaviour of fm_adm1_only is the right outcome either way."
+
+[adam_policy.VIR]
+action = "fm_adm1_only"
+note = "FM has 3 islands (St Thomas, St John, St Croix); the ADAM admin layer has 1 polygon for the territory. ge can't disambiguate the 3 FM units, so surface them with the ADAM admin layer_id=NULL."
+
+[adam_policy.CYM]
+action = "fm_adm1_only"
+note = "FM has 6 districts; the ADAM admin layer has 3. 0% clean — every match is partial IoU. Safer to surface FM rows with NULL than guess via best-IoU."
+
+[adam_policy.GRL]
+action = "fm_adm1_only"
+note = "ADAM admin boundaries for Greenland use pre-2009 reform districts (Vestgrønland / Ostgrønland) that are not compatible with OCHA COD / FieldMaps post-reform municipalities (Avannaata, Kujalleq, Northeast Greenland National Park, Qeqertalik, Qeqqata, Sermersooq). No usable per-FM-unit crosswalk; ADAM exposure attaches at country (adm0) level only."
+
+
+# ── country_only: don't attach adm1 even though FM has units ─────────
+
+[adam_overrides.PRI]
+fm_level = 1
+note = "FM adm1 for PRI is a single whole-territory polygon (the 78 municipios are at adm2 in FM — the data-quality issue documented in data_quality.PRI). For the ADAM bridge we want adm1, since FM adm1 (1 poly) matches the level ADAM reports at for PRI (also 1 poly = whole territory). The [overrides.PRI] block has fm_level=2 for the GDACS↔GADM municipios bridge; this adam_overrides entry forces adm1 for the ADAM bridge instead."
+
+[adam_policy.PRI]
+action = "country_only"
+note = "FM adm1 for PRI is a single whole-territory polygon (matches ADAM's 1-polygon coverage). country_only attaches ADAM exposure at adm0 only; reporting at FM adm1 = same as adm0 = country level."
+
+[adam_policy.MAF]
+action = "country_only"
+note = "FM treats MAF (Saint-Martin, French collectivity) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Aggregating to adm1 adds nothing over adm0. Report at country level only."
+
+[adam_policy.JEY]
+action = "country_only"
+note = "FM treats JEY (Jersey) as 1 polygon; ADAM has 12 parishes. Aggregating 12 small parishes up to one FM polygon at adm1 adds no informational value for a country this size; report at country level only."
+
+[adam_policy.BLM]
+action = "country_only"
+note = "FM treats BLM (Saint Barthélemy, French collectivity) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.FRO]
+action = "country_only"
+note = "FM treats FRO (Faroe Islands) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.CUW]
+action = "country_only"
+note = "FM treats CUW (Curaçao) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.GIB]
+action = "country_only"
+note = "FM treats GIB (Gibraltar) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.ABW]
+action = "country_only"
+note = "FM treats ABW (Aruba) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+[adam_policy.SPM]
+action = "country_only"
+note = "FM treats SPM (Saint Pierre and Miquelon) as 1 polygon; ADAM has 1 unnamed polygon (adm1_name=N/A). Report at country level only."
+
+
+# ── needs_manual_mapping: real boundary disagreement at same level ───
+# Same count on both sides but heavy multi_candidate overlap signals
+# admins that have been reorganised between the two source releases.
+
+[adam_policy.KNA]
+action = "needs_manual_mapping"
+note = "ADAM and FM both publish KNA at the 14-parish level, but parish boundaries differ noticeably between the two layers (9 of 14 FM parishes have multiple ADAM candidates overlapping them; 3 have IoU < 0.5). The auto-matching is the best-IoU pick per ADAM polygon, but FM↔ADAM parish boundaries are not directly comparable — proceed with caution when reporting any KNA adm1 exposure number side-by-side."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FM ↔ ADAM per-row overrides
+# ──────────────────────────────────────────────────────────────────────
+# Override the matcher's per-ADAM-admin spatial pick. Four actions:
+#
+#   action = "drop"            — source-keyed; emit no row at all for
+#                                this adam_admin_id (TOML is the audit).
+#   action = "remap"           — source-keyed; change the FM target to
+#                                fm_pcode_override / fm_name_override.
+#   action = "mark_no_source"  — fm-keyed; force a NULL-source row for
+#                                this FM unit with the given caveat.
+#   action = "caveat"          — keyed either side; annotate without
+#                                changing the mapping.
+#
+# caveat_kind controlled vocabulary (informs alert footnote template):
+#   no_adam_at_adm1        FM unit has no source coverage
+#   source_coarser_than_fm Source polygon covers multiple FM units
+#   pre_split_boundary     Source predates an FM admin-reform
+#   manual_remap           IoU pick was overridden manually
+#   fm_only_policy         Country policy is fm_adm1_only
+
+# ─── BHS — three remaps, one caveat ────────────────────────────────────
+# IoU picked the geographically-larger neighboring FM unit in three
+# cases because ge polygons are coarser than FM in some parts of the
+# island chain. Name correspondence is unambiguous; remap.
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901501
+action = "remap"
+fm_pcode_override = "BHS-20201113-06"
+fm_name_override = "Central Abaco"
+caveat_kind = "manual_remap"
+note = "IoU picked FM Hope Town (0.16); ge name 'Central Abaco' corresponds to FM Central Abaco."
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901502
+action = "remap"
+fm_pcode_override = "BHS-20201113-07"
+fm_name_override = "Central Andros"
+caveat_kind = "manual_remap"
+note = "IoU picked FM North Andros (0.47); ge name 'Central Andros' corresponds to FM Central Andros."
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901507
+action = "remap"
+fm_pcode_override = "BHS-20201113-09"
+fm_name_override = "City of Freeport"
+caveat_kind = "manual_remap"
+note = "IoU picked FM West Grand Bahama (0.64); ge name 'Freeport' corresponds to FM City of Freeport."
+
+[[adam_row_overrides]]
+iso3 = "BHS"
+adam_admin_id = 901518
+action = "caveat"
+caveat_kind = "source_coarser_than_fm"
+note = "ge polygon labeled 'Under National Administration' (GAUL placeholder) maps spatially to FM New Providence (Nassau). The IoU pick is correct (0.51); flagging because the source name is opaque — alerts using ADAM's emitted name 'Under National Administration' for a BHS row should know it routes to New Providence."
+
+# ─── USA — drop the federal-lands placeholder ─────────────────────────
+[[adam_row_overrides]]
+iso3 = "USA"
+adam_admin_id = 902134
+action = "drop"
+note = "ge 'Under National Administration' is a GAUL placeholder for federal/unincorporated lands. IoU picked FM Michigan (0.32) by spatial drift; no state-level FM correspondence. Drop."
+
+# ─── VGB — drop the catch-all placeholder ──────────────────────────────
+[[adam_row_overrides]]
+iso3 = "VGB"
+adam_admin_id = 39505
+action = "drop"
+note = "ge 'Other Islands' is a catch-all polygon mapping to FM 'uncertain' (FM's own placeholder). Both are non-real admin units. Drop."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GDACS — shared source polygons (boundary-reform cases)
+# ──────────────────────────────────────────────────────────────────────
+# When GDACS's admin polygon predates a modern FM-side admin reform,
+# one GDACS code maps to multiple modern FM units. Reporting the same
+# exposure number under both FM rows is correct (GDACS doesn't
+# disaggregate); the caveat note tells downstream consumers and alert
+# text to NOT sum across the listed FM rows.
+#
+# Schema:
+#   iso3, gmi_admin, fm_pcodes:[], caveat_kind, note
+# Build script applies the same caveat_kind + caveat_note to every
+# lookup row whose fm_pcode is in fm_pcodes for the given iso3.
+
+[[gdacs_shared_source]]
+iso3 = "CUB"
+gmi_admin = "CUB-LHB"
+fm_pcodes = ["CUB-20201118-01", "CUB-20201118-12"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-2011 boundary 'La Habana' (CUB-LHB). The Cuban province was split in 2011 into modern Artemisa and Mayabeque. The same GDACS exposure number is reported under both FM rows — do not sum across them."
+
+[[gdacs_shared_source]]
+iso3 = "GRL"
+gmi_admin = "GRL-VST"
+fm_pcodes = ["GRL-20230119-1", "GRL-20230119-2", "GRL-20230119-4", "GRL-20230119-5"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-2009 boundary 'Vestgrønland' (West Greenland). Greenland reformed its admin structure in 2009 (and again in 2018) into modern municipalities. GDACS-VST covers what is now Avannaata + Kujalleq + Qeqertalik + Qeqqata. Same GDACS exposure number under all four FM rows — do not sum."
+
+[[gdacs_shared_source]]
+iso3 = "GRL"
+gmi_admin = "GRL-OST"
+fm_pcodes = ["GRL-20230119-3", "GRL-20230119-6"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-2009 boundary 'Østgrønland' (East Greenland). Covers what is now Northeast Greenland National Park + Sermersooq. Same GDACS exposure under both FM rows — do not sum."
+
+[[gdacs_shared_source]]
+iso3 = "ISL"
+gmi_admin = "ISL-RYK"
+fm_pcodes = ["ISL-20230119-1", "ISL-20230119-5"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Reykjavik' polygon spans what is now FM Capital Region (Höfuðborgarsvæðið) and FM Southern Peninsula (Suðurnes) under Iceland's modern regional split. Same GDACS exposure number under both FM rows."
+
+[[gdacs_shared_source]]
+iso3 = "NIC"
+gmi_admin = "NIC-ZEL"
+fm_pcodes = ["NIC-20231203-16", "NIC-20231203-17"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS uses the pre-1987 boundary 'Zelaya' (NIC-ZEL), the historic single department on Nicaragua's Caribbean coast. Split in 1987 into RAAN (north) and RAAS (south), renamed RACCN/RACCS in 2014. Same GDACS exposure under both FM rows — do not sum."
+
+[[gdacs_shared_source]]
+iso3 = "PAN"
+gmi_admin = "PAN-BDT"
+fm_pcodes = ["PAN-20230404-01", "PAN-20230404-10"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Bocas del Toro' polygon predates the 1997 creation of the indigenous Comarca Ngöbe-Buglé, which was carved out of Bocas del Toro and neighboring provinces. GDACS reports one number for the combined area now covered by FM Bocas del Toro + FM Ngöbe Buglé."
+
+[[gdacs_shared_source]]
+iso3 = "PAN"
+gmi_admin = "PAN-DAR"
+fm_pcodes = ["PAN-20230404-05", "PAN-20230404-06"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Darién' polygon predates the indigenous Comarca Emberá-Wounaan, carved out of Darién province. GDACS reports one number for the combined area now covered by FM Darién + FM Emberá."
+
+[[gdacs_shared_source]]
+iso3 = "PAN"
+gmi_admin = "PAN-PAN"
+fm_pcodes = ["PAN-20230404-11", "PAN-20230404-12"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Panama' polygon predates the 2014 split of Panamá province into modern Panamá and Panamá Oeste. GDACS reports one number for the combined area now covered by both FM units."
+
+[[gdacs_shared_source]]
+iso3 = "VEN"
+gmi_admin = "VEN-DFD"
+fm_pcodes = ["VEN-20230404-01", "VEN-20230404-24"]
+caveat_kind = "pre_split_boundary"
+note = "GDACS 'Distrito Federal' polygon predates the 1998 separation of Vargas (now La Guaira) from the federal district. GDACS reports one number for the combined area now covered by FM Distrito Capital + FM La Guaira."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ADAM — shared source polygons (coarse-source cases)
+# ──────────────────────────────────────────────────────────────────────
+# When the ADAM admin layer's polygon is coarser than FM (covers
+# multiple FM units), ADAM's one exposure number represents the
+# combined area. The build script applies the same caveat_kind +
+# caveat_note to every listed fm_pcode so alert text can footnote it.
+
+[[adam_shared_source]]
+iso3 = "BHS"
+adam_admin_id = 901501
+fm_pcodes = ["BHS-20201113-06", "BHS-20201113-15"]
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon 'Central Abaco' covers FM Central Abaco and FM Hope Town. ADAM does not disaggregate; its exposure number for 'Central Abaco' represents the combined area."
+
+[[adam_shared_source]]
+iso3 = "BHS"
+adam_admin_id = 901514
+fm_pcodes = ["BHS-20201113-26", "BHS-20201113-27"]
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon 'San Salvador' covers FM San Salvador and FM Rum Cay. ADAM reports one number for the combined area."
+
+[[adam_shared_source]]
+iso3 = "BHS"
+adam_admin_id = 901516
+fm_pcodes = ["BHS-20201113-18", "BHS-20201113-29"]
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon 'South Andros' covers FM South Andros and FM Mangrove Cay. ADAM reports one number for the combined area."
+
+
+# ─── DOM 'Under National Administration' — caveat, not drop ───
+# Small national-lands polygon (~0.02 deg²) in southwestern DR, near
+# Sierra de Bahoruco / Lago Enriquillo. Spatially attaches to Región
+# Enriquillo correctly, but the source name is opaque. Keep the attach,
+# add a footnote so the alert text can explain.
+[[adam_row_overrides]]
+iso3 = "DOM"
+adam_admin_id = 901058
+action = "caveat"
+caveat_kind = "source_coarser_than_fm"
+note = "ADAM polygon labeled 'Under National Administration' is a small national-lands area in SW Dominican Republic (Sierra de Bahoruco / Lago Enriquillo region), not a province. ADAM attaches its exposure number to Región Enriquillo via the aggregate spatial join; the polygon represents federal-jurisdiction land within the region."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 3 seed (2026-05-31): the remaining 33 ATLANTIC_ISO3 countries
+# that had no explicit [adam_policy] entry and were silently falling
+# through to country_only. Each gets an explicit policy so the qmd
+# renders a panel and the runtime behavior is clear.
+#
+# Auto-classified by inspecting the matcher diagnostic (fm_count,
+# adam_admin_count, clean_pct, mean_iou). Specific rationale on each.
+# Most are countries that don't currently have ADAM data flowing in
+# storms.adam_exposure — the policy decision is what to do WHEN data
+# arrives.
+# ──────────────────────────────────────────────────────────────────────
+
+# ── accept: clean 1:1 ADAM ↔ FM at adm1 (mean IoU ≥ 0.6) ─────────────
+
+# Minor noise (5-15% non-clean) but spatially correct — accept.
+# ── aggregate_adam_to_fm: ADAM admin layer finer than FM ────────────
+
+# ── fm_adm1_only: ADAM admin layer too coarse to disambiguate ────────
+
+[adam_policy.GRD]
+action = "fm_adm1_only"
+note = "8 FM parishes ↔ 6 ADAM polygons. ADAM is coarser; surface 8 FM rows with NULL ADAM attach. ADAM exposure attaches at adm0 only."
+
+[adam_policy.SJM]
+action = "fm_adm1_only"
+note = "2 FM units (Svalbard, Jan Mayen) ↔ 1 ADAM polygon (whole territory). ADAM can't disambiguate; surface 2 FM rows with NULL ADAM attach. (FM-side adm1_name is null; resolved via the SJM fallback to adm0_name.)"
+
+[adam_policy.LUX]
+action = "fm_adm1_only"
+note = "12 FM cantons ↔ 4 ADAM districts. ADAM is much coarser; the 4 ADAM districts don't align with the 12 FM cantons cleanly. fm_adm1_only surfaces all 12 FM cantons with NULL ADAM attach."
+
+# ── needs_manual_mapping: same count, real boundary disagreement ────
+
+[adam_policy.PAN]
+action = "needs_manual_mapping"
+note = "13 FM provinces+comarcas ↔ 13 ADAM polygons. 5 multi_candidate rows. ADAM polygons predate several comarca creations (Ngöbe-Buglé 1997, Emberá; GDACS-side handles via gdacs_shared_source). Best-IoU attaches but proceed with caution for adm1 comparisons."
+
+[adam_policy.TTO]
+action = "needs_manual_mapping"
+note = "15 FM regional corporations ↔ 15 ADAM polygons. 8 multi_candidate rows — Trinidad's admin restructuring (1990s regional corporation creation) means ADAM and FM boundaries don't always align. Best-IoU attaches but adm1 comparisons should be flagged."
+
+[adam_policy.SLV]
+action = "needs_manual_mapping"
+note = "14 FM departments ↔ 15 ADAM polygons. 9 multi_candidate rows despite matching counts — boundary alignment is loose. Best-IoU attaches but flagged."
+
+[adam_policy.VCT]
+action = "needs_manual_mapping"
+note = "6 FM parishes ↔ 6 ADAM polygons. 5 of 6 are multi_candidate — parish boundaries differ substantially between layers. Best-IoU attaches but flagged."
+
+[adam_policy.BRB]
+action = "needs_manual_mapping"
+note = "11 FM parishes ↔ 11 ADAM polygons. 10 of 11 are multi_candidate — Barbados parish boundaries differ substantially between FM and ADAM layers. Best-IoU attaches but every row should be flagged for review."

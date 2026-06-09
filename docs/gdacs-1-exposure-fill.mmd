@@ -1,0 +1,22 @@
+flowchart TD
+    START(["1 · run_pipeline gdacs<br/>--mode (dev | prod)"]):::entry
+    GETEV[["2 · ocha_lens.datasources.gdacs<br/>get_events"]]:::lens
+    SKIP[["3 · _load_skip_info"]]:::local
+    LOOP{{"4 · for each event in window"}}:::loop
+    DETAIL[["5 · ocha_lens.datasources.gdacs<br/>get_event_detail"]]:::lens
+    EPID[["6 · ocha_lens.datasources.gdacs<br/>latest_episode_id"]]:::lens
+    EXP[["7 · ocha_lens.datasources.gdacs<br/>get_exposure_adm0 / adm1"]]:::lens
+    EMIT[["8 · _emit_rows<br/>buffer to kt, to_iso3, wide to long"]]:::local
+    GE[("storms.gdacs_exposure")]:::tbl
+
+    START --> GETEV --> SKIP --> LOOP
+    GE -. "read: latest stored<br/>snapshot per event" .-> SKIP
+    SKIP -. "skip if already fresh" .-> LOOP
+    LOOP --> DETAIL --> EPID --> EXP --> EMIT
+    EMIT == "9 · write: upsert<br/>(gdacs_exposure_unique)" ==> GE
+
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px

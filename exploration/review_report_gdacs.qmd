@@ -1,0 +1,718 @@
+---
+title: "FieldMaps ↔ GDACS admin crosswalk"
+subtitle: "How well does GDACS's admin layer line up with FieldMaps for the 66 countries currently in scope (NHC Atlantic basin + extratropical-transition recipients + a handful of cross-basin edge cases) — and what do we do about the cases where it doesn't"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    embed-resources: true
+    page-layout: full
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+#| label: setup
+import tomllib
+from pathlib import Path
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import Markdown, display
+
+OUT = Path("../data/review")
+PER_COUNTRY = OUT / "gdacs_per_country"
+
+summary = pd.read_csv(OUT / "gdacs_fm_summary.csv")
+summary["clean_pct"] = (
+    summary["n_clean"] / summary["fm_count"].replace(0, 1) * 100
+).round(0).astype("Int64")
+summary["iou"] = summary["mean_iou"].round(3)
+
+review_iso3 = [
+    ln.strip() for ln in (OUT / "gdacs_review_countries.txt").read_text().splitlines()
+    if ln.strip()
+]
+
+fm_all = gpd.read_file(OUT / "gdacs_review_geoms.gpkg", layer="fm")
+gdacs_all = gpd.read_file(OUT / "gdacs_review_geoms.gpkg", layer="gdacs")
+
+# Load the per-country runtime policy from the same TOML that drives
+# the matching scripts. This makes the report self-consistent with what
+# the pipeline will actually do.
+with open(Path("../config/adm_level_config.toml"), "rb") as f:
+    _cfg = tomllib.load(f)
+POLICY = _cfg.get("gdacs_policy", {})
+POLICY_DF = pd.DataFrame([
+    {"iso3": k, "action": v["action"], "note": v.get("note", "")}
+    for k, v in POLICY.items()
+]).sort_values("iso3")
+
+# Per-row notes — caveats attached to specific (iso3, fm_pcode) rows.
+# Surfaced as callouts both in the per-country detail and a dedicated
+# top-level section.
+PER_ROW_NOTES = _cfg.get("per_row_notes", [])
+PER_ROW_BY_ISO3: dict[str, list[dict]] = {}
+for n in PER_ROW_NOTES:
+    PER_ROW_BY_ISO3.setdefault(n["iso3"], []).append(n)
+
+# Visual treatment by kind. callout-warning is yellow (operational
+# issue); callout-note is blue (informational).
+NOTE_KIND_CALLOUT = {
+    "pre_split_boundary": "warning",
+    "rename": "note",
+    "fm_offshore_orphan": "note",
+    "orphan_no_fm_unit": "warning",
+}
+NOTE_KIND_LABEL = {
+    "pre_split_boundary": "Pre-split boundary",
+    "rename": "Naming change",
+    "fm_offshore_orphan": "FM offshore orphan",
+    "orphan_no_fm_unit": "GDACS admin with no FM counterpart",
+}
+
+ISSUE_COLOR = {
+    None: "#3d9970",
+    "low_iou": "#e74c3c",
+    "multiple_candidates": "#f39c12",
+    "no_overlap": "#7f8c8d",
+}
+ISSUE_LABEL = {
+    None: "clean",
+    "low_iou": "low IoU",
+    "multiple_candidates": "ambiguous",
+    "no_overlap": "no overlap",
+}
+
+# Hand-written notes for countries with structurally hard cases or
+# where the auto-classifier would mislead. Surfaces inline next to the
+# map so the reader sees the explanation right where the picture lives.
+# (Generic notes for clean cases come from the TOML policy block.)
+COUNTRY_NOTES = {
+    "PRI": (
+        "**`country_only` policy — historical-niche GDACS subdivision "
+        "doesn't align with any FM level.** GDACS's 8 PRI polygons are "
+        "Puerto Rico's **Senatorial Districts** — electoral subdivisions "
+        "from the 1917 Jones–Shafroth Act that group municipios for "
+        "PR State Senate representation (Aguadilla, Arecibo, Bayamón, "
+        "Guayama, Humacao, Mayagüez, Ponce, San Juan). They sit "
+        "between FM's adm1 (1 whole-territory polygon) and FM's adm2 "
+        "(78 municipios) — neither layer. For consistency with the "
+        "rest of the basin (canonical reporting at FM adm1), all 8 "
+        "GDACS senatorial-district exposure rows roll up to a single "
+        "FM 'Puerto Rico' unit at runtime — equivalent to GDACS "
+        "admin0 for this country. The crosswalk picks one of the 8 "
+        "senatorial districts as the best-IoU match (arbitrary; all "
+        "8 are ~equal fractions of the island) — that field is "
+        "decorative under the `country_only` action; the pipeline "
+        "aggregates all 8 regardless. Underlying FM data quality "
+        "issue (PRI municipios stored at adm2 instead of adm1) "
+        "tracked separately in `[data_quality.PRI]`."
+    ),
+    "DOM": (
+        "**Same shape as BEL and FRA — `aggregate_gdacs_to_fm` "
+        "policy.** GDACS reports at what's effectively FM adm2 "
+        "granularity (the 32 provinces — well, 31 in the 2010 layer "
+        "before one was split). We previously tried fm_level=2 here "
+        "for a clean 1:1 adm2 alignment, but reverted to fm_level=1 "
+        "(10 FM regions) for consistency across the basin: every "
+        "country where GDACS is finer than FM adm1 — DOM, BEL, FRA — "
+        "now reports at FM adm1 and aggregates GDACS up via reverse "
+        "spatial join. The fm_level=2 alignment (32 ↔ 31) is "
+        "documented in the TOML for any future change in reporting "
+        "granularity. The current per-row crosswalk picks ONE GDACS "
+        "province per region (best IoU) and ignores the rest — the "
+        "reverse-join step is what actually delivers the aggregation."
+    ),
+    "LUX": (
+        "**`country_only` policy — FM admin 1 still reports; GDACS just "
+        "doesn't attach at that level.** FM has 12 cantons that the "
+        "pipeline reports at admin 1 as usual. GDACS uses 3 districts "
+        "that Luxembourg itself **abolished in 2015**, so there's no "
+        "useful way to attach GDACS exposure at FM canton level — "
+        "GDACS exposure for LUX shows up only at admin 0 (country)."
+    ),
+    "NIC": (
+        "**`needs_manual_mapping` policy — pre-split boundary on "
+        "Zelaya.** Same pattern as CUB Artemisa/Mayabeque, just older. "
+        "GDACS still carries 'Zelaya' (NIC-ZEL) as a single Caribbean-"
+        "coast department, but Nicaragua split it in 1987 under the "
+        "Sandinista-era constitutional reforms (and renamed in 2014). "
+        "Modern FM has TWO regions there: RACCN (Costa Caribe Norte) "
+        "and RACCS (Costa Caribe Sur). Both FM rows map to the same "
+        "GDACS Zelaya polygon. GDACS exposure for `NIC-ZEL` covers "
+        "both regions — see per-row callouts below; **do not sum** "
+        "the two FM rows or the population doubles. The other 15 "
+        "Nicaraguan regions match cleanly."
+    ),
+    "GTM": (
+        "Boundary disagreement at the same admin level. 22 FM "
+        "departments vs 22 GDACS — same count but only ~23% match "
+        "cleanly. Worth eyeballing the map to see whether this is "
+        "edge-noise or whole-unit reassignments."
+    ),
+    "PRT": (
+        "**Drives by Azores/Madeira.** Mainland Portugal aligns "
+        "reasonably; the Atlantic island groups are split into "
+        "subdivisions in one source and rolled into single units in "
+        "the other. Most mainland districts get flagged because "
+        "GDACS uses a coarser regional grouping than FM."
+    ),
+    "BMU": (
+        "**`country_only` policy.** Bermuda is ~54 km²; both GDACS "
+        "and FM treat it as a single polygon at admin 1 (FM also has "
+        "9 parishes — those still report at FM admin 1 via FM data "
+        "alone). GDACS admin1 has nothing to subdivide, so GDACS "
+        "exposure attaches only at admin 0. The low IoU on the 1↔1 "
+        "polygon match is just shape noise (FM may include outlying "
+        "reefs, GDACS uses a tighter 2010 coastline) — doesn't affect "
+        "the policy outcome."
+    ),
+    "BLZ": (
+        "**Operationally clean — `accept` policy applies.** All 6 FM "
+        "districts (Belize, Cayo, Corozal, Orange Walk, Stann Creek, "
+        "Toledo) align with their GDACS counterparts by name with IoU "
+        "0.79–0.94. The 3 `multiple_candidates` flags are just "
+        "boundary-edge noise from 2010 vs current GDACS coastlines — "
+        "the best-match identifier per FM unit is correct in every case."
+    ),
+    "ESP": (
+        "**`accept` policy.** Every one of Spain's 19 autonomous "
+        "communities matches its GDACS counterpart by name (Andalucía "
+        "→ Andalucia, Cataluña → Cataluna, …). The one row flagged "
+        "`low_iou` is **Ceuta** (~18 km² enclave on the Moroccan "
+        "coast) — same tiny-territory noise as BMU/TCA/VGB. Nothing "
+        "is absorbed: 19↔19 with clean identifiers throughout."
+    ),
+    "HTI": (
+        "**`accept` policy** — despite the auto-classifier flagging "
+        "it. The heuristic computes name-match in normalized strings "
+        "and got fooled by French/English department naming (`West` "
+        "≠ `Ouest`, `North-East` ≠ `Nord-Est`). All 10 Haitian "
+        "departments actually match their GDACS counterparts by ID."
+    ),
+    "PRT": (
+        "**`accept` policy** — mainland is clean, IoU 0.85 across the "
+        "20 districts. The 70% name-match rate (vs 100% for most "
+        "`accept` countries) comes from Azores/Madeira being grouped "
+        "slightly differently between FM and GDACS. Drives down "
+        "clean% but the best-match identifier is operationally right."
+    ),
+    "BEL": (
+        "**Needs reverse spatial join — `aggregate_gdacs_to_fm` "
+        "policy.** Belgium is the GDACS-finer-than-FM case: FM has 3 "
+        "regions (Flanders/Wallonia/Brussels) while GDACS carries the "
+        "11 provinces. The auto-classifier flagged it as "
+        "`report_at_gdacs_level` but we don't want that — we want to "
+        "*aggregate* GDACS provinces up to FM regions. The current "
+        "crosswalk picks ONE GDACS province per FM region (e.g., "
+        "Flanders → West-Vlaanderen) and ignores the other ~10; the "
+        "pipeline needs a one-shot reverse mapping (each `gmi_admin` "
+        "→ containing `fm_pcode`) so it can sum exposure correctly.\n\n"
+        "**Side finding while investigating BEL adm2:** FM has two "
+        "parent-region swap errors at adm2 — Henegouwen (a Walloon "
+        "province) is listed under Vlaams Gewest, and West-Vlaanderen "
+        "(a Flemish province) is listed under Wallonne Gewest. Doesn't "
+        "block our chosen policy but worth raising upstream. Tracked "
+        "in `[data_quality.BEL]` in `adm_level_config.toml`."
+    ),
+    "JAM": (
+        "**`accept` policy — works cleanly for the 14 parishes.** FM "
+        "has 16 adm1 rows for Jamaica vs GDACS's 14: every parish "
+        "matches by name (Clarendon, Hanover, Kingston, Manchester, "
+        "Portland, the seven Saints, Trelawny, Westmoreland). The two "
+        "extra FM rows are **offshore orphans** — Pedro Bank and "
+        "Morant Cays, tiny uninhabited Jamaican territories that "
+        "aren't assigned to any parish (FM puts their names in "
+        "`adm0_name` rather than `adm1_name`, hence the missing "
+        "labels in the table). They have no GDACS counterpart, so the "
+        "crosswalk shows `no_overlap` for them. Practical impact on "
+        "exposure reporting is zero (both are effectively "
+        "uninhabited)."
+    ),
+    "FRA": (
+        "**Same shape as BEL — `aggregate_gdacs_to_fm` policy.** FM "
+        "has 13 regions (post-2016 consolidation); GDACS still uses "
+        "the 22 pre-2016 regions. Mainland regions like "
+        "Auvergne-Rhône-Alpes (FM) need to absorb several GDACS rows "
+        "(Auvergne + Rhône-Alpes pre-merger). Needs the same reverse-"
+        "join approach as BEL."
+    ),
+    "TCA": (
+        "**`country_only` policy.** FM has 6 admin-1 districts (Grand "
+        "Turk, the Caicos islands, Salt Cay) that the pipeline reports "
+        "at admin 1 from FM directly. GDACS only has 1 polygon for "
+        "TCA (whole-territory) — nothing to subdivide — so GDACS "
+        "exposure attaches only at admin 0. The 1↔1 IoU is low "
+        "(tiny-territory coastline-shape noise) but irrelevant to the "
+        "policy outcome."
+    ),
+    "VGB": (
+        "**`country_only` policy.** Same shape as TCA — FM has admin-1 "
+        "detail that reports natively; GDACS has only 1 polygon, so "
+        "GDACS exposure attaches at admin 0 only."
+    ),
+}
+```
+
+## How the monitoring system reports
+
+The pipeline reports population exposure at **two admin levels for every country**:
+
+- **admin 0** (country) — one row per country
+- **admin 1** (FM regions/districts) — one row per FM admin-1 unit
+
+**FieldMaps is the canonical source at both levels.** Every Atlantic country in scope has FM data at both adm0 and adm1, so every country gets reported at both levels using FM units as the row identity. This part is non-negotiable and doesn't depend on GDACS at all.
+
+**GDACS exposure data is attached supplementally**, at *each level independently*:
+
+- **At admin 0** — GDACS exposure is always available and trivially 1:1 (one GDACS country = one FM country), so it attaches to every adm0 row.
+- **At admin 1** — attachment depends on whether the FM↔GDACS crosswalk can resolve the country cleanly. The per-country `[gdacs_policy.<ISO3>]` block dictates exactly what happens. *Where GDACS can't be matched at adm1, the FM adm1 row still reports — it just has no GDACS exposure number attached to it.*
+
+That last point matters because earlier wording made it sound like `country_only` meant "we don't report admin 1 for this country." We do. FM admin 1 always reports. `country_only` only changes whether GDACS exposure rides along with the FM admin 1 rows.
+
+### Where FM admin 1 is degenerate
+
+The reporting model assumes FM has meaningful admin-1 detail to report. Out of the 54 Atlantic countries, **7 have only a single FM adm1 polygon** — effectively the same as adm0. For these, "reporting at FM admin 1" is identical to "reporting at FM admin 0" (same row, same exposure number, just labeled differently).
+
+There are no countries in scope with *no* FM adm1 data at all — every Atlantic country has at least one FM adm1 polygon.
+
+```{python}
+#| label: fm-adm1-limits
+import sys
+sys.path.insert(0, "..")
+from src.static.gdacs.inputs import ATLANTIC_ISO3, load_fieldmaps_adm
+
+rows = []
+for iso3 in ATLANTIC_ISO3:
+    try:
+        df = load_fieldmaps_adm(iso3, 1)
+        n = len(df) if df is not None else 0
+    except Exception:
+        n = -1
+    if n <= 1:
+        if n == 0:
+            status = "no adm1 available"
+        elif n == 1:
+            status = "adm1 is single polygon"
+        else:
+            status = "FM load error"
+        pol = POLICY.get(iso3, {})
+        rows.append({
+            "iso3": iso3,
+            "fm_adm1_polys": n,
+            "fm_adm1_status": status,
+            "gdacs_policy": pol.get("action", "—"),
+        })
+
+limit_df = pd.DataFrame(rows).sort_values("iso3").reset_index(drop=True)
+limit_df
+```
+
+For all 7 of these, the GDACS policy is `country_only` (GDACS exposure attaches at admin 0 only — which is the same row anyway for these). The pipeline still reports them at FM admin 1, just with one row per country.
+
+**The one anomaly worth raising upstream**: PRI shouldn't really be on this list — Puerto Rico has 78 municipios that are the standard admin-1 subdivision recognized by every other authoritative source. FM stores them at adm2 instead, leaving adm1 as a single whole-territory polygon. Tracked separately in `[data_quality.PRI]` in `adm_level_config.toml`.
+
+## Context — why this exists
+
+`storms.gdacs_exposure` is the pipeline table that records per-admin population exposure for every tropical-cyclone event GDACS reports on. It has a column `pcode` that is currently **null for every row at admin level 1**, with a comment in the pipeline source:
+
+> "pcode null at admin_level=1 until a downstream enrichment step (FieldMaps lookup or similar) fills it"
+
+This crosswalk is that downstream enrichment step — the output `gdacs_fm_crosswalk.csv` is a `gmi_admin → fm_pcode` lookup that populates `pcode` for every admin-1 GDACS row *where the policy says we can attach it*. For countries where we can't, the GDACS admin-1 row's `pcode` stays null and the FM adm1 row reports without it.
+
+## What we built
+
+A geometric crosswalk: for each FieldMaps admin-1 polygon in each Atlantic country, find the best-matching GDACS admin polygon by IoU overlay. The GDACS side is sourced from **`W_ADM_ADMIN2010_V2021`** — the actual shapefile GDACS uses for its zonal stats, shared by GDACS staff and cached at `global/gdacs/admin/` on blob. Schema, GMI codes, and FIPS codes match GDACS API responses byte-for-byte.
+
+Per-country admin-level mismatches (e.g., FieldMaps stores Puerto Rico's municipios at adm2 while GDACS uses 8 different polygons) are handled via per-country level overrides in `adm_level_config.toml`. Where GDACS treats a small country as a single polygon (BHS, BRB, BMU, etc.), the FieldMaps side is collapsed to its adm0 polygon to give a clean 1↔1 country-level lookup.
+
+## Headline
+
+```{python}
+#| label: headline
+total = len(summary)
+clean = (summary["status"] == "clean").sum()
+review = (summary["status"] == "review").sum()
+empty = summary["status"].isin(["gdacs_empty"]).sum()
+other = total - clean - review - empty
+
+display(Markdown(
+    f"- **Total Atlantic countries**: {total}\n"
+    f"- **Fully clean** (every FM unit cleanly matched): {clean} ({100*clean/total:.0f}%)\n"
+    f"- **Review** (at least one unit flagged for low IoU or ambiguity): {review} ({100*review/total:.0f}%)\n"
+    f"- **GDACS-empty** (country not in 2010 GDACS layer at all): {empty}\n"
+    f"- **Other** (FM-side load error): {other}\n"
+))
+```
+
+### What "review" actually means
+
+The binary clean/review status is conservative: any single flagged row anywhere in the country bumps the whole country into review. Many "review" countries actually have **valid identifier mappings for most of their rows** — the flags surface boundary-shape disagreement or admin-level mismatches that need eyeballing, not failures.
+
+The five buckets below split this out properly:
+
+```{python}
+#| label: buckets
+clean_set = summary[summary["status"] == "clean"]
+mostly_ok = summary[(summary["status"] == "review") & (summary["clean_pct"] >= 70)]
+partial = summary[(summary["status"] == "review") & (summary["clean_pct"] >= 30) & (summary["clean_pct"] < 70)]
+mostly_broken = summary[(summary["status"] == "review") & (summary["clean_pct"] < 30)]
+empty = summary[summary["status"].isin(["gdacs_empty", "fm_load_error"])]
+
+bucket_tbl = pd.DataFrame([
+    {"bucket": "1 — Fully clean",
+     "what it means": "Crosswalk usable as-is.",
+     "n": len(clean_set), "iso3s": " ".join(clean_set["iso3"])},
+    {"bucket": "2 — Mostly OK (≥70% rows clean)",
+     "what it means": "GDACS and FM agree on admin-1 partitioning; minor edge differences.",
+     "n": len(mostly_ok), "iso3s": " ".join(mostly_ok["iso3"])},
+    {"bucket": "3 — Partial (30–70%)",
+     "what it means": "Real boundary disagreement on several units. Per-row review recommended.",
+     "n": len(partial), "iso3s": " ".join(partial["iso3"])},
+    {"bucket": "4 — Mostly broken (<30%)",
+     "what it means": "Either structural mismatch (different levels) or tiny-territory noise. Inspect the map.",
+     "n": len(mostly_broken), "iso3s": " ".join(mostly_broken["iso3"])},
+    {"bucket": "5 — Unfixable",
+     "what it means": "Country missing from GDACS 2010 layer or FM-side load error. Manual handling needed.",
+     "n": len(empty), "iso3s": " ".join(empty["iso3"])},
+])
+bucket_tbl
+```
+
+## How to use the crosswalk downstream
+
+For each `(gdacs_eventid, gdacs_episodeid, admin_level=1, gmi_admin)` row in `storms.gdacs_exposure`:
+
+1. Look up `gmi_admin` in `gdacs_fm_crosswalk.csv` to find the matching `fm_pcode`. Multiple FM rows can map to the same `gmi_admin` (e.g., PRI's municipios, DOM's regions); in that case the join is one-to-many.
+2. For countries in bucket 5 (`gdacs_empty`) there is no `gmi_admin` row in this layer — those countries appear at admin level 0 in GDACS exposure data only.
+3. For the BMU/TCA/VGB tiny-territory cases the IoU looks bad but the identifier match is unambiguous (1 FM polygon, 1 GDACS polygon, only one possible mapping) — safe to use.
+
+## Per-country summary
+
+Sortable. `fm_lvl` is the FM admin level chosen for that country (overrides applied per `adm_level_config.toml` → `[gdacs_overrides]`). `iou` is the mean across matched rows.
+
+```{python}
+#| label: per-country-table
+tbl = summary[[
+    "iso3", "fm_level", "fm_count", "gdacs_count",
+    "n_clean", "n_low_iou", "n_multi", "n_no_overlap",
+    "clean_pct", "iou", "status",
+]].sort_values(["status", "clean_pct"], ascending=[True, False]).rename(columns={
+    "fm_level": "fm_lvl",
+    "fm_count": "FM",
+    "gdacs_count": "GDACS",
+    "n_clean": "clean",
+    "n_low_iou": "low_iou",
+    "n_multi": "ambig",
+    "n_no_overlap": "no_ov",
+    "clean_pct": "%clean",
+})
+tbl
+```
+
+## Per-country runtime policy
+
+Every country gets one of four **action codes** stored in `adm_level_config.toml` under `[gdacs_policy.<ISO3>]`. Each action describes what the pipeline does at **admin 0** (country) and **admin 1** (FM units) — remember, FM rows always appear at both levels; the action only controls whether GDACS exposure rides along.
+
+| Action | GDACS at adm 0 | GDACS at adm 1 |
+|---|---|---|
+| `accept` | Attached (trivial 1:1) | **Attached** via crosswalk: each GDACS admin1 row → its matched `fm_pcode` |
+| `country_only` | Attached (trivial 1:1) | **Not attached**: FM admin1 rows report without GDACS exposure numbers. Used when GDACS can't usefully subdivide the country — GDACS-empty cases (BES/BLM/etc.), 1↔1 single-polygon territories (BMU/TCA), or countries where GDACS's admin1 is defunct or wrong-granularity (LUX). |
+| `aggregate_gdacs_to_fm` | Attached (trivial 1:1) | **Attached via reverse spatial join**: GDACS is finer than FM at adm1, so the pipeline first builds a `gmi_admin → containing fm_pcode` map, then sums multiple GDACS exposure rows into the FM adm1 unit (BEL, DOM, FRA). |
+| `needs_manual_mapping` | Attached (trivial 1:1) | **Attached with per-row caveats**: there's a structural issue (pre-split boundary, post-2010 admin reform, unresolved data gap). The crosswalk attaches GDACS exposure to the best-match FM unit, but `[[per_row_notes]]` callouts tell downstream consumers about the limitations (e.g., "GDACS exposure for `NIC-ZEL` covers both modern Caribbean regions — do not sum across them"). |
+
+### How I arrived at each action
+
+The auto-classifier (`artefacts/classify_gdacs_policy.py`) proposes an action from name-match rate, IoU distribution, and FM-vs-GDACS unit counts. Then I eyeballed each case:
+
+```{python}
+#| label: policy-summary
+counts = POLICY_DF["action"].value_counts().reindex([
+    "accept", "country_only", "aggregate_gdacs_to_fm",
+    "needs_manual_mapping",
+], fill_value=0)
+display(Markdown(
+    f"- `accept`: **{counts['accept']}**  \n"
+    f"- `country_only`: **{counts['country_only']}**  \n"
+    f"- `aggregate_gdacs_to_fm`: **{counts['aggregate_gdacs_to_fm']}**  \n"
+    f"- `needs_manual_mapping`: **{counts['needs_manual_mapping']}**"
+))
+```
+
+I overrode the auto-classifier on **7 countries** where the heuristic was misled, plus made one product-level revision afterward:
+
+| iso3 | heuristic said | I said | why |
+|---|---|---|---|
+| CUB | accept | **needs_manual_mapping** | GDACS uses pre-2011 boundaries: old `CUB-LHB / La Habana` covers BOTH modern Artemisa AND Mayabeque. Tracked in `[[per_row_notes]]`. |
+| NIC | accept | **needs_manual_mapping** | GDACS still carries pre-1987 'Zelaya' (NIC-ZEL) covering BOTH modern Costa Caribe Norte and Costa Caribe Sur. Same pattern as CUB, just older. Tracked in `[[per_row_notes]]`. |
+| DOM | needs_manual_mapping | **aggregate_gdacs_to_fm** | First call was `accept` at fm_level=2 (clean 32↔31 alignment). Revised to `aggregate_gdacs_to_fm` at fm_level=1 for consistency with BEL/FRA — see note below. |
+| ESP | needs_manual_mapping | **accept** | 1 flagged row is Ceuta (~18 km²) tiny-territory noise. Other 18 are clean. |
+| HTI | needs_manual_mapping | **accept** | Name-match heuristic fails on French/English (`West`≠`Ouest`). All 10 match by ID. |
+| PRT | needs_manual_mapping | **accept** | Mainland clean; Azores/Madeira partition differences are real but localized. |
+| BEL | report_at_gdacs_level | **aggregate_gdacs_to_fm** | The right direction is GDACS → FM (3 regions absorb 11 provinces). |
+| FRA | needs_manual_mapping | **aggregate_gdacs_to_fm** | Same pattern as BEL: 22 pre-2016 GDACS regions roll up to 13 FM regions. |
+| PRI | report_at_gdacs_level | **country_only** | GDACS's 8 polygons are Puerto Rico's Senatorial Districts (1917 electoral subdivisions). They don't align with FM adm1 (1 polygon) or FM adm2 (78 municipios). For consistency we report at FM adm1 = whole-island unit, equivalent to GDACS adm0. |
+
+**Product-level decision on the "GDACS finer than FM" pattern**: three countries fit this shape — DOM (10 FM adm1 vs 31 GDACS), BEL (3 vs 11), FRA (13 vs 22). For uniform downstream reporting ("1 row per FM adm1 unit affected"), all three are now handled the same way: `aggregate_gdacs_to_fm` at FM adm1, with a one-shot reverse spatial join (each `gmi_admin` → containing `fm_pcode`) producing the many-to-one lookup the pipeline aggregates over. DOM was briefly set to fm_level=2 (which gave a cleaner 1:1 picture for DOM specifically) but we reverted for consistency.
+
+### Final per-country policy
+
+```{python}
+#| label: policy-table
+merged = POLICY_DF.merge(
+    summary[["iso3", "fm_count", "gdacs_count", "clean_pct", "iou", "status"]],
+    on="iso3", how="left",
+)
+merged = merged[[
+    "iso3", "action", "status", "fm_count", "gdacs_count",
+    "clean_pct", "iou", "note",
+]].sort_values(["action", "iso3"])
+merged
+```
+
+### What's left to build for the runtime to use this
+
+1. **A small pipeline helper** that reads `[gdacs_policy.<ISO3>]` and dispatches per-row: maybe 30 LOC.
+2. **Reverse-crosswalk script** for the two `aggregate_gdacs_to_fm` countries (BEL, FRA) — one-shot spatial join, persisted as a second lookup CSV. Reuses the same overlay machinery.
+3. **Resolve CAN** — verify FM has no Canada at adm1; if true, switch CAN's action to `country_only`.
+4. **Per-row override CSV for PAN** — 3 post-2010 splits need hand-picked `gmi_admin` → `fm_pcode` rows.
+
+## 📌 Per-row boundary issues
+
+These are caveats attached to specific `(iso3, fm_pcode)` rows in the crosswalk where the 2010 GDACS boundaries intersect admin reforms that happened after 2010 (province splits, renames, etc.). They're tracked in `[[per_row_notes]]` in `adm_level_config.toml` and surfaced as callouts inline with the per-country detail below.
+
+**`pre_split_boundary`** (operational — heads-up): A single GDACS unit corresponds to multiple modern FM units because the boundary predates a post-2010 split. When GDACS reports exposure for that GDACS unit, the same number maps to several FM rows. **Do not sum across those FM rows — that double-counts the population.**
+
+**`rename`** (informational): Same geometry, different name between sources. No operational impact.
+
+**`fm_offshore_orphan`** (informational): A FieldMaps adm1 record for a small offshore territory that isn't a parish/province (e.g., Jamaica's Pedro Bank and Morant Cays). FM puts the name in `adm0_name`, leaves `adm1_name` null. Not represented in GDACS, hence `no_overlap`. Usually uninhabited or near-uninhabited; effectively no exposure impact.
+
+```{python}
+#| label: per-row-notes-table
+#| results: asis
+if not PER_ROW_NOTES:
+    display(Markdown("_No per-row notes recorded yet._"))
+else:
+    rows = []
+    for n in sorted(PER_ROW_NOTES, key=lambda x: (x["iso3"], x["fm_pcode"])):
+        rows.append({
+            "iso3": n["iso3"],
+            "fm_pcode": n["fm_pcode"],
+            "fm_name": n.get("fm_name", ""),
+            "gmi_admin": n.get("gmi_admin", ""),
+            "kind": n["kind"],
+            "note": n["note"],
+        })
+    display(pd.DataFrame(rows))
+```
+
+## Per-country detail
+
+Each panel shows the FieldMaps polygons (filled, colored by issue, with a dark solid border) overlaid with GDACS admin polygons (blue dashed outline). Where applicable, **yellow callouts** surface per-row caveats that downstream consumers must know about. For countries where I had something specific to say, an interpretation block sits above the table.
+
+**FM fill color** indicates the crosswalk result for each FM unit:
+
+- <span style="color:#3d9970;font-weight:600">green</span> — clean match (single GDACS partner, IoU ≥ 0.5)
+- <span style="color:#e74c3c;font-weight:600">red</span> — low IoU (FM and GDACS disagree on this unit's boundary, or the level mismatch produces small intersections)
+- <span style="color:#f39c12;font-weight:600">orange</span> — multiple GDACS polygons overlap this FM unit substantially (boundary disagreement, likely a split/merge between sources)
+- <span style="color:#7f8c8d;font-weight:600">gray</span> — no GDACS polygon overlaps this FM unit at all
+
+**FM boundary** is solid dark gray — same-colored adjacent units stay visually distinct.
+**GDACS boundary** is blue dashed — easy to read alongside without competing with the FM edges.
+
+```{python}
+#| label: render-countries
+#| results: asis
+for iso3 in review_iso3:
+    crow = summary[summary["iso3"] == iso3].iloc[0]
+    cp = pd.read_parquet(PER_COUNTRY / f"{iso3}.parquet")
+    fm = fm_all[fm_all["iso3"] == iso3].copy()
+    gdacs = gdacs_all[gdacs_all["iso3"] == iso3].copy()
+
+    display(Markdown(f"## {iso3}"))
+    fm_lvl = int(crow["fm_level"]) if pd.notna(crow["fm_level"]) else "?"
+    pol = POLICY.get(iso3, {})
+    action = pol.get("action", "—")
+    if pd.notna(crow["mean_iou"]):
+        display(Markdown(
+            f"**Pipeline action**: `{action}`  ·  "
+            f"**FM level**: adm{fm_lvl}  ·  "
+            f"**FM units**: {int(crow['fm_count'])}  ·  "
+            f"**GDACS units**: {int(crow['gdacs_count'])}  ·  "
+            f"**Clean**: {int(crow['n_clean'])}/{int(crow['fm_count'])}  ·  "
+            f"**mean IoU**: {crow['iou']:.3f}  ·  "
+            f"**status**: {crow['status']}"
+        ))
+    else:
+        display(Markdown(
+            f"**Pipeline action**: `{action}`  ·  "
+            f"**FM level**: adm{fm_lvl}  ·  "
+            f"**status**: {crow['status']}"
+        ))
+
+    if iso3 in COUNTRY_NOTES:
+        display(Markdown(COUNTRY_NOTES[iso3]))
+
+    # Per-row callouts (yellow/blue boxes that visually pop)
+    for note in PER_ROW_BY_ISO3.get(iso3, []):
+        kind = note["kind"]
+        callout = NOTE_KIND_CALLOUT.get(kind, "warning")
+        label = NOTE_KIND_LABEL.get(kind, kind)
+        display(Markdown(
+            f"::: {{.callout-{callout}}}\n"
+            f"## {label}: `{note['fm_pcode']}` ({note.get('fm_name', '')}) "
+            f"↔ `{note.get('gmi_admin', '')}`\n\n"
+            f"{note['note']}\n"
+            f":::\n"
+        ))
+
+    if len(fm) == 0:
+        display(Markdown("_No FieldMaps geometry available for this country._"))
+        display(Markdown("***"))
+        continue
+    if len(gdacs) == 0:
+        display(Markdown("_No GDACS geometry available for this country._"))
+        display(Markdown("***"))
+        continue
+
+    fm_issue = fm.merge(
+        cp[["fm_pcode", "issue", "iou", "gmi_admin", "gdacs_admin_name"]],
+        on="fm_pcode", how="left",
+    )
+    fm_issue["_color"] = fm_issue["issue"].map(ISSUE_COLOR).fillna(ISSUE_COLOR[None])
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+    # Layer 1: FM polygons filled by issue color, with a thin dark edge.
+    # Keep the FM edge subtle so the GDACS line on top reads clearly.
+    fm_issue.plot(
+        ax=ax, color=fm_issue["_color"],
+        edgecolor="#222", linewidth=0.7, alpha=0.6,
+    )
+    # Layer 2: white "casing" under the GDACS dashed line — a wider
+    # white pass beneath the colored dashed pass makes the GDACS
+    # boundary pop against any FM fill color (red/green/orange/grey).
+    gdacs.plot(
+        ax=ax, facecolor="none", edgecolor="white", linewidth=4.0,
+    )
+    # Layer 3: bright magenta dashed line for GDACS. Magenta avoids the
+    # FM fill colors entirely so there's no color clash, and the dash
+    # pattern is large enough to scan at a glance.
+    gdacs.plot(
+        ax=ax, facecolor="none", edgecolor="#e6007a",
+        linewidth=2.2, linestyle=(0, (8, 4)),
+    )
+
+    # Labels: only annotate when polygon counts are small enough to keep
+    # the map legible (no automatic label-collision avoidance, so we'd
+    # rather skip than make a mess).
+    if len(fm_issue) <= 25:
+        for _, r in fm_issue.iterrows():
+            if pd.notna(r.get("fm_name")) and r.geometry is not None:
+                pt = r.geometry.representative_point()
+                ax.annotate(
+                    r["fm_name"],
+                    xy=(pt.x, pt.y),
+                    ha="center", va="center",
+                    fontsize=7, color="black", fontweight="bold",
+                    path_effects=[],
+                )
+    if len(gdacs) <= 25:
+        for _, r in gdacs.iterrows():
+            if pd.notna(r.get("ADMIN_NAME")) and r.geometry is not None:
+                pt = r.geometry.representative_point()
+                ax.annotate(
+                    r["ADMIN_NAME"],
+                    xy=(pt.x, pt.y),
+                    xytext=(0, -10), textcoords="offset points",
+                    ha="center", va="top",
+                    fontsize=6, color="#e6007a", style="italic",
+                    fontweight="bold",
+                )
+    ax.set_title(
+        f"{iso3} — FM polygons (black labels, thin dark edge) / "
+        f"GDACS polygons (magenta italic labels, magenta dashed outline)",
+        fontsize=11,
+    )
+    ax.set_axis_off()
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+    tbl = cp.copy()
+    if "issue" not in tbl.columns:
+        tbl["issue"] = None
+    tbl["issue_label"] = tbl["issue"].map(ISSUE_LABEL).fillna("clean")
+    tbl = tbl.sort_values(
+        ["issue", "iou"], ascending=[True, True], na_position="last",
+    )
+    cols = [
+        "fm_pcode", "fm_name", "gmi_admin", "fips_admin",
+        "gdacs_admin_name", "iou", "n_candidates", "issue_label",
+    ]
+    cols = [c for c in cols if c in tbl.columns]
+    tbl = tbl[cols].reset_index(drop=True)
+    if "iou" in tbl.columns:
+        tbl["iou"] = tbl["iou"].round(3)
+    display(tbl)
+    display(Markdown("***"))
+```
+
+## ⛔ Out-of-source: GDACS-reported iso3s with no FM coverage
+
+These iso3s appear in `storms.gdacs_exposure` but have no FieldMaps parquet on blob — either the entity is defunct (no current adm0/adm1 to publish) or FieldMaps simply doesn't have it. Tagged `action = "no_fm_source"` in the policy TOML so the build script skips them, and downstream consumers (alert pipeline, matching demo) can read the policy to filter out any GDACS rows for them.
+
+```{python}
+#| label: tbl-no-fm-source
+no_fm = [
+    {"iso3": k, "note": v.get("note", "")}
+    for k, v in POLICY.items() if v.get("action") == "no_fm_source"
+]
+if no_fm:
+    display(pd.DataFrame(no_fm))
+else:
+    display(Markdown("_(none)_"))
+```
+
+## 📌 Known GDACS admins with no FM counterpart
+
+A handful of GDACS-reported admin codes have no FieldMaps adm1 unit to attach to even when the country itself has full FM coverage. These are documented as `[[per_row_notes]]` with `kind = "orphan_no_fm_unit"` so the alert pipeline / downstream readers know they're a known data gap rather than a missing crosswalk row.
+
+```{python}
+#| label: tbl-orphans-no-fm
+orphans = [
+    {"iso3": n["iso3"], "gmi_admin": n.get("gmi_admin", ""),
+     "note": n["note"]}
+    for n in PER_ROW_NOTES if n.get("kind") == "orphan_no_fm_unit"
+]
+if orphans:
+    display(pd.DataFrame(orphans))
+else:
+    display(Markdown("_(none)_"))
+```
+
+## Known FieldMaps data-quality issues
+
+Two upstream FieldMaps issues surfaced while building this report. Both are tracked in `[data_quality.<ISO3>]` blocks in `adm_level_config.toml`.
+
+- **Puerto Rico admin-1 is a single whole-territory polygon.** The 78 municipios — the conventional admin-1 subdivision recognized by ISO 3166-2, GADM, US Census MAF/TIGER, and GDACS — are stored at FieldMaps adm2 instead. This forces every consumer of FieldMaps adm1 data to special-case Puerto Rico. Worth requesting FieldMaps maintainers promote the municipios to adm1.
+- **Belgium adm2 has parent-region swap errors.** Henegouwen (Walloon) is listed under `adm1_name = "Vlaams Gewest"` (Flanders), and West-Vlaanderen (Flemish) is listed under `"Wallonne Gewest"` (Wallonia). Each appears once correctly and once with the wrong parent, inflating the adm2 layer from the actual 11 Belgian provinces to 13 rows. The geometry doesn't match the wrong-region GDACS polygons (IoU ≈ 0.005), confirming these are mislabeled records, not split polygons.
+
+## What's next
+
+See **"What's left to build for the runtime to use this"** in the per-country policy section above for the concrete engineering tasks. Beyond that:
+
+- **Raise the Puerto Rico FieldMaps data-quality issue upstream** so the 78 municipios get promoted to adm1 (where most authoritative sources put them).
+- **For the 5 GDACS-empty post-2010 territories** (BES, BLM, CUW, MAF, SXM): in GDACS exposure data they appear rolled into their pre-2010 parent (Netherlands Antilles or France). Downstream consumers should disaggregate using FM-side polygons if sub-territory granularity matters.
+
+## Regenerating
+
+```bash
+# After changing adm_level_config.toml (e.g., new gdacs_overrides):
+uv run python artefacts/match_gdacs_fieldmaps.py     # only re-runs changed countries
+uv run python artefacts/prepare_review_data_gdacs.py # refreshes geometries
+cd artefacts && uv run quarto render review_report_gdacs.qmd
+```

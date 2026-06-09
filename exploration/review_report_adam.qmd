@@ -1,0 +1,612 @@
+---
+title: "FieldMaps ↔ ADAM admin crosswalk"
+subtitle: "How the WFP-ADAM exposure feed lines up with FieldMaps for the countries currently in scope, and the per-country policy choices that resolve the cases where it doesn't."
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    embed-resources: true
+    page-layout: full
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+#| label: setup
+import tomllib
+from pathlib import Path
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import Markdown, display
+
+OUT = Path("../data/review")
+PER_COUNTRY = OUT / "adam_per_country"
+
+# The lookup CSV — final FM-centric decisions, one row per FM unit
+# (more if multiple ADAM polygons aggregate to the same FM unit).
+LOOKUP_CSV = Path("../data/adam_fm_lookup.csv")
+LOOKUP = pd.read_csv(LOOKUP_CSV) if LOOKUP_CSV.exists() else pd.DataFrame()
+
+summary = pd.read_csv(OUT / "adam_fm_summary.csv")
+summary["clean_pct"] = (
+    summary["n_clean"] / summary["fm_count"].replace(0, 1) * 100
+).round(0).astype("Int64")
+summary["iou"] = summary["mean_iou"].round(3)
+
+# Geometry sources:
+#   - FM: loaded per-iso3 from the OCHA-DAP blob via the same loader
+#     the production build uses. Bypasses the gpkg cache entirely so
+#     any transient blob failure during artifact-build can't poison
+#     the qmd's view (cf. MEX / CAN bug).
+#   - ADAM admin layer: loaded once from data/static/ge_adm1.parquet
+#     (local 278 MB file, fast filter per iso3).
+import sys as _sys
+_sys.path.insert(0, "..")
+from src.static.adam.admin import load_adam_admin  # noqa: E402
+from src.static.adam.inputs import load_fieldmaps_adm  # noqa: E402
+
+ADAM_ADMIN_ALL = load_adam_admin()
+
+
+def fetch_fm(iso3: str):
+    """Per-call FM load with a swallowed-exception fallback so a blob
+    timeout on one country doesn't break the whole render."""
+    try:
+        return load_fieldmaps_adm(iso3, 1)
+    except Exception as e:
+        print(f"_FM blob load failed for {iso3}: {e}_\n")
+        return None
+
+
+def fetch_adam(iso3: str):
+    return ADAM_ADMIN_ALL[ADAM_ADMIN_ALL["iso3"] == iso3].copy()
+
+ISSUE_COLOR = {
+    None: "#3d9970",
+    "low_iou": "#e74c3c",
+    "multiple_candidates": "#f39c12",
+    "no_overlap": "#7f8c8d",
+}
+ISSUE_LABEL = {
+    None: "clean",
+    "low_iou": "low IoU",
+    "multiple_candidates": "ambiguous",
+    "no_overlap": "no overlap",
+}
+
+# Policy table from the same TOML that drives the build script —
+# guarantees this report describes what the runtime actually does.
+with open(Path("../config/adm_level_config.toml"), "rb") as f:
+    _cfg = tomllib.load(f)
+
+POLICY = _cfg.get("adam_policy", {})
+policy_rows = [
+    {"iso3": k, "action": v["action"], "note": v.get("note", "")}
+    for k, v in POLICY.items()
+]
+POLICY_DF = pd.DataFrame(policy_rows).sort_values("iso3")
+
+# Per-row notes + row overrides — both per-iso3 indexed for fast
+# lookup in the per-country panel. Overrides are the editorial layer:
+# manual decisions about how to map (or not map) specific source
+# polygons to FM units.
+PER_ROW_NOTES = _cfg.get("adam_per_row_notes", [])
+ROW_OVERRIDES = _cfg.get("adam_row_overrides", [])
+OVERRIDES_BY_ISO3: dict[str, list[dict]] = {}
+for ov in ROW_OVERRIDES:
+    OVERRIDES_BY_ISO3.setdefault(ov.get("iso3", ""), []).append(ov)
+
+# Pull the ADAM-reporting iso3 list from the actual exposure table —
+# the policy seed targets exactly these. Done with a small SQL pull
+# rather than hard-coded so the report stays self-updating.
+try:
+    import ocha_stratus as stratus
+    from sqlalchemy import text
+    from dotenv import load_dotenv
+    load_dotenv(Path("../.env"))
+    _engine = stratus.get_engine("dev", write=False)
+    with _engine.connect() as _conn:
+        ADAM_ISO3 = pd.read_sql(text(
+            "SELECT DISTINCT iso3 FROM storms.adam_exposure "
+            "WHERE iso3 IS NOT NULL ORDER BY iso3"
+        ), _conn)["iso3"].tolist()
+        # Coverage check executed once and cached for the section below
+        COVERAGE = pd.read_sql(text("""
+            WITH a AS (
+              SELECT DISTINCT iso3, admin_name FROM storms.adam_exposure
+              WHERE admin_level = 1 AND iso3 IS NOT NULL
+            )
+            SELECT a.iso3, COUNT(*) AS adam_names,
+                   COUNT(lk.fm_pcode) AS matched
+            FROM a
+            LEFT JOIN storms.adam_fm_lookup lk
+              ON lk.iso3 = a.iso3 AND lk.admin_level = 1
+             AND lower(lk.adam_admin_name) = lower(a.admin_name)
+            GROUP BY a.iso3 ORDER BY a.iso3
+        """), _conn)
+        DB_LIVE = True
+except Exception as _e:
+    ADAM_ISO3 = []
+    COVERAGE = pd.DataFrame(columns=["iso3","adam_names","matched"])
+    DB_LIVE = False
+
+ACTION_COLOR = {
+    "accept": "#3d9970",
+    "aggregate_adam_to_fm": "#f39c12",
+    "fm_adm1_only": "#3498db",
+    "needs_manual_mapping": "#9b59b6",
+    "country_only": "#7f8c8d",
+    "no_adam_source": "#e74c3c",
+}
+```
+
+## What this is
+
+WFP-ADAM publishes per-event population exposure at admin names — no codes. To attach those exposures to our FieldMaps adm1 polygons we need a name-to-pcode crosswalk per country. This report:
+
+1. Documents the per-country policy choice (one of six actions) for every ADAM-reporting iso3.
+2. Surfaces the cases that need eyeballing.
+3. Quantifies how much of the live `storms.adam_exposure` actually attaches to a lookup row.
+
+The crosswalk uses the **ADAM admin layer** (3,509 polygons; upstream filename `ge_adm1.parquet`) as an intermediate boundary reference — WFP publishes both ADAM exposure CSVs and this boundary layer, so the names are structurally aligned.
+
+```{python}
+#| label: headline
+total_policy = len(POLICY_DF)
+total_adam = len(ADAM_ISO3)
+display(Markdown(
+    f"- **ADAM-reporting iso3s in `storms.adam_exposure`**: {total_adam}\n"
+    f"- **Policy entries seeded**: {total_policy}\n"
+    f"- **Coverage** (live DB join): "
+    f"{COVERAGE['matched'].sum()} of {COVERAGE['adam_names'].sum()} "
+    f"ADAM adm1 names attach to a lookup row "
+    f"({100*COVERAGE['matched'].sum()/max(COVERAGE['adam_names'].sum(),1):.0f}%)"
+    if DB_LIVE else
+    f"- _DB not available; coverage check skipped_"
+))
+```
+
+## Policy at a glance
+
+Six actions cover every case. Each action describes what the build script does at admin 1 for the country (admin 0 always gets a row).
+
+| action | what it does | when to use |
+|---|---|---|
+| **`accept`** | runs FM↔ge IoU matcher, emits one lookup row per FM polygon with the best-match ge name | clean 1:1 (HTI, MEX) or minor noise (USA, BHS) |
+| **`aggregate_adam_to_fm`** | reverse spatial join: each ADAM admin polygon → its containing FM polygon, multiple rows per FM | ADAM admin layer finer than FM (ISL: 75 ADAM → 8 FM; DOM: 33 → 10) |
+| **`fm_adm1_only`** | emits FM rows with `adam_admin_id=NULL` and `adam_admin_name=NULL` | ADAM admin layer too coarse / no useful adm1 disambiguation possible (CYM, GRL, VIR) |
+| **`needs_manual_mapping`** | same as accept but flagged via `caveat_note` for boundary-reform cases | same-count both sides, heavy multi_candidate (CUB, KNA) |
+| **`country_only`** | no adm1 rows for this iso3 | real admin-system divergence (MSR: settlements vs parishes) or special cases (PRI) |
+| **`no_adam_source`** | iso3 skipped entirely | no FM AND/OR no ge data (ANT, XIM) |
+
+```{python}
+#| label: policy-distribution
+counts = POLICY_DF["action"].value_counts().rename_axis("action").reset_index(name="n_iso3s")
+counts["iso3s"] = counts["action"].apply(
+    lambda a: " ".join(sorted(POLICY_DF.loc[POLICY_DF["action"] == a, "iso3"]))
+)
+counts
+```
+
+## Per-country diagnostics
+
+Sortable. Mean IoU is across matched ADAM admin polygons; `ADAM` count is how many ADAM admin polygons exist for the country.
+
+```{python}
+#| label: per-country-table
+diag = summary.merge(POLICY_DF[["iso3","action"]], on="iso3", how="left")
+# Keep only countries that have an explicit policy entry — the others
+# are silently country_only and not part of this review pass.
+diag = diag[diag["action"].notna()].copy()
+diag = diag[[
+    "iso3","action","fm_count","adam_admin_count","n_clean",
+    "n_low_iou","n_multi","n_no_overlap","clean_pct","iou","status",
+]].rename(columns={
+    "fm_count":"FM","adam_admin_count":"ADAM",
+    "n_clean":"clean","n_low_iou":"low_iou","n_multi":"ambig",
+    "n_no_overlap":"no_ov","clean_pct":"%clean","iou":"mean_iou",
+}).sort_values(["action","%clean"], ascending=[True, False])
+diag
+```
+
+## Deep dives
+
+### `aggregate_adam_to_fm`: ADAM admin layer finer than FM
+
+The reverse spatial join groups multiple ADAM admin polygons under each FM polygon. Most informative case is **ISL** (Iceland's 75 municipalities → 8 FM regions). The aggregation tree below shows which municipalities roll up to which FM region.
+
+```{python}
+#| label: agg-isl-tree
+#| results: asis
+# Read per-country match parquet for an aggregate iso3 to show the
+# rollup. The build script's reverse-spatial join is deterministic;
+# this just re-renders the result.
+def _show_agg(iso3):
+    p = PER_COUNTRY / f"{iso3}.parquet"
+    if not p.exists():
+        print(f"_no per-country parquet for {iso3}_\n")
+        return
+    df = pd.read_parquet(p)
+    df = df[df["fm_pcode"].notna() & df["adam_admin_name"].notna()]
+    by_fm = (
+        df.groupby(["fm_pcode","fm_name"])["adam_admin_name"]
+        .apply(lambda s: sorted(s.dropna().unique()))
+        .reset_index()
+    )
+    by_fm["n_adam"] = by_fm["adam_admin_name"].str.len()
+    print(f"#### {iso3} aggregation\n")
+    for _, r in by_fm.iterrows():
+        print(f"- **{r['fm_name']}** (`{r['fm_pcode']}`) — {r['n_adam']} ADAM admin polys")
+        for n in r["adam_admin_name"][:6]:
+            print(f"    - {n}")
+        if r["n_adam"] > 6:
+            print(f"    - _… +{r['n_ge'] - 6} more_")
+        print()
+
+for iso3 in ["ISL","DOM","IRL","AIA","PRT"]:
+    _show_agg(iso3)
+```
+
+### `fm_adm1_only`: FM units surface without ge attach
+
+These countries get FM adm1 rows in the lookup with `adam_admin_id = NULL` and `adam_admin_name = NULL`. ADAM exposure won't join to them at adm1 — by design, because the ADAM admin layer can't disambiguate. The FM rows still appear so other sources (NHC, GDACS via the parallel lookup) can attach via `fm_pcode`.
+
+```{python}
+#| label: fm-adm1-only-table
+target = POLICY_DF[POLICY_DF["action"] == "fm_adm1_only"]["iso3"].tolist()
+rows = []
+for iso3 in target:
+    p = PER_COUNTRY / f"{iso3}.parquet"
+    if not p.exists():
+        continue
+    df = pd.read_parquet(p)
+    fm_names = sorted(df.loc[df["fm_name"].notna(), "fm_name"].unique().tolist())
+    n_adam = int(df["adam_admin_count"].dropna().iloc[0]) if "adam_admin_count" in df else 0
+    rows.append({
+        "iso3": iso3,
+        "FM units surfaced": ", ".join(fm_names[:8]) + (f" (+{len(fm_names)-8} more)" if len(fm_names) > 8 else ""),
+        "n_FM": len(fm_names),
+        "n_adam": n_adam,
+    })
+pd.DataFrame(rows)
+```
+
+### `needs_manual_mapping`: same count, heavy ambiguity
+
+Same FM/ge polygon count but multi_candidate flags suggest boundaries that have shifted between source releases. Best-IoU match is emitted but flagged with a `caveat_note` for downstream consumers.
+
+```{python}
+#| label: nmm-detail
+target = POLICY_DF[POLICY_DF["action"] == "needs_manual_mapping"]["iso3"].tolist()
+diag[diag["iso3"].isin(target)][["iso3","FM","ADAM","clean","low_iou","ambig","mean_iou"]]
+```
+
+## Live coverage check
+
+How much of `storms.adam_exposure` actually attaches to the lookup right now. Anything < 100% needs one of three explanations: a known iso3 misattribution bug, ADAM emitting placeholder names, or a deliberate `fm_adm1_only` / `country_only` policy.
+
+```{python}
+#| label: coverage-table
+if DB_LIVE:
+    cov = COVERAGE.merge(POLICY_DF[["iso3","action"]], on="iso3", how="left")
+    cov["pct"] = (100 * cov["matched"] / cov["adam_names"]).round(0).astype(int)
+    cov["expectation"] = cov.apply(_classify := (lambda r: (
+        "out of scope"     if pd.isna(r["action"]) else
+        "by design (NULL)" if r["action"] in ("fm_adm1_only","country_only") else
+        "expected attach"  if r["pct"] >= 90 else
+        "investigate"      if r["pct"] < 50 else
+        "near-clean"
+    )), axis=1)
+    cov[["iso3","action","adam_names","matched","pct","expectation"]].sort_values(
+        ["expectation","pct"], ascending=[True, False]
+    )
+else:
+    Markdown("_DB unavailable, table skipped_")
+```
+
+## Per-country detail
+
+Every policy-seeded iso3 gets a panel below. Each panel has:
+
+1. **Country policy** — the `[adam_policy.<ISO3>]` block from the TOML, with its rationale.
+2. **Map** — FM polygons filled by lookup outcome (see legend below), ADAM admin polygons overlaid in magenta dashed.
+3. **Per-row lookup table** — one row per FM admin1 unit, showing the source attached (if any), IoU, caveat. This is what the runtime alert SQL actually joins against.
+4. **Overrides for this country** — the relevant `[[adam_row_overrides]]` entries inline, so the editorial decisions are visible alongside the data they affect.
+
+**FM fill color** in the maps:
+
+- <span style="color:#3d9970;font-weight:600">green</span> — source attached cleanly (IoU ≥ 0.7, name aligns)
+- <span style="color:#f39c12;font-weight:600">orange</span> — source attached with weak IoU (0.5–0.7) or via manual remap
+- <span style="color:#e74c3c;font-weight:600">red</span> — source attached but IoU < 0.5 (candidate for review)
+- <span style="color:#7f8c8d;font-weight:600">gray</span> — no source attached (`adam_admin_id = NULL`)
+
+```{python}
+#| label: render-countries
+#| results: asis
+def _format_overrides_toml(iso3: str, ovs: list[dict]) -> str:
+    """Render the iso3's [[adam_row_overrides]] entries as a TOML
+    block for inline display. Hand-rolled — tomllib is read-only and
+    tomli_w isn't a dependency. The render is straightforward because
+    every field is a flat scalar (no nested tables)."""
+    if not ovs:
+        return ""
+    lines = []
+    for ov in ovs:
+        lines.append("[[adam_row_overrides]]")
+        for k, v in ov.items():
+            if v is None:
+                continue
+            if isinstance(v, str):
+                # Escape any embedded quotes for the rendered TOML
+                vv = v.replace('"', '\\"')
+                lines.append(f'{k} = "{vv}"')
+            else:
+                lines.append(f"{k} = {v}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _row_fill_color(row) -> str:
+    """Pick a fill color for an FM polygon based on its lookup row."""
+    if pd.isna(row.get("adam_admin_id")):
+        return ISSUE_COLOR["no_overlap"]  # gray — no source
+    iou = row.get("iou")
+    if pd.isna(iou):
+        return ISSUE_COLOR[None]  # default green
+    if iou >= 0.7:
+        return ISSUE_COLOR[None]  # green
+    if iou >= 0.5:
+        return ISSUE_COLOR["multiple_candidates"]  # orange
+    return ISSUE_COLOR["low_iou"]  # red
+
+
+for iso3 in POLICY_DF["iso3"].tolist():
+    crow_match = summary[summary["iso3"] == iso3]
+    crow = crow_match.iloc[0] if not crow_match.empty else None
+
+    fm = fetch_fm(iso3)
+    if fm is None or len(fm) == 0:
+        fm = gpd.GeoDataFrame()
+    else:
+        # Normalize fm_pcode column for downstream merge with lookup
+        from src.static.adam.inputs import fm_id_and_name_cols
+        pcode_col, name_col = fm_id_and_name_cols(fm, 1)
+        if pcode_col and pcode_col != "fm_pcode":
+            fm = fm.rename(columns={pcode_col: "fm_pcode"})
+        if name_col and name_col != "fm_name":
+            fm = fm.rename(columns={name_col: "fm_name"})
+    adam_admin = fetch_adam(iso3)
+    lk = LOOKUP[
+        (LOOKUP["iso3"] == iso3) & (LOOKUP["admin_level"] == 1)
+    ].copy() if not LOOKUP.empty else pd.DataFrame()
+
+    pol = POLICY.get(iso3, {})
+    action = pol.get("action", "—")
+    overrides_for_iso = OVERRIDES_BY_ISO3.get(iso3, [])
+
+    display(Markdown(f"### {iso3}"))
+
+    # ── Country policy block ──
+    header_parts = [f"**Policy**: `{action}`"]
+    if crow is not None:
+        fm_lvl = int(crow["fm_level"]) if pd.notna(crow["fm_level"]) else "?"
+        header_parts.append(f"**FM level**: adm{fm_lvl}")
+        header_parts.append(f"**FM units**: {int(crow['fm_count'])}")
+        if "adam_admin_count" in crow.index:
+            header_parts.append(f"**ADAM polys**: {int(crow['adam_admin_count'])}")
+    if not lk.empty:
+        n_attached = int(lk["adam_admin_id"].notna().sum())
+        n_null = int(lk["adam_admin_id"].isna().sum())
+        header_parts.append(
+            f"**lookup rows**: {len(lk)} ({n_attached} attached, "
+            f"{n_null} no-source)"
+        )
+    display(Markdown("  ·  ".join(header_parts)))
+
+    if pol.get("note"):
+        display(Markdown(f"> {pol['note']}"))
+
+    if len(fm) == 0:
+        display(Markdown("_No FieldMaps geometry available for this country._"))
+        display(Markdown("***"))
+        continue
+
+    # ── Map ──
+    # One rendering style for every country, so the visual contract is
+    # consistent: FM polygons filled by lookup outcome (green / orange /
+    # red / grey), FM border thick + dark so the regions are always
+    # readable underneath the ADAM overlay, ADAM polygons drawn as bright
+    # pink dashed on top with a white casing for contrast.
+    if not lk.empty and "fm_pcode" in fm.columns:
+        fm_lk = fm.merge(
+            lk[["fm_pcode", "adam_admin_id", "adam_admin_name",
+                "iou", "caveat_kind"]],
+            on="fm_pcode", how="left",
+        )
+    else:
+        fm_lk = fm.assign(
+            adam_admin_id=pd.NA, adam_admin_name=pd.NA,
+            iou=pd.NA, caveat_kind=pd.NA,
+        )
+
+    fm_lk["_color"] = fm_lk.apply(_row_fill_color, axis=1)
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+    # FM polygons — filled by lookup outcome, thick dark border so the
+    # FM units stay readable even when ADAM dashed lines run over them.
+    fm_lk.plot(
+        ax=ax, color=fm_lk["_color"],
+        edgecolor="black", linewidth=1.5, alpha=0.55,
+    )
+    # ADAM polygons — bright pink dashed on a white casing.
+    if len(adam_admin) > 0:
+        adam_admin.plot(
+            ax=ax, facecolor="none", edgecolor="white", linewidth=4.0,
+        )
+        adam_admin.plot(
+            ax=ax, facecolor="none", edgecolor="#e6007a",
+            linewidth=2.0, linestyle=(0, (8, 4)),
+        )
+
+    # FM labels — one per FM polygon (multiple-row aggregate cases would
+    # otherwise stack the same name N× on a region).
+    fm_label_seen: set[str] = set()
+    if len(fm_lk) <= 30:
+        for _, r in fm_lk.iterrows():
+            if r.get("fm_pcode") in fm_label_seen:
+                continue
+            if pd.notna(r.get("fm_name")) and r.get("geometry") is not None:
+                pt = r["geometry"].representative_point()
+                ax.annotate(
+                    r["fm_name"],
+                    xy=(pt.x, pt.y), ha="center", va="center",
+                    fontsize=7, color="black", fontweight="bold",
+                )
+                fm_label_seen.add(r["fm_pcode"])
+    # ADAM labels — same threshold; if a country has > 30 ADAM polygons
+    # (the ISL / DOM aggregate cases) the map is too dense for labels
+    # anyway and the per-row table below carries the names.
+    if len(adam_admin) and len(adam_admin) <= 30:
+        for _, r in adam_admin.iterrows():
+            if pd.notna(r.get("adm1_name")) and r.get("geometry") is not None:
+                pt = r["geometry"].representative_point()
+                ax.annotate(
+                    r["adm1_name"],
+                    xy=(pt.x, pt.y),
+                    xytext=(0, -10), textcoords="offset points",
+                    ha="center", va="top",
+                    fontsize=6, color="#e6007a", style="italic",
+                    fontweight="bold",
+                )
+    ax.set_title(
+        f"{iso3} — FM polygons (filled by lookup outcome, dark border) / "
+        f"ADAM admin polygons (magenta dashed)",
+        fontsize=11,
+    )
+    ax.set_axis_off()
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+    # ── Per-row lookup table ──
+    if not lk.empty:
+        tbl = lk.copy()
+        if "iou" in tbl.columns:
+            tbl["iou"] = tbl["iou"].round(3)
+        # Sort: attached rows first, then NULL-source rows; within each,
+        # by fm_pcode
+        tbl["_has_src"] = tbl["adam_admin_id"].notna().astype(int)
+        tbl = tbl.sort_values(
+            ["_has_src", "fm_pcode"], ascending=[False, True],
+        ).drop(columns="_has_src")
+        cols = [
+            "fm_pcode", "fm_name", "adam_admin_id", "adam_admin_name",
+            "iou", "caveat_kind", "caveat_note",
+        ]
+        cols = [c for c in cols if c in tbl.columns]
+        display(tbl[cols].reset_index(drop=True))
+
+    # ── Overrides for this country (inline TOML) ──
+    if overrides_for_iso:
+        display(Markdown(
+            f"**Active overrides ({len(overrides_for_iso)}):**"
+        ))
+        display(Markdown(
+            "```toml\n" + _format_overrides_toml(iso3, overrides_for_iso)
+            + "\n```"
+        ))
+
+    # Per-row review snippets removed — was generating false positives
+    # (e.g. flagging Redonda as "needs remap" just because the islet is
+    # tiny). Editorial recommendations now live in exploration/REVIEW.md
+    # where each finding has rationale + status field, not a blanket
+    # TOML stub.
+    display(Markdown("***"))
+```
+
+## Known data-quality issues
+
+### Upstream iso3 misattribution (`ocha-lens`)
+
+A handful of iso3s in `storms.adam_exposure` have `admin_name` values that belong to *other countries* — e.g. UMI rows whose admin_name is "Westmoreland" (a Jamaican parish), NLD rows showing "Virgin Gorda" (a VGB cay), FRO rows showing "Santiago De Cuba" (a Cuban province). Root cause is `ocha_lens.datasources.adam.name_to_iso3()`'s `pycountry.search_fuzzy` fallback: when adm0_name doesn't pycountry-resolve cleanly (territory names like "Saint Pierre and Miquelon"), it fuzzy-matches the *adm1 name* instead and grabs whichever iso3 that string hits first.
+
+Affected iso3s (no useful adm1 attach until upstream fixes):
+
+```{python}
+#| label: misattribution-table
+misattributed = ["BES","BLM","FRO","GLP","MAF","NLD","SPM","UMI"]
+if DB_LIVE:
+    with _engine.connect() as _conn:
+        rows = []
+        for iso3 in misattributed:
+            names = pd.read_sql(text(
+                "SELECT DISTINCT admin_name FROM storms.adam_exposure "
+                "WHERE iso3 = :i AND admin_level = 1 LIMIT 5"
+            ), _conn, params={"i": iso3})["admin_name"].dropna().tolist()
+            rows.append({"iso3": iso3, "ADAM emits (sample)": ", ".join(names[:4])})
+    pd.DataFrame(rows)
+else:
+    Markdown("_DB unavailable_")
+```
+
+The lookup is structurally correct for these iso3s; the bad data simply fails to attach (left-join semantics) — safe behaviour.
+
+### Placeholder admin names
+
+ADAM emits literal strings `"---"` and `"Under National Administration"` as GAUL-style placeholders. Most visible on **BMU** (4/4 placeholder rows, 0/9 parishes match). Documented in the policy note for BMU; nothing to do here except hope WFP fixes it.
+
+## Cross-reference: ADAM policy vs GDACS policy
+
+For the iso3s where both bridges have a policy entry, this shows whether the choices agree or diverge — divergence is *expected* in several cases because GDACS and the ADAM admin layer use different admin hierarchies.
+
+```{python}
+#| label: cross-ref
+GDACS_POL = _cfg.get("gdacs_policy", {})
+both = pd.DataFrame([
+    {
+        "iso3": k,
+        "gdacs_policy": GDACS_POL.get(k, {}).get("action", "—"),
+        "adam_policy": POLICY.get(k, {}).get("action", "—"),
+    }
+    for k in sorted(set(GDACS_POL) | set(POLICY))
+])
+both["agree"] = both["gdacs_policy"] == both["adam_policy"]
+both[both["gdacs_policy"] != "—"][both["adam_policy"] != "—"]
+```
+
+Notable divergences:
+
+- **BHS / ATG / KNA**: GDACS = `fm_adm1_only` (whole country = 1 GDACS polygon); ADAM = `accept` (ge_adm1 has real adm1 breakdown).
+- **PRT**: GDACS = `aggregate_gdacs_to_fm` (300+ GDACS adm1 → FM regions); ADAM = `aggregate_adam_to_fm` (29 ge → 20 FM). Same shape, different finer-side count.
+- **MSR**: GDACS = `accept`; ADAM = `country_only` because ADAM's CSV uses settlement names that don't exist in ge_adm1.
+
+## What's left
+
+```{python}
+#| label: whats-left-coverage
+seeded_isos = set(POLICY_DF["iso3"])
+atlantic_isos = set(ATLANTIC_ISO3) if "ATLANTIC_ISO3" in dir() else None
+# Pull ATLANTIC_ISO3 from the build module so the number is always live
+from src.static.adam.inputs import ATLANTIC_ISO3 as _atl  # noqa: E402
+atlantic_isos = set(_atl)
+missing = sorted(atlantic_isos - seeded_isos)
+
+display(Markdown(
+    f"- **Policy coverage of ATLANTIC_ISO3**: "
+    f"{len(seeded_isos & atlantic_isos)} of {len(atlantic_isos)} "
+    f"iso3s have an explicit `[adam_policy]` entry. "
+    + (
+        f"Missing ({len(missing)}): {', '.join(missing)}."
+        if missing else
+        "**All countries covered.**"
+      )
+))
+```
+
+- **Upstream fix in `ocha-lens`** for the iso3 misattribution bug — not blocking this work, but unlocks the ~10 iso3s currently stuck at 0% adm1 attach.
+- **Blob-mirror `ge_adm1.parquet`** — currently lives at `data/static/` (gitignored, 278 MB). Once policy is settled, a single commit can flip the loader from local-first to blob-first.
+- **`needs_manual_mapping` countries** (CUB, KNA, PAN, TTO, SLV, VCT, BRB) — auto-matching is in place but per-row caveats may still be valuable for the boundary-reform cases. CUB / NIC / GRL / ISL / PAN are already handled at the GDACS-side via `[[gdacs_shared_source]]`; ADAM-side per-row notes are a future polish item rather than a blocker.

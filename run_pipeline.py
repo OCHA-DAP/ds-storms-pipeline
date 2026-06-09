@@ -59,6 +59,9 @@ from src.pipelines.nhc import (
     run_nhc_wsp_fcastonly_exp,
     run_nhc_wsp_polygon_matched,
 )
+from src.pipelines.gdacs import run_gdacs_archive, run_gdacs_current
+from src.pipelines.adam import run_adam_archive, run_adam_current
+from src.pipelines.match import run_match
 
 
 def main():
@@ -384,6 +387,79 @@ def main():
         help="Log counts only; don't actually delete anything.",
     )
 
+    # GDACS subparser
+    gdacs_parser = subparsers.add_parser(
+        "gdacs", parents=[common], help="Run GDACS pipeline"
+    )
+    gdacs_parser.add_argument(
+        "--from-date",
+        help="Archive mode: start date (YYYY-MM-DD). If not provided, runs current mode (last `days_back` days).",
+    )
+    gdacs_parser.add_argument(
+        "--to-date",
+        help="Archive mode: end date (YYYY-MM-DD). Defaults to today.",
+    )
+    gdacs_parser.add_argument(
+        "--days-back",
+        type=int,
+        default=7,
+        help="Current mode: how many days back from today (default 7).",
+    )
+    gdacs_parser.add_argument(
+        "--source",
+        choices=["NOAA", "JTWC"],
+        default="NOAA",
+        help="GDACS source filter (default: NOAA)",
+    )
+    gdacs_parser.add_argument(
+        "--all-episodes",
+        action="store_true",
+        help=(
+            "Fetch exposure for every episode of each event (full GDACS "
+            "history), not just the latest. ~Nx more HTTP calls per "
+            "event; per-episode skip via existing rows keeps re-runs cheap."
+        ),
+    )
+
+    # Match subparser (GDACS -> NHC atcf_id, writes storm_id_lookup)
+    subparsers.add_parser(
+        "match", parents=[common], help="Run GDACS->ATCF matching pipeline"
+    )
+
+    # ADAM subparser
+    adam_parser = subparsers.add_parser(
+        "adam", parents=[common], help="Run ADAM pipeline"
+    )
+    adam_parser.add_argument(
+        "--from-date",
+        help="Archive mode: start date (YYYY-MM-DD). If not provided, runs current mode (last `days_back` days).",
+    )
+    adam_parser.add_argument(
+        "--to-date",
+        help="Archive mode: end date (YYYY-MM-DD). Defaults to today.",
+    )
+    adam_parser.add_argument(
+        "--days-back",
+        type=int,
+        default=14,
+        help="Current mode: how many days back from today (default 14).",
+    )
+    adam_parser.add_argument(
+        "--source",
+        choices=["NOAA", "JTWC"],
+        default="NOAA",
+        help="ADAM source filter (default: NOAA)",
+    )
+    adam_parser.add_argument(
+        "--all-episodes",
+        action="store_true",
+        help=(
+            "Fetch exposure for every episode of each event (full ADAM "
+            "history), not just the latest. ~Nx more CSV downloads per "
+            "event; per-episode skip via existing rows keeps re-runs cheap."
+        ),
+    )
+
     # ------------------------------------------------------------------ #
     args = parser.parse_args()
 
@@ -634,6 +710,46 @@ def main():
             mode=args.mode,
             dry_run=args.dry_run,
         )
+    elif args.pipeline == "gdacs":
+        if args.from_date is not None:
+            # Archive mode: date range provided
+            run_gdacs_archive(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                source=args.source,
+                mode=args.mode,
+                chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
+            )
+        else:
+            # Current mode: rolling window from today
+            run_gdacs_current(
+                mode=args.mode,
+                days_back=args.days_back,
+                source=args.source,
+                chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
+            )
+    elif args.pipeline == "match":
+        run_match(mode=args.mode)
+    elif args.pipeline == "adam":
+        if args.from_date is not None:
+            run_adam_archive(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                source=args.source,
+                mode=args.mode,
+                chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
+            )
+        else:
+            run_adam_current(
+                mode=args.mode,
+                days_back=args.days_back,
+                source=args.source,
+                chunksize=args.chunksize,
+                all_episodes=args.all_episodes,
+            )
 
 
 if __name__ == "__main__":

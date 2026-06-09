@@ -1,66 +1,45 @@
-# Databricks Asset Bundle — source-controlled definition of the NHC
-# pipeline job.
+# Databricks Asset Bundle — ONE bundle (`ds-storms-pipeline`) defining TWO
+# independent jobs:
 #
-#   databricks bundle validate -t dev -p default
-#   databricks bundle deploy   -t dev -p default
-#   databricks bundle run nhc_pipeline -t dev -p default
+#   • nhc_pipeline        — NHC tracks + WSP exposure (5 chained tasks),
+#                           dispatched via databricks/dispatch.py
+#   • gdacs_adam_pipeline — GDACS→ADAM→match cascade (3 chained tasks),
+#                           dispatched via databricks/dispatch_gdacs_adam.py
+#
+# The two jobs stay separate in the Workflows UI (own DAG / schedule /
+# compute). "One bundle" just means one databricks.yml deploys both.
+#
+#   databricks bundle validate -t dev  -p DEFAULT
+#   databricks bundle deploy   -t dev  -p DEFAULT
+#   databricks bundle run {nhc_pipeline|gdacs_adam_pipeline} -t dev -p DEFAULT
 #
 # Bundle docs: https://docs.databricks.com/dev-tools/bundles/
 
 bundle:
   name: ds-storms-pipeline
 
-targets:
-  dev:
-    mode: development
-    default: true
-    workspace:
-      profile: default
-    variables:
-      mode: dev
-  prod:
-    mode: production
-    workspace:
-      profile: default
-    variables:
-      mode: prod
-
 variables:
   mode:
     description: Pipeline --mode (dev | prod)
     default: dev
   git_branch:
-    description: Branch the cluster pulls run_pipeline.py from
+    description: Branch the cluster pulls run_pipeline.py / dispatchers from
     default: main
   existing_cluster_id:
-    description: ID of the interactive cluster to run tasks on
+    description: Interactive cluster the NHC tasks run on
     default: "0515-161935-i2w5mxhc"
+  dev_cluster_id:
+    description: Interactive cluster the GDACS/ADAM dev tasks run on
+    default: "0604-214501-kq22m39c"   # zarno GDACS-ADAM dev (isolated lib env)
 
-# =====================================================================
-# Single job, 5 chained tasks. Each task = one logical pipeline stage,
-# with its own status / retry in the DBX UI.
-#
-# Realtime cron (default params) — full cascade runs:
-#   etl → tracks_processing → {tracks_exposure, wsp_processing → wsp_exposure}
-#
-# Backfill — three ways:
-#
-#   1. Backfill the whole cascade for a specific issued_time:
-#      "Run with different parameters" → set issued_time. The etl task
-#      still fires (cheap re-fetch of the live JSON); downstream tasks
-#      use the user-provided issued_time instead of etl's task value.
-#
-#   2. Backfill a single stage:
-#      Right-click the stage task → "Run task" → set whichever filter
-#      applies (issued_time, since, year, overwrite). Only
-#      that task runs. The dispatcher picks up the parameters directly.
-#
-#   3. Run a specific subcommand from the local CLI:
-#      `uv run python run_pipeline.py <subcommand> [...]` — identical
-#      to what the dispatcher would invoke.
-# =====================================================================
 resources:
   jobs:
+
+    # ===================================================================
+    # NHC pipeline — 5 chained tasks (etl → tracks_processing →
+    # {tracks_exposure, wsp_processing → wsp_exposure}). Dispatches via
+    # databricks/dispatch.py. Runs on the interactive cluster.
+    # ===================================================================
     nhc_pipeline:
       name: NHC Pipeline
       git_source:
@@ -69,15 +48,9 @@ resources:
         git_branch: ${var.git_branch}
 
       # Fires at :00 AND :30 of every 3rd hour. The :30 run is a WSP
-      # late-arrival retry: NHC frequently publishes the cycle's WSP zip
-      # after the on-time :00 run, which then finds no WSP and skips it.
-      # Re-running the whole cascade 30 min later is fill-only, not a
-      # rebuild — every stage either short-circuits on an already-present
-      # issued_time (buffers, wsp-matched; the WSP-peek in nhc.py also
-      # skips the multi-MB re-download) or upserts identical rows for the
-      # same advisory (exposure). So the :30 run picks up late WSP without
-      # clobbering anything written on time. To force a rebuild, run with
-      # overwrite=true.
+      # late-arrival retry (NHC often publishes the cycle's WSP zip after
+      # the :00 run); it's fill-only — stages short-circuit on an
+      # already-present issued_time or upsert identical rows.
       schedule:
         quartz_cron_expression: "0 0,30 0/3 * * ?"
         timezone_id: UTC
@@ -96,25 +69,11 @@ resources:
           default: ""
         - name: overwrite      # "true" / ""
           default: ""
-        # Override the task's hardcoded subcommand at run-time. Empty
-        # (default) → task runs its realtime composite. Non-empty →
-        # task runs that single CLI subcommand instead. E.g. set
-        # subcommand=nhc-wsp-exp to backfill just full-WSP exposure.
-        - name: subcommand
+        - name: subcommand     # non-empty overrides the task's composite
           default: ""
-        # Test mode: when non-empty, the etl task pulls CurrentStorms JSON
-        # from this URL instead of the live endpoint. WSP follows the GIS
-        # URL inside the sample JSON, so the whole cascade runs end-to-end
-        # against fixture data. Recommended:
-        #   https://www.nhc.noaa.gov/productexamples/NHC_JSON_Sample.json
-        # Pair with `subcommand=nhc-scrub` to clean up the test rows after.
-        - name: sample_json
+        - name: sample_json    # frozen CurrentStorms JSON URL for smoke tests
           default: ""
-        # Exposure-only filter: limit to admin level(s) 0 and/or 1.
-        # "" → both (default). "0" or "1" → just that level. "0,1" or
-        # "0 1" → both, explicitly. Used to resume an exposure backfill
-        # after one half (e.g. adm0) already wrote rows.
-        - name: admin_level
+        - name: admin_level    # "", "0", "1", or "0,1" — exposure subcmds only
           default: ""
 
       tasks:
@@ -222,3 +181,184 @@ resources:
               - "{{job.parameters.sample_json}}"
               - "{{job.parameters.admin_level}}"
           libraries: *storm_libs
+
+    # ===================================================================
+    # GDACS/ADAM pipeline — 3 chained tasks (gdacs → adam → match).
+    # Dispatches via databricks/dispatch_gdacs_adam.py. Compute is set
+    # per target below (dev: dev_cluster_id; prod: ephemeral job cluster).
+    # ===================================================================
+    gdacs_adam_pipeline:
+      name: GDACS/ADAM Pipeline
+      # Job-scoped (NOT top-level) permission: this workspace tier has
+      # directory ACLs disabled, so a bundle-wide permission fails on the
+      # deployment folder. dsci members (incl. Tristan, not a workspace
+      # admin) can see/run/manage it.
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      # Every 3h (matches the NHC cadence). GDACS/ADAM current-mode is
+      # idempotent (7d/14d lookback), so re-runs skip existing rows.
+      schedule:
+        quartz_cron_expression: "0 0 0/3 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1
+
+      parameters:
+        - name: mode
+          default: ${var.mode}
+        - name: from_date      # YYYY-MM-DD; archive lower bound
+          default: ""
+        - name: to_date        # YYYY-MM-DD; archive upper bound (defaults today)
+          default: ""
+        - name: days_back      # current-mode window; "" => pipeline default
+          default: ""
+        - name: source         # NOAA | JTWC
+          default: "NOAA"
+        - name: all_episodes   # "true" => fetch every episode, not just latest
+          default: ""
+
+      tasks:
+        # Compute (existing_cluster_id vs job_cluster_key) is supplied per
+        # target below: dev -> dev_cluster_id; prod -> ephemeral job cluster.
+        - task_key: gdacs
+          spark_python_task:
+            python_file: databricks/dispatch_gdacs_adam.py
+            source: GIT
+            parameters:
+              - "gdacs"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.from_date}}"
+              - "{{job.parameters.to_date}}"
+              - "{{job.parameters.days_back}}"
+              - "{{job.parameters.source}}"
+              - "{{job.parameters.all_episodes}}"
+          libraries: &gdacs_libs
+            - pypi: { package: "ocha-stratus" }
+            # ocha-lens 0.5.0 is the first release carrying the GDACS/ADAM
+            # APIs (get_exposure_adm0/adm1, match_to_atcf, …). Matches the
+            # pin on main / requirements.txt. Bump when a newer release adds
+            # what we need.
+            - pypi: { package: "ocha-lens==0.5.0" }
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+            - pypi: { package: "geoalchemy2" }
+            - pypi: { package: "databricks-sdk" }
+
+        - task_key: adam
+          depends_on:
+            - task_key: gdacs
+          spark_python_task:
+            python_file: databricks/dispatch_gdacs_adam.py
+            source: GIT
+            parameters:
+              - "adam"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.from_date}}"
+              - "{{job.parameters.to_date}}"
+              - "{{job.parameters.days_back}}"
+              - "{{job.parameters.source}}"
+              - "{{job.parameters.all_episodes}}"
+          libraries: *gdacs_libs
+
+        - task_key: match
+          depends_on:
+            - task_key: adam
+          spark_python_task:
+            python_file: databricks/dispatch_gdacs_adam.py
+            source: GIT
+            # match only takes --mode; dispatch ignores the date/source
+            # params for this subcommand. Positional slots still passed so
+            # the argv contract is uniform across tasks.
+            parameters:
+              - "match"
+              - "{{job.parameters.mode}}"
+              - "{{job.parameters.from_date}}"
+              - "{{job.parameters.to_date}}"
+              - "{{job.parameters.days_back}}"
+              - "{{job.parameters.source}}"
+              - "{{job.parameters.all_episodes}}"
+          libraries: *gdacs_libs
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      profile: DEFAULT
+    variables:
+      mode: dev
+    # NHC tasks use existing_cluster_id (inline). GDACS/ADAM dev runs on
+    # the dedicated dev cluster (isolated lib env).
+    resources:
+      jobs:
+        gdacs_adam_pipeline:
+          tasks:
+            - task_key: gdacs
+              existing_cluster_id: ${var.dev_cluster_id}
+            - task_key: adam
+              existing_cluster_id: ${var.dev_cluster_id}
+            - task_key: match
+              existing_cluster_id: ${var.dev_cluster_id}
+
+  prod:
+    mode: production
+    workspace:
+      profile: DEFAULT
+      # production mode requires an explicit root_path.
+      root_path: /Workspace/Users/adm.zarno1@global.un.org/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      mode: prod
+    # GDACS/ADAM prod runs on an ephemeral single-node job cluster.
+    # (NHC prod keeps its inline existing_cluster_id.)
+    resources:
+      jobs:
+        gdacs_adam_pipeline:
+          job_clusters:
+            - job_cluster_key: gdacs_adam_cluster
+              new_cluster:
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS3_v2"
+                num_workers: 0
+                spark_conf:
+                  spark.databricks.cluster.profile: singleNode
+                  spark.master: "local[*]"
+                custom_tags:
+                  ResourceClass: SingleNode
+                data_security_mode: SINGLE_USER
+                azure_attributes:
+                  availability: ON_DEMAND_AZURE
+                  first_on_demand: 1
+                  spot_bid_max_price: -1
+                # ocha_stratus reads these 14 vars from the env; they live
+                # in the `dsci` secret scope, resolved at cluster launch.
+                # Ephemeral clusters start bare, so the block lives here.
+                spark_env_vars:
+                  DSCI_AZ_DB_DEV_HOST: "{{secrets/dsci/DSCI_AZ_DB_DEV_HOST}}"
+                  DSCI_AZ_DB_DEV_UID: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID}}"
+                  DSCI_AZ_DB_DEV_PW: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW}}"
+                  DSCI_AZ_DB_DEV_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID_WRITE}}"
+                  DSCI_AZ_DB_DEV_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW_WRITE}}"
+                  DSCI_AZ_DB_PROD_HOST: "{{secrets/dsci/DSCI_AZ_DB_PROD_HOST}}"
+                  DSCI_AZ_DB_PROD_UID: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID}}"
+                  DSCI_AZ_DB_PROD_PW: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW}}"
+                  DSCI_AZ_DB_PROD_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID_WRITE}}"
+                  DSCI_AZ_DB_PROD_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW_WRITE}}"
+                  DSCI_AZ_BLOB_DEV_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS}}"
+                  DSCI_AZ_BLOB_DEV_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS_WRITE}}"
+                  DSCI_AZ_BLOB_PROD_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS}}"
+                  DSCI_AZ_BLOB_PROD_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS_WRITE}}"
+          tasks:
+            - task_key: gdacs
+              job_cluster_key: gdacs_adam_cluster
+            - task_key: adam
+              job_cluster_key: gdacs_adam_cluster
+            - task_key: match
+              job_cluster_key: gdacs_adam_cluster

@@ -1,0 +1,19 @@
+flowchart TD
+    START(["1 · run_pipeline adam<br/>--mode (dev | prod)"]):::entry
+    GETEV[["2 · ocha_lens.datasources.adam<br/>get_events"]]:::lens
+    LOOP{{"3 · for each event"}}:::loop
+    LINK[["4 · record link<br/>(every event, even if the CSV 403s)<br/>adam_eventid = event_id from get_events"]]:::local
+    DEDUP[["5 · drop_duplicates<br/>on gdacs_eventid"]]:::local
+    SL[("storms.storm_id_lookup")]:::tbl
+    NOTE["the ADAM API event_id already equals<br/>gdacs_eventid (ADAM ingests GDACS upstream,<br/>shared id space) so no spatial match is needed"]:::note
+
+    START --> GETEV --> LOOP --> LINK --> DEDUP
+    DEDUP == "6 · write: upsert<br/>set adam_eventid, leave atcf_id untouched<br/>(storm_id_lookup_pkey)" ==> SL
+    GETEV -. "why no match step" .-> NOTE
+
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px
+    classDef note fill:#fffbe6,stroke:#caa300,color:#5b4a00,stroke-dasharray:4 3

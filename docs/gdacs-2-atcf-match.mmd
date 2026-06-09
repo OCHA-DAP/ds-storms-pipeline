@@ -1,0 +1,26 @@
+flowchart TD
+    START(["1 · gdacs inline match<br/>/ run_pipeline match"]):::entry
+    LFNT[["2 · load_freshest_nhc_tracks"]]:::local
+    LME[["3 · load_matched_eventids"]]:::local
+    LOOP{{"4 · for each unmatched event"}}:::loop
+    AM[["5 · attempt_match"]]:::local
+    TL[["6 · ocha_lens.datasources.gdacs<br/>get_timeline"]]:::lens
+    M2A[["7 · ocha_lens.datasources.gdacs<br/>match_to_atcf<br/>forecast-cone vote, genesis fallback"]]:::lens
+    UM[["8 · upsert_matches"]]:::local
+    SKIPN(["leave unmatched, retry later"]):::loop
+    NT[("storms.nhc_tracks_geo")]:::tbl
+    SL[("storms.storm_id_lookup")]:::tbl
+
+    START --> LFNT --> LME --> LOOP
+    NT -. "read: freshest per<br/>atcf, valid_time" .-> LFNT
+    SL -. "read: already matched<br/>(atcf_id not null)" .-> LME
+    LOOP --> AM --> TL --> M2A
+    M2A -- "atcf_id" --> UM
+    M2A -- "None" --> SKIPN
+    UM == "9 · write: upsert atcf_id<br/>(storm_id_lookup_pkey)" ==> SL
+
+    classDef entry fill:#e7efff,stroke:#3768b0,color:#10203a,stroke-width:2px
+    classDef lens fill:#efe3ff,stroke:#8a4fd0,color:#2e1457
+    classDef local fill:#fff0d6,stroke:#d6920a,color:#5a3d00
+    classDef loop fill:#eeeeee,stroke:#888888,color:#222222
+    classDef tbl fill:#d8f6e6,stroke:#1f9d63,color:#0a3a26,stroke-width:2px
