@@ -71,7 +71,7 @@ DB_TABLE = "gdacs_fm_lookup"
 LOOKUP_COLUMNS = [
     "iso3", "admin_level", "fm_pcode", "fm_name",
     "gmi_admin", "gdacs_admin_name",
-    "caveat_kind", "caveat_note",
+    "caveat_kind", "caveat_note", "note",
 ]
 
 # Status values that produce a lookup row (others are excluded).
@@ -133,6 +133,7 @@ def build_adm0_row(
         "gdacs_admin_name": gdacs_country_name or iso3,
         "caveat_kind": POLICY_TO_KIND.get(policy_action),
         "caveat_note": policy_note or None,
+        "note": None,  # `note` is per-adm1-unit in the crosswalk; adm0 has none
     }
 
 
@@ -177,11 +178,17 @@ def emit_adm1_rows_for_country(
                      if pd.notna(c) and str(c).strip()),
                     None,
                 )
+                humrev_note = next(
+                    (str(c).strip() for c in g["note"]
+                     if pd.notna(c) and str(c).strip()),
+                    None,
+                ) if "note" in g.columns else None
                 rows.append(_build_adm1_row(
                     iso3, fm_pcode, fm_name,
                     gmi_admin=None, gdacs_admin_name=None,
                     caveat_kind="fm_adm1_only",
                     caveat_note=humrev_caveat or policy_note,
+                    note=humrev_note,
                 ))
             else:
                 logger.warning(
@@ -201,6 +208,7 @@ def emit_adm1_rows_for_country(
                 gmi_admin=None, gdacs_admin_name=None,
                 caveat_kind=STATUS_TO_KIND["fm_only"],
                 caveat_note=_caveat(chosen),
+                note=_note(chosen),
             ))
             continue
 
@@ -212,6 +220,7 @@ def emit_adm1_rows_for_country(
                 gdacs_admin_name=r["gdacs_admin_name"],
                 caveat_kind=STATUS_TO_KIND.get(r["status"]),
                 caveat_note=_caveat(r),
+                note=_note(r),
             ))
 
     return rows
@@ -220,7 +229,7 @@ def emit_adm1_rows_for_country(
 def _build_adm1_row(
     iso3, fm_pcode, fm_name,
     gmi_admin, gdacs_admin_name,
-    caveat_kind, caveat_note,
+    caveat_kind, caveat_note, note=None,
 ) -> dict:
     """Construct an adm1 lookup row dict."""
     if gmi_admin is not None and pd.notna(gmi_admin):
@@ -238,7 +247,17 @@ def _build_adm1_row(
         ),
         "caveat_kind": caveat_kind,
         "caveat_note": caveat_note,
+        "note": note,
     }
+
+
+def _note(row: pd.Series) -> str | None:
+    """Reviewer's detailed `note` column (verbatim) — distinct from and
+    richer than the terse `caveat`. Blank/empty means no note."""
+    val = row.get("note")
+    if pd.notna(val) and str(val).strip():
+        return str(val).strip()
+    return None
 
 
 def _caveat(row: pd.Series) -> str | None:
@@ -340,6 +359,8 @@ def main() -> int:
     logger.info("Loading humanreview crosswalk from %s", args.humrev)
     # utf-8-sig: transparently strips BOM if present
     humrev = pd.read_csv(args.humrev, encoding="utf-8-sig")
+    if "note" not in humrev.columns:
+        humrev["note"] = None  # tolerate older crosswalks without the column
     logger.info("  %d rows across %d iso3s",
                 len(humrev), humrev["iso3"].nunique())
 
