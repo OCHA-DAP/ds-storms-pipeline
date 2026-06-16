@@ -38,6 +38,13 @@ warnings.filterwarnings(
     message=".*GeoSeries.notna.*",
     category=UserWarning,
 )
+# ocha-lens build_merged_wind_buffer fillna(0) on an object-dtype radii
+# Series; fires once per track point. Harmless (radii are numeric).
+warnings.filterwarnings(
+    "ignore",
+    message=".*Downcasting object dtype arrays on .fillna.*",
+    category=FutureWarning,
+)
 
 import ocha_stratus as stratus  # noqa
 

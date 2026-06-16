@@ -21,6 +21,14 @@ load_dotenv()
 
 import ocha_stratus as stratus  # noqa
 
+# ocha-lens build_merged_wind_buffer fillna(0) on an object-dtype radii
+# Series; fires once per track point. Harmless (radii are numeric).
+warnings.filterwarnings(
+    "ignore",
+    message=".*Downcasting object dtype arrays on .fillna.*",
+    category=FutureWarning,
+)
+
 BUFFER_SPEEDS = [34, 50, 64]
 _WIND_BUFFER_BATCH_SIZE = 50
 
