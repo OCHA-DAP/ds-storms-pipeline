@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS storms.adam_fm_lookup
     iou             DOUBLE PRECISION,
     caveat_kind     TEXT,
     caveat_note     TEXT,
+    note            TEXT,
     CONSTRAINT adam_fm_lookup_unique
         UNIQUE NULLS NOT DISTINCT (iso3, admin_level, fm_pcode, adam_admin_id)
 )
@@ -62,6 +63,8 @@ COMMENT ON COLUMN storms.adam_fm_lookup.caveat_kind IS
     'Match-quality / admin-level caveat. NULL means a clean 1:1 match. Observed values: aggregating_from_adam, fm_adm1_only, no_adam_at_adm1, country_only, needs_manual_mapping, aggregated_in_adam, no_adam_source.';
 COMMENT ON COLUMN storms.adam_fm_lookup.caveat_note IS
     'Free-text detail accompanying caveat_kind.';
+COMMENT ON COLUMN storms.adam_fm_lookup.note IS
+    'Reviewer''s detailed reasoning for this row (the human-review `note` column), distinct from and richer than the terse caveat_note. NULL when the reviewer left no extra note.';
 
 CREATE INDEX IF NOT EXISTS idx_adam_fm_lookup_admin_name
     ON storms.adam_fm_lookup (adam_admin_name) WHERE adam_admin_name IS NOT NULL;

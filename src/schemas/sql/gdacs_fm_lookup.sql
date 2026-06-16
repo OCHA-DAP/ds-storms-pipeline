@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS storms.gdacs_fm_lookup
     gdacs_admin_name TEXT,
     caveat_kind      TEXT,
     caveat_note      TEXT,
+    note             TEXT,
     CONSTRAINT gdacs_fm_lookup_unique
         UNIQUE NULLS NOT DISTINCT (iso3, admin_level, fm_pcode, gmi_admin)
 )
@@ -69,6 +70,8 @@ COMMENT ON COLUMN storms.gdacs_fm_lookup.caveat_kind IS
     'Match-quality / admin-level caveat. NULL means a clean 1:1 match. Observed values: fm_adm1_only, no_gdacs_at_adm1, aggregating_from_gdacs, country_only, aggregated_in_gdacs, needs_manual_mapping, no_fm_source.';
 COMMENT ON COLUMN storms.gdacs_fm_lookup.caveat_note IS
     'Free-text detail accompanying caveat_kind (e.g. which units were aggregated).';
+COMMENT ON COLUMN storms.gdacs_fm_lookup.note IS
+    'Reviewer''s detailed reasoning for this row (the human-review `note` column), distinct from and richer than the terse caveat_note. NULL when the reviewer left no extra note.';
 
 CREATE INDEX IF NOT EXISTS idx_gdacs_fm_lookup_gmi_admin
     ON storms.gdacs_fm_lookup (gmi_admin) WHERE gmi_admin IS NOT NULL;

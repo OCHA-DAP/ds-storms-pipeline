@@ -69,7 +69,7 @@ DB_TABLE = "adam_fm_lookup"
 LOOKUP_COLUMNS = [
     "iso3", "admin_level", "fm_pcode", "fm_name",
     "adam_admin_id", "adam_admin_name",
-    "iou", "caveat_kind", "caveat_note",
+    "iou", "caveat_kind", "caveat_note", "note",
 ]
 
 # Status values that produce a lookup row (others are excluded).
@@ -131,6 +131,7 @@ def build_adm0_row(
         "iou": None,
         "caveat_kind": POLICY_TO_KIND.get(policy_action),
         "caveat_note": policy_note or None,
+        "note": None,  # `note` is per-adm1-unit in the crosswalk; adm0 has none
     }
 
 
@@ -175,11 +176,17 @@ def emit_adm1_rows_for_country(
                      if pd.notna(c) and str(c).strip()),
                     None,
                 )
+                humrev_note = next(
+                    (str(c).strip() for c in g["note"]
+                     if pd.notna(c) and str(c).strip()),
+                    None,
+                ) if "note" in g.columns else None
                 rows.append(_build_adm1_row(
                     iso3, fm_pcode, fm_name,
                     adam_id=None, adam_name=None, iou=None,
                     caveat_kind="fm_adm1_only",
                     caveat_note=humrev_caveat or policy_note,
+                    note=humrev_note,
                 ))
             # else: FM silently disappears. The validator's coverage
             # check should have caught this; log a warning here too.
@@ -203,6 +210,7 @@ def emit_adm1_rows_for_country(
                 adam_id=None, adam_name=None, iou=None,
                 caveat_kind=STATUS_TO_KIND["fm_only"],
                 caveat_note=_caveat(chosen),
+                note=_note(chosen),
             ))
             continue
 
@@ -216,6 +224,7 @@ def emit_adm1_rows_for_country(
                 iou=r["iou"],
                 caveat_kind=STATUS_TO_KIND.get(r["status"]),
                 caveat_note=_caveat(r),
+                note=_note(r),
             ))
 
     return rows
@@ -224,7 +233,7 @@ def emit_adm1_rows_for_country(
 def _build_adm1_row(
     iso3, fm_pcode, fm_name,
     adam_id, adam_name, iou,
-    caveat_kind, caveat_note,
+    caveat_kind, caveat_note, note=None,
 ) -> dict:
     """Construct an adm1 lookup row dict."""
     # Coerce types — adam_admin_id is float in the crosswalk because
@@ -248,7 +257,17 @@ def _build_adm1_row(
         "iou": iou,
         "caveat_kind": caveat_kind,
         "caveat_note": caveat_note,
+        "note": note,
     }
+
+
+def _note(row: pd.Series) -> str | None:
+    """Reviewer's detailed `note` column (verbatim) — distinct from and
+    richer than the terse `caveat`. Blank/empty means no note."""
+    val = row.get("note")
+    if pd.notna(val) and str(val).strip():
+        return str(val).strip()
+    return None
 
 
 def _caveat(row: pd.Series) -> str | None:
@@ -354,6 +373,8 @@ def main() -> int:
     # them as Mac Roman) without leaking `﻿` into the first
     # column name on read.
     humrev = pd.read_csv(args.humrev, encoding="utf-8-sig")
+    if "note" not in humrev.columns:
+        humrev["note"] = None  # tolerate older crosswalks without the column
     logger.info("  %d rows across %d iso3s",
                 len(humrev), humrev["iso3"].nunique())
 
