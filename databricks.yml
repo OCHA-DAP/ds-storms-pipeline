@@ -31,6 +31,15 @@ variables:
   dev_cluster_id:
     description: Interactive cluster the GDACS/ADAM dev tasks run on
     default: "0604-214501-kq22m39c"   # zarno GDACS-ADAM dev (isolated lib env)
+  cuba_forecast_job_id:
+    description: >-
+      Job ID the post-ETL trigger fires (fire-and-forget). Empty string
+      => the trigger task no-ops. Defaults to the shared (un-prefixed)
+      Cuba Hurricane Forecast Monitor, which runs `main` and has no
+      schedule of its own — so every NHC deploy kicks the same canonical
+      monitor. Override per target only if a deploy must hit a different
+      one.
+    default: "527252598381643"   # Cuba Hurricane Forecast Monitor (shared, runs main)
 
 resources:
   jobs:
@@ -105,6 +114,22 @@ resources:
             - pypi: { package: "tqdm" }
             - pypi: { package: "geoalchemy2" }
             - pypi: { package: "databricks-sdk" }
+
+        # Fire-and-forget kick of the Cuba Forecast Monitor, right after
+        # ETL. Leaf task (nothing depends on it), parallel to
+        # tracks_processing. trigger_job.py never raises, so a failure to
+        # trigger — or in the monitor itself — cannot fail this run; the
+        # monitor stays fully independent of the storms pipeline.
+        - task_key: trigger_cuba_forecast
+          depends_on:
+            - task_key: etl
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/trigger_job.py
+            source: GIT
+            parameters:
+              - "${var.cuba_forecast_job_id}"
+          libraries: *storm_libs
 
         - task_key: tracks_processing
           depends_on:
