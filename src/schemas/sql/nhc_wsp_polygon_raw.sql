@@ -31,7 +31,7 @@ COMMENT ON COLUMN storms.nhc_wsp_polygon_raw.wind_threshold_kt IS
 COMMENT ON COLUMN storms.nhc_wsp_polygon_raw.percentage IS
     'Lower bound of probability band in percent (0, 5, 10, ..., 90). 0 means <5%, 90 means >90%.';
 COMMENT ON COLUMN storms.nhc_wsp_polygon_raw.geometry IS
-    'MultiPolygon covering the probability band area in WGS84 (EPSG:4326). NULL for the <5% band.';
+    'MultiPolygon covering the probability band area in WGS84 (EPSG:4326).';
 
 -- ============================================================================
 -- Indexes
