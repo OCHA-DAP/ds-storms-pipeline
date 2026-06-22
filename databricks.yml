@@ -47,7 +47,8 @@ resources:
     # ===================================================================
     # NHC pipeline — 5 chained tasks (etl → tracks_processing →
     # {tracks_exposure, wsp_processing → wsp_exposure}). Dispatches via
-    # databricks/dispatch.py. Runs on the interactive cluster.
+    # databricks/dispatch.py. Compute is supplied per target below
+    # (dev: personal interactive cluster; prod: ephemeral Job Compute).
     # ===================================================================
     nhc_pipeline:
       name: NHC Pipeline
@@ -87,7 +88,6 @@ resources:
 
       tasks:
         - task_key: etl
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
             source: GIT
@@ -123,7 +123,6 @@ resources:
         - task_key: trigger_cuba_forecast
           depends_on:
             - task_key: etl
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/trigger_job.py
             source: GIT
@@ -140,7 +139,6 @@ resources:
         - task_key: tracks_processing
           depends_on:
             - task_key: etl
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
             source: GIT
@@ -159,7 +157,6 @@ resources:
         - task_key: tracks_exposure
           depends_on:
             - task_key: tracks_processing
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
             source: GIT
@@ -178,7 +175,6 @@ resources:
         - task_key: wsp_processing
           depends_on:
             - task_key: tracks_processing
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
             source: GIT
@@ -197,7 +193,6 @@ resources:
         - task_key: wsp_exposure
           depends_on:
             - task_key: wsp_processing
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/dispatch.py
             source: GIT
@@ -326,10 +321,24 @@ targets:
       profile: DEFAULT
     variables:
       mode: dev
-    # NHC tasks use existing_cluster_id (inline). GDACS/ADAM dev runs on
-    # the dedicated dev cluster (isolated lib env).
+    # NHC dev runs on the personal interactive cluster; GDACS/ADAM dev runs
+    # on the dedicated dev cluster (isolated lib env).
     resources:
       jobs:
+        nhc_pipeline:
+          tasks:
+            - task_key: etl
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: trigger_cuba_forecast
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: tracks_processing
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: tracks_exposure
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: wsp_processing
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: wsp_exposure
+              existing_cluster_id: ${var.existing_cluster_id}
         gdacs_adam_pipeline:
           tasks:
             - task_key: gdacs
@@ -344,13 +353,48 @@ targets:
     workspace:
       profile: DEFAULT
       # production mode requires an explicit root_path.
-      root_path: /Workspace/Users/adm.zarno1@global.un.org/.bundle/${bundle.name}/${bundle.target}
+      root_path: /Workspace/Users/adm.tdowning@global.un.org/.bundle/${bundle.name}/${bundle.target}
+    # Job runs as the deploying user (adm.tdowning), who holds Manage Run on
+    # the Cuba monitor — so the post-ETL trigger fires. Set explicitly for
+    # production mode and to pin the SINGLE_USER job cluster's identity.
+    run_as:
+      user_name: adm.tdowning@global.un.org
     variables:
-      mode: prod
-    # GDACS/ADAM prod runs on an ephemeral single-node job cluster.
-    # (NHC prod keeps its inline existing_cluster_id.)
+      # TEMPORARY: the prod deployment reads/writes the DEV DB during cutover.
+      # Flip to `prod` once we're ready to write prod tables. NB: this also
+      # routes GDACS/ADAM prod at the DEV DB while set to dev.
+      mode: dev
+    # NHC prod runs on an ephemeral Job Compute cluster (policy bakes in the
+    # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral
+    # single-node job cluster.
     resources:
       jobs:
+        nhc_pipeline:
+          job_clusters:
+            - job_cluster_key: nhc_cluster
+              new_cluster:
+                # Job Compute policy (000C79D951EAF0D6): fixes cluster_type=job,
+                # num_workers=1, STANDARD engine, and injects all dsci secret
+                # env vars (DEV+PROD DB/blob), so no spark_env_vars block needed.
+                policy_id: "000C79D951EAF0D6"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS3_v2"
+                num_workers: 1
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: etl
+              job_cluster_key: nhc_cluster
+            - task_key: trigger_cuba_forecast
+              job_cluster_key: nhc_cluster
+            - task_key: tracks_processing
+              job_cluster_key: nhc_cluster
+            - task_key: tracks_exposure
+              job_cluster_key: nhc_cluster
+            - task_key: wsp_processing
+              job_cluster_key: nhc_cluster
+            - task_key: wsp_exposure
+              job_cluster_key: nhc_cluster
         gdacs_adam_pipeline:
           job_clusters:
             - job_cluster_key: gdacs_adam_cluster
