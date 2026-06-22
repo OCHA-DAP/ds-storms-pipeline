@@ -52,6 +52,12 @@ resources:
     # ===================================================================
     nhc_pipeline:
       name: NHC Pipeline
+      # Job-scoped (NOT top-level) permission: this workspace tier has
+      # directory ACLs disabled, so a bundle-wide permission fails on the
+      # deployment folder. dsci members (incl. Tristan) can see/run/manage it.
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
       git_source:
         git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
         git_provider: gitHub
@@ -399,37 +405,18 @@ targets:
           job_clusters:
             - job_cluster_key: gdacs_adam_cluster
               new_cluster:
+                # Job Compute policy (000C79D951EAF0D6): lets adm.tdowning
+                # create the cluster without the global allow-cluster-create
+                # entitlement (a raw new_cluster 403s with PERMISSION_DENIED),
+                # and injects all dsci DB/blob secrets — so no spark_env_vars
+                # block. Policy fixes cluster_type=job/num_workers=1 and
+                # forbids the singleNode profile.
+                policy_id: "000C79D951EAF0D6"
+                apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 node_type_id: "Standard_DS3_v2"
-                num_workers: 0
-                spark_conf:
-                  spark.databricks.cluster.profile: singleNode
-                  spark.master: "local[*]"
-                custom_tags:
-                  ResourceClass: SingleNode
+                num_workers: 1
                 data_security_mode: SINGLE_USER
-                azure_attributes:
-                  availability: ON_DEMAND_AZURE
-                  first_on_demand: 1
-                  spot_bid_max_price: -1
-                # ocha_stratus reads these 14 vars from the env; they live
-                # in the `dsci` secret scope, resolved at cluster launch.
-                # Ephemeral clusters start bare, so the block lives here.
-                spark_env_vars:
-                  DSCI_AZ_DB_DEV_HOST: "{{secrets/dsci/DSCI_AZ_DB_DEV_HOST}}"
-                  DSCI_AZ_DB_DEV_UID: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID}}"
-                  DSCI_AZ_DB_DEV_PW: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW}}"
-                  DSCI_AZ_DB_DEV_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_UID_WRITE}}"
-                  DSCI_AZ_DB_DEV_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_DEV_PW_WRITE}}"
-                  DSCI_AZ_DB_PROD_HOST: "{{secrets/dsci/DSCI_AZ_DB_PROD_HOST}}"
-                  DSCI_AZ_DB_PROD_UID: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID}}"
-                  DSCI_AZ_DB_PROD_PW: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW}}"
-                  DSCI_AZ_DB_PROD_UID_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_UID_WRITE}}"
-                  DSCI_AZ_DB_PROD_PW_WRITE: "{{secrets/dsci/DSCI_AZ_DB_PROD_PW_WRITE}}"
-                  DSCI_AZ_BLOB_DEV_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS}}"
-                  DSCI_AZ_BLOB_DEV_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_DEV_SAS_WRITE}}"
-                  DSCI_AZ_BLOB_PROD_SAS: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS}}"
-                  DSCI_AZ_BLOB_PROD_SAS_WRITE: "{{secrets/dsci/DSCI_AZ_BLOB_PROD_SAS_WRITE}}"
           tasks:
             - task_key: gdacs
               job_cluster_key: gdacs_adam_cluster
