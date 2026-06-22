@@ -129,6 +129,12 @@ resources:
             source: GIT
             parameters:
               - "${var.cuba_forecast_job_id}"
+              # Scheduled minute of this run (UTC, rounded down): the cron
+              # fires at :00 and :30; the :30 run is only a WSP late-arrival
+              # retry, so the monitor (needs tracks only, landed at :00) is
+              # skipped on it. Anything other than "30" fires (fail-open, so
+              # manual/ad-hoc runs still trigger). See issue #35.
+              - "{{job.trigger.time.minute}}"
           libraries: *storm_libs
 
         - task_key: tracks_processing
