@@ -40,6 +40,13 @@ variables:
       monitor. Override per target only if a deploy must hit a different
       one.
     default: "527252598381643"   # Cuba Hurricane Forecast Monitor (shared, runs main)
+  hti_monitoring_job_id:
+    description: >-
+      Job ID the post-exposure trigger fires (fire-and-forget). Empty
+      string => the trigger task no-ops. Defaults to the shared HTI
+      Hurricane Monitoring job (ds-aa-hti-hurricanes bundle, runs main),
+      which also has its own :50 cron as a fallback.
+    default: "586426884912849"   # HTI Hurricane Monitoring (shared, runs main)
 
 resources:
   jobs:
@@ -214,6 +221,26 @@ resources:
               - "{{job.parameters.admin_level}}"
           libraries: *storm_libs
 
+        # Fire-and-forget kick of the HTI Hurricane Monitoring job, once
+        # everything it reads has landed (tracks + exposure + WSP). Same
+        # isolation contract as trigger_cuba_forecast: trigger_job.py
+        # never raises, so neither a trigger failure nor the monitor
+        # itself can fail this run. Unlike the Cuba kick it fires on the
+        # :30 WSP-retry run too (scheduled_minute passed as "") — the
+        # monitor emails WSP figures, dedups by advisory, and picks up
+        # advisories it deferred when data landed late.
+        - task_key: trigger_hti_monitoring
+          depends_on:
+            - task_key: tracks_exposure
+            - task_key: wsp_exposure
+          spark_python_task:
+            python_file: databricks/trigger_job.py
+            source: GIT
+            parameters:
+              - "${var.hti_monitoring_job_id}"
+              - ""
+          libraries: *storm_libs
+
     # ===================================================================
     # GDACS/ADAM pipeline — 3 chained tasks (gdacs → adam → match).
     # Dispatches via databricks/dispatch_gdacs_adam.py. Compute is set
@@ -345,6 +372,8 @@ targets:
               existing_cluster_id: ${var.existing_cluster_id}
             - task_key: wsp_exposure
               existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: trigger_hti_monitoring
+              existing_cluster_id: ${var.existing_cluster_id}
         gdacs_adam_pipeline:
           tasks:
             - task_key: gdacs
@@ -400,6 +429,8 @@ targets:
             - task_key: wsp_processing
               job_cluster_key: nhc_cluster
             - task_key: wsp_exposure
+              job_cluster_key: nhc_cluster
+            - task_key: trigger_hti_monitoring
               job_cluster_key: nhc_cluster
         gdacs_adam_pipeline:
           job_clusters:
