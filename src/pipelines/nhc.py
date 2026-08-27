@@ -1395,6 +1395,25 @@ def _load_existing_nhc_fcastonly_keys(engine) -> set:
         return {(row[0], row[1]) for row in result}
 
 
+def _fcastonly_row_geom(fcast_wkt, obsv_wkt):
+    """Forecast-only geometry for one buffer row: fcast minus obsv.
+
+    Either WKT may be NULL. A NULL fcast buffer (a wind band the forecast
+    has no radii for — _to_multipolygon stores empties as NULL) yields NULL
+    regardless of obsv; a NULL obsv means nothing observed yet, so the full
+    forecast geometry stands.
+    """
+    from shapely import wkt as shapely_wkt
+
+    if fcast_wkt is None or pd.isna(fcast_wkt):
+        return None
+    fcast_geom = shapely_wkt.loads(fcast_wkt)
+    if obsv_wkt is None or pd.isna(obsv_wkt):
+        return fcast_geom
+    diff = fcast_geom.difference(shapely_wkt.loads(obsv_wkt))
+    return None if diff.is_empty else diff
+
+
 def _write_nhc_tracks_fcastonly_buffer_batch(batch: list[dict], conn, chunksize: int):
     df = pd.DataFrame(batch)
     df.to_sql(
@@ -1419,8 +1438,6 @@ def process_nhc_tracks_fcastonly_buffers(
     overwrite=False,
     issued_time=None,
 ):
-    from shapely import wkt as shapely_wkt
-
     # Realtime short-circuit.
     if issued_time is not None and not overwrite:
         with write_engine.connect() as conn:
@@ -1457,20 +1474,19 @@ def process_nhc_tracks_fcastonly_buffers(
             if key in existing:
                 continue
 
-            fcast_geom = shapely_wkt.loads(row["fcast_geom"])
-
-            if pd.isna(row["obsv_geom"]) or row["obsv_geom"] is None:
-                if key not in warned:
-                    logger.warning(
-                        f"No obsv buffer for {row['atcf_id']} at {row['issued_time']} "
-                        f"— storing full forecast geometry"
-                    )
-                    warned.add(key)
-                result_geom = fcast_geom
-            else:
-                obsv_geom = shapely_wkt.loads(row["obsv_geom"])
-                diff = fcast_geom.difference(obsv_geom)
-                result_geom = None if diff.is_empty else diff
+            has_fcast = not (
+                pd.isna(row["fcast_geom"]) or row["fcast_geom"] is None
+            )
+            has_obsv = not (
+                pd.isna(row["obsv_geom"]) or row["obsv_geom"] is None
+            )
+            if has_fcast and not has_obsv and key not in warned:
+                logger.warning(
+                    f"No obsv buffer for {row['atcf_id']} at {row['issued_time']} "
+                    f"— storing full forecast geometry"
+                )
+                warned.add(key)
+            result_geom = _fcastonly_row_geom(row["fcast_geom"], row["obsv_geom"])
 
             # Defensive: if fcast had a wraparound that snuck past, or the
             # difference produced one, split at the dateline so downstream
