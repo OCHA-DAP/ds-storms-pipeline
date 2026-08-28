@@ -414,7 +414,13 @@ targets:
                 policy_id: "000C79D951EAF0D6"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
-                node_type_id: "Standard_DS3_v2"
+                # DS4_v2 (28 GB), not DS3_v2 (14 GB): the WSP fcastonly
+                # exposure adm1 pass OOM-killed the wsp_exposure task (exit
+                # -9) three times on 2026-08-28 alone, leaving partially
+                # written issuances that the all-levels short-circuit then
+                # treats as done. ~15 min x 8 runs/day, so the cost delta is
+                # negligible next to silent WSP exposure gaps.
+                node_type_id: "Standard_DS4_v2"
                 num_workers: 1
                 data_security_mode: SINGLE_USER
           tasks:

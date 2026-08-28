@@ -107,7 +107,13 @@ def _fallback_issued_time_from_etl() -> str:
         return ""
 
 
-if not ISSUED_TIME:
+# Only fall back to the etl task value when NO time filter was supplied at
+# all. When the caller passed since/until they are asking for a range
+# backfill; filling issued_time here would append BOTH flags downstream, and
+# run_pipeline.py's loaders take the issued_time branch and ignore the range
+# — so a `since=` run-now silently degraded to current-advisory-only
+# (observed 2026-08-27, the post-outage gap "backfill" that filled nothing).
+if not ISSUED_TIME and not SINCE and not UNTIL:
     fallback = _fallback_issued_time_from_etl()
     if fallback:
         ISSUED_TIME = fallback
