@@ -116,7 +116,7 @@ resources:
               - "{{job.parameters.admin_level}}"
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
-            - pypi: { package: "ocha-lens==0.5.1" }
+            - pypi: { package: "ocha-lens==0.6.1" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "rasterio" }
@@ -304,7 +304,7 @@ resources:
             # APIs (get_exposure_adm0/adm1, match_to_atcf, …). Matches the
             # pin on main / requirements.txt. Bump when a newer release adds
             # what we need.
-            - pypi: { package: "ocha-lens==0.5.1" }
+            - pypi: { package: "ocha-lens==0.6.1" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
