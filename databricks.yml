@@ -410,9 +410,10 @@ resources:
               - "ALL"
           libraries: &ibtracs_libs
             - pypi: { package: "ocha-stratus==0.1.7" }
-            # 0.5.1 matches requirements.txt / the other jobs; 0.4.2 (the
-            # old workspace pin) predates calculate_wind_buffers_gdf.
-            - pypi: { package: "ocha-lens==0.5.1" }
+            # 0.6.1 matches requirements.txt / the other jobs (bumped on
+            # main by #45); 0.4.2 (the old workspace pin) predates
+            # calculate_wind_buffers_gdf.
+            - pypi: { package: "ocha-lens==0.6.1" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "netCDF4" }
