@@ -1553,6 +1553,43 @@ _WSP_EXP_KEY_COLS = ["issued_time", "wind_threshold_kt", "percentage", "atcf_id"
 _DEFAULT_ADMIN_LEVELS = [0, 1]
 
 
+_COMPLETION_TABLE_DDL = """
+    CREATE TABLE IF NOT EXISTS storms.exposure_completion (
+        out_table    TEXT NOT NULL,
+        key_val      TIMESTAMP NOT NULL,
+        admin_level  INTEGER NOT NULL,
+        completed_at TIMESTAMP NOT NULL DEFAULT now(),
+        PRIMARY KEY (out_table, key_val, admin_level)
+    )
+"""
+
+
+def _ensure_completion_table(conn) -> None:
+    conn.execute(text(_COMPLETION_TABLE_DDL))
+
+
+def _mark_exposure_complete(
+    engine, out_table: str, key_val, admin_levels: list[int]
+) -> None:
+    """Record that a single-issuance exposure pass fully completed for
+    `out_table` at `key_val`, one marker per admin_level. Called by the
+    runners only after the whole pass finishes — a kill at any earlier
+    point leaves no marker, so the next run recomputes (cheaply: the
+    per-unit done-tracking skips rows already written)."""
+    with engine.begin() as conn:
+        _ensure_completion_table(conn)
+        for al in admin_levels:
+            conn.execute(
+                text(
+                    "INSERT INTO storms.exposure_completion "
+                    "(out_table, key_val, admin_level) VALUES (:t, :v, :al) "
+                    "ON CONFLICT (out_table, key_val, admin_level) "
+                    "DO UPDATE SET completed_at = now()"
+                ),
+                {"t": out_table, "v": key_val, "al": al},
+            )
+
+
 def _exposure_already_done(
     *,
     out_table: str,
@@ -1564,25 +1601,38 @@ def _exposure_already_done(
 ) -> bool:
     """Realtime short-circuit helper for exposure pipelines.
 
-    Returns True only when EVERY requested admin_level has at least one
-    row in `out_table` at `key_col = key_val`. The all-levels check is
-    what makes this safe to call before kicking off an exposure run —
-    a half-done state (adm0 done, adm1 killed mid-way) is not skipped.
+    Returns True only when EVERY requested admin_level has a completion
+    marker in storms.exposure_completion for (out_table, key_val). The
+    markers are written by the runners strictly after a single-issuance
+    pass finishes end-to-end, which closes the blind spot the previous
+    row-presence check had: an OOM-killed run that had already written
+    SOME rows for every admin_level looked "done" and its partial
+    issuance froze as-is (wsp_exposure, 2026-08-28). `key_col` is kept
+    for the caller's log context only — the marker key is (out_table,
+    key_val, admin_level).
     """
+    from sqlalchemy.exc import ProgrammingError
+
     requested = set(admin_levels or _DEFAULT_ADMIN_LEVELS)
     own_engine = session is None
     engine = session.engine if session is not None else stratus.get_engine(stage=mode)
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    f"SELECT DISTINCT admin_level "
-                    f"FROM storms.{out_table} "
-                    f"WHERE {key_col} = :v"
-                ),
-                {"v": key_val},
-            )
-            present = {row[0] for row in rows}
+            try:
+                rows = conn.execute(
+                    text(
+                        "SELECT admin_level FROM storms.exposure_completion "
+                        "WHERE out_table = :t AND key_val = :v"
+                    ),
+                    {"t": out_table, "v": key_val},
+                )
+                present = {row[0] for row in rows}
+            except ProgrammingError:
+                # Marker table not created yet (first run after this change,
+                # possibly on a read-only engine that can't create it) —
+                # nothing is marked complete, so recompute. The writer side
+                # (_mark_exposure_complete, write engine) creates the table.
+                return False
     finally:
         if own_engine:
             engine.dispose()
@@ -1841,12 +1891,18 @@ def _run_track_exp(
     admin_levels,
     session: _ExposureSession | None,
     buffers_log_label: str,
+    completion_key=None,     # single issued/valid_time: mark complete at the end
 ) -> None:
     """Shared body for the 3 inline track-exposure runners.
 
     Builds (or borrows) a session, loads the per-pipeline buffer set, and
     iterates countries with a cheap bbox prefilter before the heavy
     union_all in `_process_buffer_exposure_country`.
+
+    When `completion_key` is set (single-issuance realtime mode), a
+    completion marker is written for every admin_level once the whole
+    pass finishes — NOT on the empty-buffers early return, since empty
+    may just mean upstream hasn't landed this issuance yet.
     """
     import gc
     import warnings
@@ -1924,6 +1980,11 @@ def _run_track_exp(
                 f"admin_level={admin_level} done: {processed} written, "
                 f"{no_intersect} no-intersect, {bbox_skipped} bbox-prefiltered"
             )
+
+        if completion_key is not None:
+            _mark_exposure_complete(
+                engine, out_table, completion_key, admin_levels
+            )
     finally:
         if own_session:
             engine.dispose()
@@ -1967,6 +2028,7 @@ def run_nhc_tracks_fcast_exp(
         countries=countries, overwrite=overwrite, mode=mode,
         admin_levels=admin_levels, session=session,
         buffers_log_label="NHC wind buffers",
+        completion_key=issued_time,
     )
 
 
@@ -2100,6 +2162,7 @@ def run_nhc_tracks_obsv_exp(
         countries=countries, overwrite=overwrite, mode=mode,
         admin_levels=admin_levels, session=session,
         buffers_log_label="NHC observed track buffers",
+        completion_key=valid_time,
     )
 
 
@@ -2220,6 +2283,7 @@ def run_nhc_tracks_fcastonly_exp(
         countries=countries, overwrite=overwrite, mode=mode,
         admin_levels=admin_levels, session=session,
         buffers_log_label="NHC forecast-only track buffers",
+        completion_key=issued_time,
     )
 
 
@@ -2413,6 +2477,7 @@ def _run_exp_year_chunk(
     single_year: int | None = None,
     admin_levels: list[int] | None = None,
     session: _ExposureSession | None = None,
+    completion_key=None,   # single issued_time: mark complete at the end
 ) -> None:
     """Shared year-chunked WSP exposure loop.
 
@@ -2420,6 +2485,13 @@ def _run_exp_year_chunk(
     index across that year, then iterates admin units. Adm/pop are loaded
     once via the shared exposure session (or built if not provided) and
     reused across all years.
+
+    When `completion_key` is set (single-issuance realtime mode), a
+    completion marker is written for every admin_level once the whole
+    pass finishes — but only if at least one polygon was actually
+    processed: an empty load may just mean the WSP for this issuance
+    hasn't been ingested yet, and marking it complete would wrongly
+    short-circuit the :30 retry after the data lands.
     """
     import warnings
     from rasterio.errors import ShapeSkipWarning
@@ -2490,6 +2562,7 @@ def _run_exp_year_chunk(
         }
 
         total_processed = 0
+        saw_data = False
         for year in years:
             logger.info(
                 f"{table_label}: loading year {year} ({filters_desc})…"
@@ -2502,6 +2575,7 @@ def _run_exp_year_chunk(
                 gdf_wsp = gdf_wsp[gdf_wsp["issued_time"] == pd.Timestamp(issued_time)]
                 if gdf_wsp.empty:
                     continue
+            saw_data = True
             n_distinct_it = gdf_wsp["issued_time"].nunique()
             logger.info(
                 f"{table_label}: year {year} → {len(gdf_wsp)} polygons across "
@@ -2554,6 +2628,11 @@ def _run_exp_year_chunk(
             del gdf_wsp, wsp_sindex, buffers_union_prep
 
         logger.info(f"{table_label}: all years done; {total_processed} writes.")
+
+        if completion_key is not None and saw_data:
+            _mark_exposure_complete(
+                engine, out_table, completion_key, admin_levels
+            )
     finally:
         if own_session:
             engine.dispose()
@@ -2604,6 +2683,7 @@ def run_nhc_wsp_exp(
         chunk_source_table="nhc_wsp_polygon_matched",
         admin_levels=admin_levels,
         session=session,
+        completion_key=issued_time,
     )
 
 
@@ -3037,6 +3117,7 @@ def run_nhc_wsp_fcastonly_exp(
         chunk_source_table="nhc_wsp_fcastonly_polygon",
         admin_levels=admin_levels,
         session=session,
+        completion_key=issued_time,
     )
 
 
