@@ -1,10 +1,14 @@
-# Databricks Asset Bundle — ONE bundle (`ds-storms-pipeline`) defining TWO
+# Databricks Asset Bundle — ONE bundle (`ds-storms-pipeline`) defining FOUR
 # independent jobs:
 #
 #   • nhc_pipeline        — NHC tracks + WSP exposure (5 chained tasks),
 #                           dispatched via databricks/dispatch.py
 #   • gdacs_adam_pipeline — GDACS→ADAM→match cascade (3 chained tasks),
 #                           dispatched via databricks/dispatch_gdacs_adam.py
+#   • ibtracs_pipeline    — daily IBTrACS best-track ETL (single task),
+#                           run_pipeline.py ibtracs
+#   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
+#                           run_pipeline.py ecmwf
 #
 # The two jobs stay separate in the Workflows UI (own DAG / schedule /
 # compute). "One bundle" just means one databricks.yml deploys both.
@@ -346,6 +350,126 @@ resources:
               - "{{job.parameters.all_episodes}}"
           libraries: *gdacs_libs
 
+    # ===================================================================
+    # IBTrACS pipeline — single daily task running the full best-track
+    # ETL (run_pipeline.py ibtracs --dataset-type ALL). Replaces the
+    # UI-created "Run IBTrACS" job (638351145729392), which pinned
+    # ocha-lens==0.4.2 — too old for calculate_wind_buffers_gdf — and
+    # failed on import every run with no recorded success. --mode is a
+    # job parameter: dev by default, overridden to prod in the prod
+    # target (these ETLs write the prod DB directly, unlike the NHC
+    # cutover which still points prod at the dev DB).
+    # ===================================================================
+    ibtracs_pipeline:
+      name: Run IBTrACS
+      description: >-
+        Retrieve best track cyclone data from
+        [IBTrACS](https://www.ncei.noaa.gov/products/international-best-track-archive)
+      # Same job-scoped permission rationale as nhc_pipeline: the old
+      # workspace job was owner-locked (adm.itot6), which is exactly how
+      # its stale pin became unfixable by the team.
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      schedule:
+        quartz_cron_expression: "27 0 16 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1
+
+      tags:
+        type: storms
+        output_schema: storms.ibtracs_storms,storms.ibtracs_tracks_geo
+
+      parameters:
+        - name: mode
+          default: ${var.mode}
+
+      tasks:
+        - task_key: download_ibtracs
+          timeout_seconds: 10800
+          health:
+            rules:
+              - metric: RUN_DURATION_SECONDS
+                op: GREATER_THAN
+                value: 7200
+          spark_python_task:
+            python_file: run_pipeline.py
+            source: GIT
+            parameters:
+              - "ibtracs"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+              - "--dataset-type"
+              - "ALL"
+          libraries: &ibtracs_libs
+            - pypi: { package: "ocha-stratus==0.1.7" }
+            # 0.6.1 matches requirements.txt / the other jobs (bumped on
+            # main by #45); 0.4.2 (the old workspace pin) predates
+            # calculate_wind_buffers_gdf.
+            - pypi: { package: "ocha-lens==0.6.1" }
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "netCDF4" }
+            - pypi: { package: "cftime" }
+            - pypi: { package: "xarray" }
+            - pypi: { package: "pandera" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+            - pypi: { package: "geoalchemy2" }
+
+    # ===================================================================
+    # ECMWF pipeline — single daily task running the forecast-track ETL
+    # (run_pipeline.py ecmwf). Replaces the UI-created "Run ECMWF
+    # Storms" job (1053499360455948), broken the same way (its
+    # ocha-lens==0.3.3 pin fails run_pipeline.py's import of the
+    # ibtracs module). Same --mode parameter contract as
+    # ibtracs_pipeline.
+    # ===================================================================
+    ecmwf_pipeline:
+      name: Run ECMWF Storms
+      description: Retrieve ECMWF tropical cyclone forecast tracks
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      schedule:
+        quartz_cron_expression: "46 0 22 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1
+
+      tags:
+        type: storms,forecast
+        output_schema: storms.ecmwf_storms,storms.ecmwf_tracks_geo
+
+      parameters:
+        - name: mode
+          default: ${var.mode}
+
+      tasks:
+        - task_key: download_ecmwf
+          timeout_seconds: 1800
+          spark_python_task:
+            python_file: run_pipeline.py
+            source: GIT
+            parameters:
+              - "ecmwf"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+          libraries: *ibtracs_libs
+
 targets:
   dev:
     mode: development
@@ -382,6 +506,14 @@ targets:
               existing_cluster_id: ${var.dev_cluster_id}
             - task_key: match
               existing_cluster_id: ${var.dev_cluster_id}
+        ibtracs_pipeline:
+          tasks:
+            - task_key: download_ibtracs
+              existing_cluster_id: ${var.existing_cluster_id}
+        ecmwf_pipeline:
+          tasks:
+            - task_key: download_ecmwf
+              existing_cluster_id: ${var.existing_cluster_id}
 
   prod:
     mode: production
@@ -461,3 +593,39 @@ targets:
               job_cluster_key: gdacs_adam_cluster
             - task_key: match
               job_cluster_key: gdacs_adam_cluster
+        # IBTrACS / ECMWF prod: ephemeral single-node Job Compute clusters
+        # (same policy pattern as above), and — unlike the NHC cutover —
+        # mode=prod: these ETLs own the prod storms.ibtracs_* / ecmwf_*
+        # tables, matching the workspace jobs they replace.
+        ibtracs_pipeline:
+          parameters:
+            - name: mode
+              default: prod
+          job_clusters:
+            - job_cluster_key: ibtracs_cluster
+              new_cluster:
+                policy_id: "000C79D951EAF0D6"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS3_v2"
+                num_workers: 1
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: download_ibtracs
+              job_cluster_key: ibtracs_cluster
+        ecmwf_pipeline:
+          parameters:
+            - name: mode
+              default: prod
+          job_clusters:
+            - job_cluster_key: ecmwf_cluster
+              new_cluster:
+                policy_id: "000C79D951EAF0D6"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS3_v2"
+                num_workers: 1
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: download_ecmwf
+              job_cluster_key: ecmwf_cluster
