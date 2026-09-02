@@ -351,14 +351,16 @@ resources:
           libraries: *gdacs_libs
 
     # ===================================================================
-    # IBTrACS pipeline — single daily task running the full best-track
-    # ETL (run_pipeline.py ibtracs --dataset-type ALL). Replaces the
-    # UI-created "Run IBTrACS" job (638351145729392), which pinned
-    # ocha-lens==0.4.2 — too old for calculate_wind_buffers_gdf — and
-    # failed on import every run with no recorded success. --mode is a
-    # job parameter: dev by default, overridden to prod in the prod
-    # target (these ETLs write the prod DB directly, unlike the NHC
-    # cutover which still points prod at the dev DB).
+    # IBTrACS pipeline — 3 chained daily tasks: full best-track ETL
+    # (run_pipeline.py ibtracs --dataset-type ALL) → wind buffers →
+    # population exposure. Replaces the UI-created "Run IBTrACS" job
+    # (638351145729392), which pinned ocha-lens==0.4.2 — too old for
+    # calculate_wind_buffers_gdf — and failed on import every run with
+    # no recorded success (and only covered the ETL; buffers/exposure
+    # previously had no schedule at all). --mode is a job parameter:
+    # dev by default, overridden to prod in the prod target (these ETLs
+    # write the prod DB directly, unlike the NHC cutover which still
+    # points prod at the dev DB).
     # ===================================================================
     ibtracs_pipeline:
       name: Run IBTrACS
@@ -385,7 +387,7 @@ resources:
 
       tags:
         type: storms
-        output_schema: storms.ibtracs_storms,storms.ibtracs_tracks_geo
+        output_schema: storms.ibtracs_storms,storms.ibtracs_tracks_geo,storms.ibtracs_wind_buffers,storms.ibtracs_wind_exposure
 
       parameters:
         - name: mode
@@ -423,6 +425,48 @@ resources:
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
             - pypi: { package: "geoalchemy2" }
+            # Raster stack for the exposure task (WorldPop zonal stats);
+            # shared by all tasks so the whole job uses one library env.
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
+
+        # Wind buffer polygons from the freshly landed tracks. Fill-only
+        # by default (skips already-computed (sid, wind_speed_kt) rows),
+        # writing in batches as it goes — so if a large backfill outruns
+        # the timeout, progress persists and the next daily run resumes
+        # where it left off. NB run_wind_buffers always READS tracks from
+        # the prod DB (hard-coded in src/pipelines/ibtracs.py) and writes
+        # to --mode; coherent in prod, but a dev-target run computes
+        # buffers from prod tracks.
+        - task_key: wind_buffers
+          depends_on:
+            - task_key: download_ibtracs
+          timeout_seconds: 10800
+          spark_python_task:
+            python_file: run_pipeline.py
+            source: GIT
+            parameters:
+              - "wind-buffers"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+          libraries: *ibtracs_libs
+
+        # Population exposure (WorldPop x adm1) from the wind buffers —
+        # the table the cub-hurricanes trigger reads. Same fill-only /
+        # resumable contract as wind_buffers.
+        - task_key: exposure
+          depends_on:
+            - task_key: wind_buffers
+          timeout_seconds: 10800
+          spark_python_task:
+            python_file: run_pipeline.py
+            source: GIT
+            parameters:
+              - "ibtracs-track-exp"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+          libraries: *ibtracs_libs
 
     # ===================================================================
     # ECMWF pipeline — single daily task running the forecast-track ETL
@@ -509,6 +553,10 @@ targets:
         ibtracs_pipeline:
           tasks:
             - task_key: download_ibtracs
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: wind_buffers
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: exposure
               existing_cluster_id: ${var.existing_cluster_id}
         ecmwf_pipeline:
           tasks:
@@ -607,11 +655,19 @@ targets:
                 policy_id: "000C79D951EAF0D6"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
-                node_type_id: "Standard_DS3_v2"
+                # DS4_v2 (28 GB) like nhc_cluster, not DS3_v2: the exposure
+                # task holds WorldPop + FieldMaps adm1 + buffers in memory,
+                # the same workload shape that OOM-killed the NHC WSP
+                # exposure on DS3 (see nhc_cluster note).
+                node_type_id: "Standard_DS4_v2"
                 num_workers: 1
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: download_ibtracs
+              job_cluster_key: ibtracs_cluster
+            - task_key: wind_buffers
+              job_cluster_key: ibtracs_cluster
+            - task_key: exposure
               job_cluster_key: ibtracs_cluster
         ecmwf_pipeline:
           parameters:
