@@ -10,12 +10,12 @@
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
 #
-# The two jobs stay separate in the Workflows UI (own DAG / schedule /
-# compute). "One bundle" just means one databricks.yml deploys both.
+# The jobs stay separate in the Workflows UI (own DAG / schedule /
+# compute). "One bundle" just means one databricks.yml deploys them all.
 #
 #   databricks bundle validate -t dev  -p DEFAULT
 #   databricks bundle deploy   -t dev  -p DEFAULT
-#   databricks bundle run {nhc_pipeline|gdacs_adam_pipeline} -t dev -p DEFAULT
+#   databricks bundle run {nhc_pipeline|gdacs_adam_pipeline|ibtracs_pipeline|ecmwf_pipeline} -t dev -p DEFAULT
 #
 # Bundle docs: https://docs.databricks.com/dev-tools/bundles/
 
@@ -26,11 +26,20 @@ variables:
   mode:
     description: Pipeline --mode (dev | prod)
     default: dev
+  etl_mode:
+    description: >-
+      --mode for the IBTrACS/ECMWF ETL jobs (dev | prod). Separate from
+      `mode` because these ETLs own the prod storms tables and must not
+      follow the NHC cutover (whose prod target still sets `mode: dev`).
+      A separate variable rather than a target-level parameters override:
+      target task/parameter lists APPEND by name rather than merge, which
+      would leave the job with two `mode` parameters.
+    default: dev
   git_branch:
     description: Branch the cluster pulls run_pipeline.py / dispatchers from
     default: main
   existing_cluster_id:
-    description: Interactive cluster the NHC tasks run on
+    description: Interactive cluster the NHC + IBTrACS/ECMWF dev tasks run on
     default: "0515-161935-i2w5mxhc"
   dev_cluster_id:
     description: Interactive cluster the GDACS/ADAM dev tasks run on
@@ -84,6 +93,13 @@ resources:
         pause_status: UNPAUSED
 
       max_concurrent_runs: 1
+
+      # databricks=job is how the pipelines-status dashboard discovers
+      # jobs — the KB flags untagged bundle jobs as a monitoring blind
+      # spot.
+      tags:
+        databricks: job
+        type: storms
 
       parameters:
         - name: mode
@@ -273,6 +289,12 @@ resources:
 
       max_concurrent_runs: 1
 
+      # databricks=job: pipelines-status dashboard discovery (see
+      # nhc_pipeline note).
+      tags:
+        databricks: job
+        type: storms
+
       parameters:
         - name: mode
           default: ${var.mode}
@@ -384,12 +406,21 @@ resources:
       max_concurrent_runs: 1
 
       tags:
+        databricks: job
         type: storms
         output_schema: storms.ibtracs_storms,storms.ibtracs_tracks_geo
 
+      # The old workspace jobs had no on_failure recipients, which is how
+      # they failed daily for months unnoticed. Same recipient convention
+      # as the HTI monitoring jobs.
+      email_notifications:
+        on_failure:
+          - tristan.downing@un.org
+        no_alert_for_skipped_runs: true
+
       parameters:
         - name: mode
-          default: ${var.mode}
+          default: ${var.etl_mode}
 
       tasks:
         - task_key: download_ibtracs
@@ -409,17 +440,17 @@ resources:
               - "--dataset-type"
               - "ALL"
           libraries: &ibtracs_libs
-            - pypi: { package: "ocha-stratus==0.1.7" }
+            # ocha-stratus unpinned to match the other anchors — in dev
+            # all jobs share one interactive cluster, so mixed pins churn
+            # the installed version. netCDF4/cftime/xarray/pandera come in
+            # transitively via ocha-lens.
+            - pypi: { package: "ocha-stratus" }
             # 0.6.1 matches requirements.txt / the other jobs (bumped on
             # main by #45); 0.4.2 (the old workspace pin) predates
             # calculate_wind_buffers_gdf.
             - pypi: { package: "ocha-lens==0.6.1" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
-            - pypi: { package: "netCDF4" }
-            - pypi: { package: "cftime" }
-            - pypi: { package: "xarray" }
-            - pypi: { package: "pandera" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
             - pypi: { package: "geoalchemy2" }
@@ -451,12 +482,19 @@ resources:
       max_concurrent_runs: 1
 
       tags:
+        databricks: job
         type: storms,forecast
         output_schema: storms.ecmwf_storms,storms.ecmwf_tracks_geo
 
+      # Same on_failure rationale as ibtracs_pipeline.
+      email_notifications:
+        on_failure:
+          - tristan.downing@un.org
+        no_alert_for_skipped_runs: true
+
       parameters:
         - name: mode
-          default: ${var.mode}
+          default: ${var.etl_mode}
 
       tasks:
         - task_key: download_ecmwf
@@ -531,9 +569,13 @@ targets:
       # Flip to `prod` once we're ready to write prod tables. NB: this also
       # routes GDACS/ADAM prod at the DEV DB while set to dev.
       mode: dev
+      # The IBTrACS/ECMWF ETLs are NOT part of that cutover — they own the
+      # prod storms tables (matching the workspace jobs they replace).
+      etl_mode: prod
     # NHC prod runs on an ephemeral Job Compute cluster (policy bakes in the
     # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral
-    # single-node job cluster.
+    # single-worker job cluster (num_workers: 1 — the policy forbids the
+    # actual singleNode profile).
     resources:
       jobs:
         nhc_pipeline:
@@ -593,14 +635,11 @@ targets:
               job_cluster_key: gdacs_adam_cluster
             - task_key: match
               job_cluster_key: gdacs_adam_cluster
-        # IBTrACS / ECMWF prod: ephemeral single-node Job Compute clusters
+        # IBTrACS / ECMWF prod: ephemeral single-worker Job Compute clusters
         # (same policy pattern as above), and — unlike the NHC cutover —
         # mode=prod: these ETLs own the prod storms.ibtracs_* / ecmwf_*
         # tables, matching the workspace jobs they replace.
         ibtracs_pipeline:
-          parameters:
-            - name: mode
-              default: prod
           job_clusters:
             - job_cluster_key: ibtracs_cluster
               new_cluster:
@@ -614,9 +653,6 @@ targets:
             - task_key: download_ibtracs
               job_cluster_key: ibtracs_cluster
         ecmwf_pipeline:
-          parameters:
-            - name: mode
-              default: prod
           job_clusters:
             - job_cluster_key: ecmwf_cluster
               new_cluster:
