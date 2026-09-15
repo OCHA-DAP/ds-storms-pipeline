@@ -5,8 +5,8 @@
 #                           dispatched via databricks/dispatch.py
 #   • gdacs_adam_pipeline — GDACS→ADAM→match cascade (3 chained tasks),
 #                           dispatched via databricks/dispatch_gdacs_adam.py
-#   • ibtracs_pipeline    — daily IBTrACS best-track ETL (single task),
-#                           run_pipeline.py ibtracs
+#   • ibtracs_pipeline    — daily IBTrACS ETL → wind buffers → exposure
+#                           (3 chained tasks), run_pipeline.py
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
 #
