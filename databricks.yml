@@ -31,9 +31,9 @@ variables:
       --mode for the IBTrACS/ECMWF ETL jobs (dev | prod). Separate from
       `mode` because these ETLs own the prod storms tables and must not
       follow the NHC cutover (whose prod target still sets `mode: dev`).
-      A separate variable rather than a target-level parameters override:
-      target task/parameter lists APPEND by name rather than merge, which
-      would leave the job with two `mode` parameters.
+      (A per-target parameters override would also merge correctly — by
+      `name`, like tasks by task_key — but one variable reads clearer
+      than two per-job overrides.)
     default: dev
   git_branch:
     description: Branch the cluster pulls run_pipeline.py / dispatchers from
