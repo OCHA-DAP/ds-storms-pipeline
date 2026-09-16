@@ -174,12 +174,16 @@ def main():
     # ------------------------------------------------------------------ #
     ibtracs_exp_parser = subparsers.add_parser(
         "ibtracs-track-exp",
-        parents=[common, exp_common],
+        parents=[common, exp_common, basin_common],
         help="Population exposure from IBTrACS wind buffers",
     )
     ibtracs_exp_parser.add_argument(
         "--since", type=int, metavar="YEAR",
         help="Only include storms from this season year onwards",
+    )
+    ibtracs_exp_parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Recompute and upsert even if results already exist",
     )
 
     # ------------------------------------------------------------------ #
