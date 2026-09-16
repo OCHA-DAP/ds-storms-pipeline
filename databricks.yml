@@ -646,7 +646,11 @@ targets:
                 policy_id: "000C79D951EAF0D6"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
-                node_type_id: "Standard_DS3_v2"
+                # DS4_v2 (28 GB): the full --dataset-type ALL ETL OOM-killed
+                # the very first real run on DS3_v2 (2026-09-16, run
+                # 643238152152676) — the old workspace job never got past
+                # its import error, so DS3 had never actually been tested.
+                node_type_id: "Standard_DS4_v2"
                 num_workers: 1
                 data_security_mode: SINGLE_USER
           tasks:
