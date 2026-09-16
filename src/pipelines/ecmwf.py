@@ -140,12 +140,24 @@ def run_ecmwf(
                     stage=mode,
                     skip_if_missing=skip_if_missing,
                 )
-                process_storms(
-                    dataset=dataset, engine=engine, chunksize=chunksize
-                )
-                process_tracks(
-                    dataset=dataset, engine=engine, chunksize=chunksize
-                )
+                # load_forecasts returns None both when the range is quiet
+                # and when every download failed (e.g. upstream outage) —
+                # it can't tell us which. Skip rather than crash on
+                # None.copy(); staleness is caught by the pipeline registry.
+                if dataset is None:
+                    logger.warning(
+                        f"No ECMWF forecasts retrieved for "
+                        f"{current_start.date()} – {current_end.date()} "
+                        "(quiet period or upstream unavailable); "
+                        "nothing to write."
+                    )
+                else:
+                    process_storms(
+                        dataset=dataset, engine=engine, chunksize=chunksize
+                    )
+                    process_tracks(
+                        dataset=dataset, engine=engine, chunksize=chunksize
+                    )
 
             except Exception as e:
                 logger.error(
@@ -164,6 +176,14 @@ def run_ecmwf(
                 stage=mode,
                 skip_if_missing=skip_if_missing,
             )
+            # See the None-guard note in the chunked branch above.
+            if dataset is None:
+                logger.warning(
+                    f"No ECMWF forecasts retrieved for {start_date.date()} – "
+                    f"{end_date.date()} (quiet period or upstream "
+                    "unavailable); nothing to write."
+                )
+                return
             process_storms(dataset=dataset, engine=engine, chunksize=chunksize)
             process_tracks(dataset=dataset, engine=engine, chunksize=chunksize)
 
