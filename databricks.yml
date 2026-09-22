@@ -29,8 +29,8 @@ variables:
   etl_mode:
     description: >-
       --mode for the IBTrACS/ECMWF ETL jobs (dev | prod). Separate from
-      `mode` because these ETLs own the prod storms tables and must not
-      follow the NHC cutover (whose prod target still sets `mode: dev`).
+      `mode` because these ETLs own the prod storms tables and never
+      followed the (now finished) NHC dev-DB cutover.
       (A per-target parameters override would also merge correctly — by
       `name`, like tasks by task_key — but one variable reads clearer
       than two per-job overrides.)
@@ -565,12 +565,12 @@ targets:
     run_as:
       user_name: adm.tdowning@global.un.org
     variables:
-      # TEMPORARY: the prod deployment reads/writes the DEV DB during cutover.
-      # Flip to `prod` once we're ready to write prod tables. NB: this also
-      # routes GDACS/ADAM prod at the DEV DB while set to dev.
-      mode: dev
-      # The IBTrACS/ECMWF ETLs are NOT part of that cutover — they own the
-      # prod storms tables (matching the workspace jobs they replace).
+      # PROD data-plane since 2026-09-22: the dev DB lost public network
+      # access that day, so the NHC + GDACS/ADAM jobs now read/write the
+      # prod storms.* tables (bootstrapped via scripts/init_db_nhc.py,
+      # init_db_gdacs_adam.py, init_db_storm_id_lookup.py) and read the
+      # FieldMaps mirror from the prod blob (copy_blobs_between_stages.py).
+      mode: prod
       etl_mode: prod
     # NHC prod runs on an ephemeral Job Compute cluster (policy bakes in the
     # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral

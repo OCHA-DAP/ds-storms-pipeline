@@ -25,7 +25,11 @@ import time
 from pathlib import Path
 
 # Make `src.*` importable when run as `uv run python scripts/...`.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+try:
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+except NameError:  # DBX spark_python_task exec context has no __file__
+    _HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..")))
 
 import coloredlogs  # noqa: E402
 import ocha_stratus as stratus  # noqa: E402
