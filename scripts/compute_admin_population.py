@@ -46,9 +46,7 @@ from src.utils.exposure import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_FILE = (
-    Path(__file__).parent.parent / "src/schemas/sql/admin_population.sql"
-)
+SCHEMA_FILE = Path(_HERE).parent / "src/schemas/sql/admin_population.sql"
 TABLE = "admin_population"
 SCHEMA = "storms"
 
