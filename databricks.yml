@@ -72,6 +72,7 @@ resources:
     # ===================================================================
     nhc_pipeline:
       name: NHC Pipeline
+      description: "Retrieve [National Hurricane Center](https://www.nhc.noaa.gov/) forecasts and compute wind buffers and population exposure"
       # Job-scoped (NOT top-level) permission: this workspace tier has
       # directory ACLs disabled, so a bundle-wide permission fails on the
       # deployment folder. dsci members (incl. Tristan) can see/run/manage it.
@@ -99,7 +100,10 @@ resources:
       # spot.
       tags:
         databricks: job
-        type: storms
+        type: dataset-ingest
+        hazard: tropical-cyclone
+        kb: storms-pipeline
+        output_schema: storms.nhc_storms,storms.nhc_tracks_geo,storms.nhc_tracks_fcast_exposure,storms.nhc_tracks_obsv_exposure,storms.nhc_wsp_exposure
 
       parameters:
         - name: mode
@@ -268,6 +272,7 @@ resources:
     # ===================================================================
     gdacs_adam_pipeline:
       name: GDACS/ADAM Pipeline
+      description: "Retrieve [GDACS](https://www.gdacs.org/) cyclone events and WFP ADAM exposure and match them to NHC storms"
       # Job-scoped (NOT top-level) permission: this workspace tier has
       # directory ACLs disabled, so a bundle-wide permission fails on the
       # deployment folder. dsci members (incl. Tristan, not a workspace
@@ -293,7 +298,10 @@ resources:
       # nhc_pipeline note).
       tags:
         databricks: job
-        type: storms
+        type: dataset-ingest
+        hazard: tropical-cyclone
+        kb: storms-pipeline
+        output_schema: storms.gdacs_exposure,storms.adam_exposure,storms.storm_id_lookup
 
       parameters:
         - name: mode
@@ -384,9 +392,7 @@ resources:
     # ===================================================================
     ibtracs_pipeline:
       name: Run IBTrACS
-      description: >-
-        Retrieve best track cyclone data from
-        [IBTrACS](https://www.ncei.noaa.gov/products/international-best-track-archive)
+      description: "Retrieve best track cyclone data from [IBTrACS](https://www.ncei.noaa.gov/products/international-best-track-archive)"
       # Same job-scoped permission rationale as nhc_pipeline: the old
       # workspace job was owner-locked (adm.itot6), which is exactly how
       # its stale pin became unfixable by the team.
@@ -407,7 +413,9 @@ resources:
 
       tags:
         databricks: job
-        type: storms
+        type: dataset-ingest
+        hazard: tropical-cyclone
+        kb: storms-pipeline
         output_schema: storms.ibtracs_storms,storms.ibtracs_tracks_geo
 
       # The old workspace jobs had no on_failure recipients, which is how
@@ -465,7 +473,7 @@ resources:
     # ===================================================================
     ecmwf_pipeline:
       name: Run ECMWF Storms
-      description: Retrieve ECMWF tropical cyclone forecast tracks
+      description: "Retrieve ECMWF ensemble cyclone forecast tracks from the [UCAR Geoscience Data Exchange](https://gdex.ucar.edu/datasets/d330003/)"
       permissions:
         - group_name: dsci
           level: CAN_MANAGE
@@ -483,7 +491,9 @@ resources:
 
       tags:
         databricks: job
-        type: storms,forecast
+        type: dataset-ingest
+        hazard: tropical-cyclone
+        kb: storms-pipeline
         output_schema: storms.ecmwf_storms,storms.ecmwf_tracks_geo
 
       # Same on_failure rationale as ibtracs_pipeline.
