@@ -56,7 +56,6 @@ PHASE_1 = [
     ("storm_id_lookup", None),
     ("gdacs_fm_lookup", None),
     ("adam_fm_lookup", None),
-    ("exposure_completion", "key_val"),
     ("gdacs_exposure", "valid_time"),
     ("adam_exposure", "valid_time"),
     ("nhc_tracks_obsv_exposure", "valid_time"),
@@ -65,6 +64,8 @@ PHASE_1 = [
     ("nhc_wsp_exposure", "issued_time"),
     ("nhc_wsp_fcastonly_exposure", "issued_time"),
     ("ibtracs_wind_exposure", None),
+    # Last: marks issuances "fully done"; must never land before their rows.
+    ("exposure_completion", "key_val"),
 ]
 PHASE_2 = [
     ("ibtracs_wind_buffers", None),
@@ -75,6 +76,9 @@ PHASE_2 = [
     ("nhc_wsp_polygon_matched", "issued_time"),
     ("nhc_wsp_fcastonly_polygon", "issued_time"),
 ]
+# Tables without a time column that are too big for one transaction:
+# chunk on this expression (IBTrACS sid starts with the season year).
+CHUNK_EXPR = {"ibtracs_wind_exposure": "substr(sid, 1, 4)"}
 # Created in prod from the repo DDL if absent (they never existed there).
 ENSURE_DDL = {
     "ibtracs_wind_buffers": "ibtracs_wind_buffers.sql",
@@ -121,6 +125,11 @@ def chunks(dev_conn, table, tcol, cutoff):
     """(lo, hi) bounds per calendar year below the cutoff; [(None, None)] if
     the table has no time column."""
     if tcol is None:
+        if table in CHUNK_EXPR:
+            keys = dev_conn.execute(
+                text(f"select distinct {CHUNK_EXPR[table]} k from {SCHEMA}.{table} order by 1")
+            ).scalars().all()
+            return [("key", k) for k in keys]
         return [(None, None)]
     where = f"where {tcol} < :cutoff" if cutoff is not None else ""
     lo, hi = dev_conn.execute(
@@ -132,8 +141,11 @@ def chunks(dev_conn, table, tcol, cutoff):
     return [(f"{y}-01-01", f"{y + 1}-01-01") for y in range(lo.year, hi.year + 1)]
 
 
-def where_clause(tcol, lo, hi, cutoff):
+def where_clause(tcol, lo, hi, cutoff, table=None):
     parts = []
+    if lo == "key":
+        k = str(hi).replace("'", "''")
+        return f"where {CHUNK_EXPR[table]} = '{k}'"
     if lo is not None:
         parts += [f"{tcol} >= '{lo}'", f"{tcol} < '{hi}'"]
     if tcol is not None and cutoff is not None:
@@ -142,10 +154,47 @@ def where_clause(tcol, lo, hi, cutoff):
 
 
 def run(tables, dry_run):
-    dev_eng = stratus.get_engine("dev")
+    # Autocommit: no transaction held open on dev between statements.
+    dev_eng = stratus.get_engine("dev").execution_options(isolation_level="AUTOCOMMIT")
     # Dry runs only read, so they work with read creds (e.g. from a laptop).
     prod_eng = stratus.get_engine("prod", write=not dry_run)
     summary = []
+    try:
+        _run(dev_eng, prod_eng, tables, dry_run, summary)
+    finally:
+        log("SUMMARY table | cutoff | dev_candidates | prod_before(below cutoff) | inserted")
+        for row in summary:
+            log("  " + " | ".join(str(x) for x in row))
+
+
+def fill_nhc_storm_names(dry_run):
+    """Prod nhc_storms has NULL name/storm_id for rows the archive ETL wrote
+    without them; dev has the values. Fill ONLY prod NULLs, never overwrite."""
+    dev_eng = stratus.get_engine("dev").execution_options(isolation_level="AUTOCOMMIT")
+    prod_eng = stratus.get_engine("prod", write=not dry_run)
+    with dev_eng.connect() as d:
+        rows = d.execute(text(
+            "select atcf_id, name, storm_id from storms.nhc_storms "
+            "where name is not null and name <> 'NaN'")).all()
+    with prod_eng.connect() as p:
+        targets = {r[0] for r in p.execute(text(
+            "select atcf_id from storms.nhc_storms where name is null or name = 'NaN'"))}
+        fill = [r for r in rows if r[0] in targets]
+        log(f"nhc_storms names: prod NULL/NaN={len(targets)} fillable_from_dev={len(fill)}")
+        if dry_run or not fill:
+            return
+        n = 0
+        for atcf_id, name, storm_id in fill:
+            n += p.execute(text(
+                "update storms.nhc_storms set name = :n, "
+                "storm_id = coalesce(storm_id, :sid) "
+                "where atcf_id = :a and (name is null or name = 'NaN')"),
+                {"n": name, "sid": storm_id, "a": atcf_id}).rowcount
+        p.commit()
+        log(f"nhc_storms names: filled {n}")
+
+
+def _run(dev_eng, prod_eng, tables, dry_run, summary):
     with dev_eng.connect() as dconn, prod_eng.connect() as pconn:
         for table, _ in tables:
             if table in ENSURE_DDL and not table_exists(pconn, table):
@@ -170,11 +219,15 @@ def run(tables, dry_run):
             cols, skipped = copy_columns(dconn, pconn, table)
             cutoff = None
             if tcol is not None:
-                prod_min = pconn.execute(
-                    text(f"select min({tcol}) from {SCHEMA}.{table}")
-                ).scalar()
-                cutoff = min(str(prod_min), CUTOVER) if prod_min is not None else CUTOVER
-            n_prod_before = pconn.execute(text(f"select count(*) from {SCHEMA}.{table}")).scalar()
+                # Always the cutover, never prod's own min: prod may hold a few
+                # rows older than the cutover (e.g. ADAM backfilled an older
+                # episode) and using its min would drop real history.
+                # "Prod wins" is enforced by ON CONFLICT DO NOTHING.
+                cutoff = CUTOVER
+            # Live jobs only write at/after the cutover, so counting below it
+            # is race-free; tables without a time column can race (warn only).
+            below = f"where {tcol} < '{cutoff}'" if tcol is not None else ""
+            n_prod_before = pconn.execute(text(f"select count(*) from {SCHEMA}.{table} {below}")).scalar()
             n_cand = dconn.execute(
                 text(f"select count(*) from {SCHEMA}.{table} {where_clause(tcol, None, None, cutoff)}")
             ).scalar()
@@ -190,7 +243,7 @@ def run(tables, dry_run):
                 # End SQLAlchemy's implicit transaction so each chunk is its
                 # own explicit transaction on the raw connection.
                 pconn.commit()
-                w = where_clause(tcol, lo, hi, cutoff)
+                w = where_clause(tcol, lo, hi, cutoff, table)
                 with tempfile.TemporaryFile() as buf:
                     draw = dconn.connection.dbapi_connection.cursor()
                     draw.copy_expert(
@@ -221,24 +274,22 @@ def run(tables, dry_run):
                     log(f"  {table} [{lo or 'all'}..{hi or ''}] staged={staged} "
                         f"inserted={ins} ({size / 1e6:.0f} MB)")
                 time.sleep(0.5)  # be gentle with the shared prod server
-            n_prod_after = pconn.execute(text(f"select count(*) from {SCHEMA}.{table}")).scalar()
+            n_prod_after = pconn.execute(text(f"select count(*) from {SCHEMA}.{table} {below}")).scalar()
             if n_prod_after != n_prod_before + inserted:
-                raise SystemExit(
-                    f"{table}: count check failed before={n_prod_before} "
-                    f"inserted={inserted} after={n_prod_after}"
-                )
+                msg = (f"{table}: count check mismatch before={n_prod_before} "
+                       f"inserted={inserted} after={n_prod_after}")
+                if tcol is not None:
+                    raise SystemExit(msg)
+                log("WARNING " + msg + " (no time column: concurrent live writes possible)")
             pconn.execute(text(f"ANALYZE {SCHEMA}.{table}"))
             pconn.commit()
             summary.append((table, cutoff, n_cand, n_prod_before, inserted))
             log(f"{table}: done inserted={inserted} conflicts_skipped={n_cand - inserted} "
-                f"prod {n_prod_before} -> {n_prod_after}")
-
-    log("SUMMARY table | cutoff | dev_candidates | prod_before | inserted")
-    for row in summary:
-        log("  " + " | ".join(str(x) for x in row))
+                f"prod(below cutoff) {n_prod_before} -> {n_prod_after}")
 
 
 if __name__ == "__main__":
+    sys.argv = [x for x in sys.argv if x != ""]  # DBX passes "" for an empty param
     ap = argparse.ArgumentParser()
     ap.add_argument("--phase", choices=["1", "2"], required=True)
     ap.add_argument("--dry-run", action="store_true")
@@ -249,3 +300,5 @@ if __name__ == "__main__":
         tabs = [t for t in tabs if t[0] in a.tables]
     log(f"phase={a.phase} dry_run={a.dry_run} tables={[t for t, _ in tabs]}")
     run(tabs, a.dry_run)
+    if a.phase == "1" and not a.tables:
+        fill_nhc_storm_names(a.dry_run)
