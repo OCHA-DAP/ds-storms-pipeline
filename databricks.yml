@@ -88,10 +88,11 @@ resources:
       # late-arrival retry (NHC often publishes the cycle's WSP zip after
       # the :00 run); it's fill-only — stages short-circuit on an
       # already-present issued_time or upsert identical rows.
+      # No pause_status on any schedule: dev (mode: development) then deploys
+      # PAUSED and prod UNPAUSED. An explicit UNPAUSED overrides dev-mode pausing.
       schedule:
         quartz_cron_expression: "0 0,30 0/3 * * ?"
         timezone_id: UTC
-        pause_status: UNPAUSED
 
       max_concurrent_runs: 1
 
@@ -290,7 +291,6 @@ resources:
       schedule:
         quartz_cron_expression: "0 0 0/3 * * ?"
         timezone_id: UTC
-        pause_status: UNPAUSED
 
       max_concurrent_runs: 1
 
@@ -407,7 +407,6 @@ resources:
       schedule:
         quartz_cron_expression: "27 0 16 * * ?"
         timezone_id: UTC
-        pause_status: UNPAUSED
 
       max_concurrent_runs: 1
 
@@ -485,7 +484,6 @@ resources:
       schedule:
         quartz_cron_expression: "46 0 22 * * ?"
         timezone_id: UTC
-        pause_status: UNPAUSED
 
       max_concurrent_runs: 1
 
