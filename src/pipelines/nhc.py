@@ -13,7 +13,6 @@ import warnings
 from contextlib import contextmanager, nullcontext
 from functools import partial
 
-import coloredlogs
 import geopandas as gpd
 import ocha_lens as lens
 import ocha_lens.datasources.nhc as _lens_nhc
@@ -654,10 +653,6 @@ def run_nhc_current(
     URL instead of the live NHC endpoint (test mode). WSP polygons still
     flow from the GIS URL embedded in the JSON, exactly like realtime.
     """
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
 
     logger.info("Starting NHC Current Storms ETL pipeline...")
     engine = stratus.get_engine(stage=mode, write=True)
@@ -776,10 +771,6 @@ def run_nhc_scrub(
     All deletes commit as a single transaction; any failure rolls the
     whole scrub back.
     """
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
 
     if not atcf_ids:
         raise ValueError("atcf_ids must be non-empty")
@@ -870,10 +861,6 @@ def run_nhc_archive(
     chunksize : int
         Number of rows per batch insert to database
     """
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
 
     # Determine year range
     if end_year is None:
@@ -1101,6 +1088,7 @@ def process_nhc_tracks_fcast_buffers(
             gdf_tracks.groupby(["atcf_id", "issued_time"]),
             unit="issuance",
             leave=False,
+            disable=None,
         ):
             gdf_buffers = calculate_wind_buffers_gdf(
                 group, quad_cols_format="quadrant_radius_{speed}_{quad}"
@@ -1129,10 +1117,6 @@ def run_nhc_tracks_fcast_buffers(
     overwrite=False,
     issued_time=None,
 ):
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting NHC wind buffers pipeline...")
     read_engine = stratus.get_engine(stage=write_mode)
     write_engine = stratus.get_engine(stage=write_mode, write=True)
@@ -1284,6 +1268,7 @@ def process_nhc_tracks_obsv_buffers(
             gdf_obsv.groupby("atcf_id"),
             unit="storm",
             leave=False,
+            disable=None,
         ):
             sorted_times = sorted(storm_gdf["issued_time"].unique())
             for t in sorted_times:
@@ -1319,10 +1304,6 @@ def run_nhc_tracks_obsv_buffers(
     overwrite=False,
     issued_time=None,
 ):
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting NHC observational track buffers pipeline...")
     read_engine = stratus.get_engine(stage=write_mode)
     write_engine = stratus.get_engine(stage=write_mode, write=True)
@@ -1520,10 +1501,6 @@ def run_nhc_tracks_fcastonly_buffers(
     overwrite=False,
     issued_time=None,
 ):
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting NHC forecast-only track buffers pipeline...")
     # Both input tables (fcast_buffers, obsv_buffers) live in the same DB as the output
     engine = stratus.get_engine(stage=write_mode, write=True)
@@ -2594,6 +2571,7 @@ def _run_exp_year_chunk(
                     desc=f"{table_label} {year} adm{admin_level}",
                     unit="country",
                     leave=False,
+                    disable=None,
                 )
                 for iso3, country_units, cb in pbar:
                     if not _bbox_overlaps(cb, buffers_bbox):
@@ -2937,10 +2915,6 @@ def run_nhc_wsp_fcastonly_polygons(
     overwrite: bool = False,
     chunksize: int = 500,
 ) -> None:
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting NHC WSP forecast-only polygon pipeline...")
     engine = stratus.get_engine(stage=mode, write=True)
     try:
@@ -3222,10 +3196,6 @@ def run_nhc_realtime(
     save_dir: str = "/tmp",
     chunksize: int = 10000,
 ) -> None:
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting NHC realtime pipeline...")
 
     engine = stratus.get_engine(stage=mode, write=True)

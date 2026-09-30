@@ -1,5 +1,11 @@
 import argparse
 import logging
+
+# Databricks Runtime hooks pandas to attach a Spark usage logger, which
+# cannot work on a Python task (no JVM) and warns once per process from
+# pyspark/pandas/__init__.py. Silence that logger before pandas loads.
+logging.getLogger("pyspark.pandas.usage_logger").setLevel(logging.ERROR)
+
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -15,23 +21,29 @@ def _parse_it(value):
         return None
     return pd.to_datetime(value).to_pydatetime()
 
+
+# The single logging setup for every pipeline. Modules only do
+# `logger = logging.getLogger(__name__)`; nothing else installs handlers.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 for _name in (
-    "fsspec", "asyncio", "urllib3", "azure", "uamqp", "rasterio",
-    "boto3", "botocore", "s3transfer",
+    "fsspec",
+    "asyncio",
+    "urllib3",
+    "azure",
+    "uamqp",
+    "rasterio",
+    "boto3",
+    "botocore",
+    "s3transfer",
+    # py4j logs a "Received command c" heartbeat every second at INFO for
+    # the whole run, which was 99% of the IBTrACS job log.
+    "py4j",
 ):
     logging.getLogger(_name).setLevel(logging.WARNING)
-
-# DBR auto-instruments pandas with a Spark usage logger that fails to
-# attach on Python tasks (no JVM in the executor). The WARNING is
-# emitted every time run_pipeline.py imports pandas, which floods the
-# DBX run logs. Suppress it at the source.
-logging.getLogger("pyspark.databricks.pandas").setLevel(logging.ERROR)
-logging.getLogger("pyspark.databricks.pandas.usage_logger").setLevel(logging.ERROR)
 
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import (
@@ -91,41 +103,52 @@ def main():
     #   forced recompute: --overwrite (combine with any of the above)
     time_filter_common = argparse.ArgumentParser(add_help=False)
     time_filter_common.add_argument(
-        "--since", metavar="YYYY-MM-DD",
+        "--since",
+        metavar="YYYY-MM-DD",
         help="Inclusive lower bound on issued_time / valid_time",
     )
     time_filter_common.add_argument(
-        "--until", metavar="YYYY-MM-DD",
+        "--until",
+        metavar="YYYY-MM-DD",
         help="Exclusive upper bound on issued_time / valid_time",
     )
     time_filter_common.add_argument(
-        "--issued-time", metavar="YYYY-MM-DDTHH",
+        "--issued-time",
+        metavar="YYYY-MM-DDTHH",
         help=(
             "Process exactly this single issued_time (or valid_time for "
             "obsv pipelines). Mutually exclusive with --since/--until."
         ),
     )
     time_filter_common.add_argument(
-        "--overwrite", action="store_true",
+        "--overwrite",
+        action="store_true",
         help="Recompute and upsert even if results already exist",
     )
 
     # Storm-basin filter, used by every NHC pipeline (buffer, WSP, exposure).
     basin_common = argparse.ArgumentParser(add_help=False)
     basin_common.add_argument(
-        "--basin", metavar="BASIN",
+        "--basin",
+        metavar="BASIN",
         help="Limit to a specific basin (e.g. NA, EP)",
     )
 
     # Exposure-specific filters (storm-keyed pipelines don't have these).
     exp_common = argparse.ArgumentParser(add_help=False)
     exp_common.add_argument(
-        "--countries", nargs="+", metavar="ISO3",
+        "--countries",
+        nargs="+",
+        metavar="ISO3",
         help="Limit to specific country ISO3 codes",
     )
     exp_common.add_argument(
-        "--admin-level", type=int, choices=[0, 1], action="append",
-        metavar="N", dest="admin_level",
+        "--admin-level",
+        type=int,
+        choices=[0, 1],
+        action="append",
+        metavar="N",
+        dest="admin_level",
         help=(
             "Admin level to compute exposure for (repeatable). "
             "Default: both 0 and 1."
@@ -178,7 +201,9 @@ def main():
         help="Population exposure from IBTrACS wind buffers",
     )
     ibtracs_exp_parser.add_argument(
-        "--since", type=int, metavar="YEAR",
+        "--since",
+        type=int,
+        metavar="YEAR",
         help="Only include storms from this season year onwards",
     )
 
@@ -201,7 +226,8 @@ def main():
     nhc_parser.add_argument("--save-to-blob", action="store_true")
     nhc_parser.add_argument("--save-dir", default="/tmp")
     nhc_parser.add_argument(
-        "--sample-json", metavar="URL",
+        "--sample-json",
+        metavar="URL",
         help=(
             "Test mode: fetch CurrentStorms.json from this URL instead of the "
             "live NHC endpoint. WSP polygons follow from the GIS URL inside "
@@ -210,7 +236,8 @@ def main():
         ),
     )
     nhc_parser.add_argument(
-        "--start-year", type=int,
+        "--start-year",
+        type=int,
         help="Start year for archive mode. Omit for current active storms.",
     )
     nhc_parser.add_argument("--end-year", type=int)
@@ -281,7 +308,8 @@ def main():
         help="Population exposure from NHC cumulative observed track buffers",
     )
     nhc_obsv_exp_parser.add_argument(
-        "--final-only", action="store_true",
+        "--final-only",
+        action="store_true",
         help=(
             "Keep only the final cumulative buffer per (atcf_id, wind_speed_kt) "
             "at max(valid_time). For historical backfills where intermediate "
@@ -358,11 +386,13 @@ def main():
     # NHC scrub (cleanup test / sample rows from every NHC table)
     # ------------------------------------------------------------------ #
     nhc_scrub_parser = subparsers.add_parser(
-        "nhc-scrub", parents=[common],
+        "nhc-scrub",
+        parents=[common],
         help="Delete sample/test rows for given atcf_ids from all NHC tables",
     )
     nhc_scrub_parser.add_argument(
-        "--sample", action="store_true",
+        "--sample",
+        action="store_true",
         help=(
             "Auto-resolve atcf_ids and issued_times from the NHC sample JSON "
             f"({NHC_SAMPLE_JSON_URL}) and scrub those. Mutually exclusive "
@@ -370,11 +400,17 @@ def main():
         ),
     )
     nhc_scrub_parser.add_argument(
-        "--atcf-id", action="append", default=[], dest="atcf_id",
+        "--atcf-id",
+        action="append",
+        default=[],
+        dest="atcf_id",
         help="atcf_id to scrub (repeatable). Ignored when --sample is set.",
     )
     nhc_scrub_parser.add_argument(
-        "--issued-time", action="append", default=[], dest="issued_time",
+        "--issued-time",
+        action="append",
+        default=[],
+        dest="issued_time",
         metavar="YYYY-MM-DDTHH",
         help=(
             "issued_time to scrub from nhc_wsp_polygon_raw (repeatable). "
@@ -383,7 +419,8 @@ def main():
         ),
     )
     nhc_scrub_parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Log counts only; don't actually delete anything.",
     )
 
@@ -487,7 +524,9 @@ def main():
             overwrite=args.overwrite,
         )
     elif args.pipeline == "ibtracs-track-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_ibtracs_exp(
             countries=countries,
             since=args.since,
@@ -504,7 +543,9 @@ def main():
         )
     elif args.pipeline == "nhc":
         if args.start_year is not None:
-            end_year = args.end_year if args.end_year is not None else args.start_year
+            end_year = (
+                args.end_year if args.end_year is not None else args.start_year
+            )
             run_nhc_archive(
                 start_year=args.start_year,
                 end_year=end_year,
@@ -523,6 +564,7 @@ def main():
             )
             if args.out_issued_times_json:
                 import json
+
                 payload = {
                     k: (None if v is None else pd.Timestamp(v).isoformat())
                     for k, v in (result or {}).items()
@@ -570,7 +612,9 @@ def main():
             issued_time=_parse_it(getattr(args, "issued_time", None)),
         )
     elif args.pipeline == "nhc-track-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_nhc_tracks_fcast_exp(
             countries=countries,
             since=args.since,
@@ -582,7 +626,9 @@ def main():
             admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-obsv-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         # obsv-exp's underlying function uses ``valid_time`` (the obsv
         # buffer key); the realtime orchestrator passes track_issued_time
         # here, which equals the latest obsv valid_time.
@@ -598,7 +644,9 @@ def main():
             final_only=getattr(args, "final_only", False),
         )
     elif args.pipeline == "nhc-fcastonly-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_nhc_tracks_fcastonly_exp(
             countries=countries,
             since=args.since,
@@ -610,7 +658,9 @@ def main():
             admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-wsp-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_nhc_wsp_exp(
             countries=countries,
             since=args.since,
@@ -640,7 +690,9 @@ def main():
             overwrite=args.overwrite,
         )
     elif args.pipeline == "nhc-wsp-fcastonly-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_nhc_wsp_fcastonly_exp(
             countries=countries,
             since=args.since,
@@ -652,7 +704,9 @@ def main():
             admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-realtime-tracks-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_nhc_tracks_exp_realtime(
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
@@ -664,7 +718,9 @@ def main():
             admin_levels=getattr(args, "admin_level", None),
         )
     elif args.pipeline == "nhc-realtime-wsp-exp":
-        countries = [c.upper() for c in args.countries] if args.countries else None
+        countries = (
+            [c.upper() for c in args.countries] if args.countries else None
+        )
         run_nhc_wsp_exp_realtime(
             mode=args.mode,
             issued_time=_parse_it(getattr(args, "issued_time", None)),
@@ -678,11 +734,12 @@ def main():
     elif args.pipeline == "nhc-scrub":
         if args.sample:
             import requests
+
             data = requests.get(NHC_SAMPLE_JSON_URL, timeout=10).json()
             storms = data.get("activeStorms", [])
-            atcf_ids = sorted({
-                s["id"][:2].upper() + s["id"][2:] for s in storms
-            })
+            atcf_ids = sorted(
+                {s["id"][:2].upper() + s["id"][2:] for s in storms}
+            )
             issued_times: list[pd.Timestamp] = []
             track_times = [pd.Timestamp(s["lastUpdate"]) for s in storms]
             if track_times:
@@ -701,9 +758,7 @@ def main():
                     "either --sample or at least one --atcf-id is required"
                 )
             atcf_ids = args.atcf_id
-            issued_times = [
-                pd.Timestamp(t) for t in args.issued_time
-            ]
+            issued_times = [pd.Timestamp(t) for t in args.issued_time]
         run_nhc_scrub(
             atcf_ids=atcf_ids,
             issued_times=issued_times,
