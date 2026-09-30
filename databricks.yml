@@ -84,17 +84,21 @@ resources:
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
-      # Fires at :00 AND :30 of 03/09/15/21 UTC — the NHC advisory hours.
-      # The :30 run is a WSP late-arrival retry (NHC often publishes the
-      # cycle's WSP zip after the :00 run); it's fill-only — stages
-      # short-circuit on an already-present issued_time or upsert
-      # identical rows.
-      # TEMPORARY (cost saving, 2026-09-30): was every 3rd hour,
-      # "0 0,30 0/3 * * ?". The dropped 00/06/12/18 runs almost never see
-      # a new advisory; an off-cycle special can now be superseded before
-      # a run sees it. Restore the old expression to revert.
+      # TEMPORARY (cost saving, 2026-09-30): ONE run per NHC advisory, at
+      # :30 of 03/09/15/21 UTC. By :30 both the advisory's tracks and its
+      # WSP zip are normally out (NHC publishes WSP after the tracks), so
+      # the single run lands everything. Normal schedule, to restore:
+      # "0 0,30 0/3 * * ?" — :00 AND :30 of every 3rd hour, the :30 run a
+      # fill-only WSP late-arrival retry.
+      # Not captured meanwhile (backfill later if wanted): the 00/06/12/18
+      # intermediate advisories NHC issues for storms under coastal
+      # watches/warnings (updated position + observed-track exposure), and
+      # any off-cycle special advisory.
+      # Reverting also needs the trigger_cuba_forecast minute param below
+      # and the downstream crons moved for this (ds-storms-alerts
+      # storm_alert, ds-aa-hti-hurricanes hti_monitoring).
       schedule:
-        quartz_cron_expression: "0 0,30 3,9,15,21 * * ?"
+        quartz_cron_expression: "0 30 3,9,15,21 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
@@ -170,12 +174,13 @@ resources:
             source: GIT
             parameters:
               - "${var.cuba_forecast_job_id}"
-              # Scheduled minute of this run (UTC, rounded down): the cron
-              # fires at :00 and :30; the :30 run is only a WSP late-arrival
-              # retry, so the monitor (needs tracks only, landed at :00) is
-              # skipped on it. Anything other than "30" fires (fail-open, so
-              # manual/ad-hoc runs still trigger). See issue #35.
-              - "{{job.trigger.time.minute}}"
+              # Scheduled-minute gate: trigger_job.py skips a run whose
+              # minute is "30" (normally a WSP-only retry; tracks landed
+              # at :00). TEMPORARY (2026-09-30): every run is now a :30 run
+              # that lands the tracks, so pass "" to fire on every run.
+              # Restore "{{job.trigger.time.minute}}" along with the
+              # schedule above. See issue #35.
+              - ""
           libraries: *storm_libs
 
         - task_key: tracks_processing
@@ -292,8 +297,8 @@ resources:
 
       # 03/09/15/21 UTC, same hours as the NHC cadence. GDACS/ADAM
       # current-mode is idempotent (7d/14d lookback), so re-runs skip
-      # existing rows. Runs take ~10-15 min, so each lands before the
-      # Storm Alert (:50 of the same hours) reads it.
+      # existing rows. Runs take ~10-15 min, so each lands well before
+      # the Storm Alert reads it (temporarily :15 of the following hour).
       # TEMPORARY (cost saving, 2026-09-30): was every 3rd hour,
       # "0 0 0/3 * * ?". Restore it (with NHC's) to revert.
       schedule:
