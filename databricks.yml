@@ -290,11 +290,14 @@ resources:
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
-      # Every 3h (the NHC cadence, until NHC went 6-hourly temporarily on
-      # 2026-09-30 — this one was left at 3h). GDACS/ADAM current-mode is
-      # idempotent (7d/14d lookback), so re-runs skip existing rows.
+      # 03/09/15/21 UTC, same hours as the NHC cadence. GDACS/ADAM
+      # current-mode is idempotent (7d/14d lookback), so re-runs skip
+      # existing rows. Runs take ~10-15 min, so each lands before the
+      # Storm Alert (:50 of the same hours) reads it.
+      # TEMPORARY (cost saving, 2026-09-30): was every 3rd hour,
+      # "0 0 0/3 * * ?". Restore it (with NHC's) to revert.
       schedule:
-        quartz_cron_expression: "0 0 0/3 * * ?"
+        quartz_cron_expression: "0 0 3,9,15,21 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
