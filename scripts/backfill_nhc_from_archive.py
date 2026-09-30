@@ -663,7 +663,11 @@ def main():
         log.info("PLAN final observed exposure now (admin0):\n"
                  + final_obsv_snapshot(read_eng).to_string(index=False))
         log.info(f"PLAN self-checks: {'PASS' if not problems else 'FAIL'}")
-        sys.exit(1 if problems else 0)
+        # Databricks treats ANY SystemExit (even code 0) as a task failure, so
+        # only raise on problems and let success return normally.
+        if problems:
+            raise SystemExit(1)
+        return
 
     if problems:
         raise SystemExit("self-checks failed — not executing")
