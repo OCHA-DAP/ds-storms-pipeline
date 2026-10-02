@@ -5,7 +5,6 @@ ECMWF ETL pipeline
 
 import logging
 
-import coloredlogs
 import ocha_lens as lens
 import ocha_stratus as stratus
 from dotenv import load_dotenv
@@ -16,15 +15,10 @@ load_dotenv()
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 ecmwf_logger = logging.getLogger("ocha_lens.datasources.ecmwf_storm")
-ecmwf_logger.setLevel(logging.DEBUG)
-coloredlogs.install(
-    logger=ecmwf_logger,
-    level=logging.DEBUG,
-    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+ecmwf_logger.setLevel(logging.INFO)
 
 
 def process_tracks(dataset, engine, chunksize):
@@ -100,11 +94,6 @@ def run_ecmwf(
     end_date Which date to stop at
     mode [dev or prod]
     """
-
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
 
     logger.info("Starting ECMWF ETL pipeline...")
 

@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Optional, Set, Tuple
 
-import coloredlogs
 import ocha_stratus as stratus
 import pandas as pd
 import requests
@@ -247,10 +246,6 @@ def run_adam_current(
     publication lag has a long tail — events whose CSV gets published days
     after the storm passed should still be caught.
     """
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting ADAM Current ETL pipeline...")
 
     now = datetime.now(timezone.utc)
@@ -274,10 +269,6 @@ def run_adam_archive(
     """Historical ADAM backfill across a date range. Idempotent: re-runs
     only download CSVs for events whose latest episode isn't already in
     storms.adam_exposure."""
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting ADAM Archive ETL pipeline...")
 
     if to_date is None:

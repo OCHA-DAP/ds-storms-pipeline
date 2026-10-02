@@ -30,7 +30,6 @@ gdacs_eventid is not yet linked in storms.storm_id_lookup.
 import logging
 from typing import Any, Dict, List, Optional, Set
 
-import coloredlogs
 import ocha_stratus as stratus
 import pandas as pd
 import requests
@@ -176,10 +175,6 @@ def run_match(mode: str = "dev") -> None:
     """Standalone retry: attempt matching for GDACS events already
     ingested but still missing an atcf_id. Use after a late NHC
     backfill, or to retry transient timeline-fetch failures."""
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting GDACS → ATCF matching pipeline...")
 
     engine = stratus.get_engine(mode, write=True)
