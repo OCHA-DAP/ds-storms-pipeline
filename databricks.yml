@@ -645,15 +645,18 @@ targets:
               job_cluster_key: gdacs_adam_cluster
             - task_key: match
               job_cluster_key: gdacs_adam_cluster
-        # IBTrACS / ECMWF prod: ephemeral single-worker Job Compute clusters
-        # (same policy pattern as above), and — unlike the NHC cutover —
-        # mode=prod: these ETLs own the prod storms.ibtracs_* / ecmwf_*
-        # tables, matching the workspace jobs they replace.
+        # IBTrACS / ECMWF prod: ephemeral Job Compute clusters (same policy
+        # pattern as above), and — unlike the NHC cutover — mode=prod: these
+        # ETLs own the prod storms.ibtracs_* / ecmwf_* tables, matching the
+        # workspace jobs they replace. IBTrACS is on the single-node variant:
+        # the ETL is plain pandas, so the worker VM sat idle.
         ibtracs_pipeline:
           job_clusters:
             - job_cluster_key: ibtracs_cluster
               new_cluster:
-                policy_id: "000C79D951EAF0D6"
+                # Job Compute (single node) policy (0017962FF5D1E3B9): same
+                # dsci secrets as Job Compute, fixes num_workers=0.
+                policy_id: "0017962FF5D1E3B9"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 # DS4_v2 (28 GB): the full --dataset-type ALL ETL OOM-killed
@@ -661,7 +664,7 @@ targets:
                 # 643238152152676) — the old workspace job never got past
                 # its import error, so DS3 had never actually been tested.
                 node_type_id: "Standard_DS4_v2"
-                num_workers: 1
+                num_workers: 0
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: download_ibtracs
