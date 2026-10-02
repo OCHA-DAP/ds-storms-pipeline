@@ -1,11 +1,5 @@
 import argparse
 import logging
-
-# Databricks Runtime hooks pandas to attach a Spark usage logger, which
-# cannot work on a Python task (no JVM) and warns once per process from
-# pyspark/pandas/__init__.py. Silence that logger before pandas loads.
-logging.getLogger("pyspark.pandas.usage_logger").setLevel(logging.ERROR)
-
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -44,6 +38,11 @@ for _name in (
     "py4j",
 ):
     logging.getLogger(_name).setLevel(logging.WARNING)
+
+# In the dispatch.py subprocesses (no JVM), something in the src.pipelines
+# import chain makes Databricks Runtime try to attach a Spark usage logger,
+# which warns "Tried to attach usage logger". Silence it before those imports.
+logging.getLogger("pyspark.pandas.usage_logger").setLevel(logging.ERROR)
 
 from src.pipelines.ecmwf import run_ecmwf
 from src.pipelines.ibtracs import (

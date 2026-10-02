@@ -138,7 +138,6 @@ def run_ibtracs(
     mode [dev or prod]
     """
 
-
     logger.info("Starting IBTrACS ETL pipeline...")
 
     # Setting up engine

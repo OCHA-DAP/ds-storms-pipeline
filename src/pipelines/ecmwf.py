@@ -15,10 +15,11 @@ load_dotenv()
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 ecmwf_logger = logging.getLogger("ocha_lens.datasources.ecmwf_storm")
-ecmwf_logger.setLevel(logging.DEBUG)
+ecmwf_logger.setLevel(logging.INFO)
+
 
 def process_tracks(dataset, engine, chunksize):
     """
@@ -93,7 +94,6 @@ def run_ecmwf(
     end_date Which date to stop at
     mode [dev or prod]
     """
-
 
     logger.info("Starting ECMWF ETL pipeline...")
 

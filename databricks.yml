@@ -584,8 +584,8 @@ targets:
       etl_mode: prod
     # NHC prod runs on an ephemeral Job Compute cluster (policy bakes in the
     # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral
-    # single-worker job cluster (num_workers: 1 — the policy forbids the
-    # actual singleNode profile).
+    # single-worker job cluster (num_workers: 1, fixed by the Job Compute
+    # policy). IBTrACS below uses the single-node policy instead.
     resources:
       jobs:
         nhc_pipeline:
