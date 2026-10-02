@@ -5,7 +5,7 @@
 #                           dispatched via databricks/dispatch.py
 #   • gdacs_adam_pipeline — GDACS→ADAM→match cascade (3 chained tasks),
 #                           dispatched via databricks/dispatch_gdacs_adam.py
-#   • ibtracs_pipeline    — daily IBTrACS best-track ETL (single task),
+#   • ibtracs_pipeline    — weekly IBTrACS best-track ETL (single task),
 #                           run_pipeline.py ibtracs
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
@@ -381,7 +381,7 @@ resources:
           libraries: *gdacs_libs
 
     # ===================================================================
-    # IBTrACS pipeline — single daily task running the full best-track
+    # IBTrACS pipeline — single weekly task running the full best-track
     # ETL (run_pipeline.py ibtracs --dataset-type ALL). Replaces the
     # UI-created "Run IBTrACS" job (638351145729392), which pinned
     # ocha-lens==0.4.2 — too old for calculate_wind_buffers_gdf — and
@@ -405,7 +405,7 @@ resources:
         git_branch: ${var.git_branch}
 
       schedule:
-        quartz_cron_expression: "27 0 16 * * ?"
+        quartz_cron_expression: "27 0 16 ? * MON"   # weekly, Mondays 16:00 UTC
         timezone_id: UTC
         pause_status: UNPAUSED
 
