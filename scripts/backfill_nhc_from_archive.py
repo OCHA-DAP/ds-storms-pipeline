@@ -28,30 +28,37 @@ Modes
      computes the scope. Every live run after step 2 builds its cumulative
      swath from the repaired tracks, so only issuances <= T_CUT need
      recomputing (no live pause);
-  4. additive work BEFORE any delete, so network/blob I/O never sits in the
+  4. backs up every row in the affected tables at the affected times into
+     ``storms._bak_<date>_<table>`` — the deletes are reversible — and
+     persists (t0, T_CUT, scope) in ``storms._bak_<date>_meta`` in the same
+     transaction. This happens BEFORE any derived write, so whatever fails
+     later, a rerun finds the state, reuses exactly the same times and never
+     deletes rows that were not backed up;
+  5. additive work before any delete, so network/blob I/O never sits in the
      post-delete window: exposure session (WorldPop + FieldMaps), WSP archive
      fetch for the lost synoptic times, their matching + WSP exposure, fcast
      buffers + exposure at the restored issuances (full AND intermediate —
-     realtime builds fcast buffers from leadtime-0-only rows too);
-  5. backs up every row in the affected tables at the affected times (all
-     storms) into ``storms._bak_<date>_<table>`` — the deletes are reversible —
-     and persists (t0, T_CUT, scope) in ``storms._bak_<date>_meta`` in the same
-     transaction, so a rerun reuses exactly the same times and never deletes
-     rows that were not backed up;
+     realtime builds fcast buffers from leadtime-0-only rows too). None of it
+     touches a backed-up (table, time);
   6. deletes the 4 storms' derived rows at the affected times (the pipeline's
-     ``overwrite`` only upserts, so stale pcodes would otherwise survive), and
-     all WSP matched rows at existing issuances whose match window now holds a
+     ``overwrite`` only upserts, so stale pcodes would otherwise survive);
+     unmatched (NULL atcf_id) WSP fcastonly exposure rows too, since their
+     polygons are rebuilt with everyone else's; and EVERY WSP matched and WSP
+     exposure row at existing issuances whose match window now holds a
      restored track row (2026092418: live matching used 21Z points because the
-     18Z intermediates were missing);
+     18Z intermediates were missing — a polygon can move between NULL and a
+     storm there);
   7. recomputes (DB-only), one advisory at a time: obsv buffers -> fcastonly
      buffers -> fcastonly / obsv exposure -> WSP re-matching + exposure ->
      WSP fcastonly polygons + exposure;
-  8. verifies coverage and uniqueness, completion markers for every stage
-     (fcast exposure at the restored issuances included), that every
-     (table, time) that had rows in the backup has rows again (completion
-     markers from the original live runs survive the deletes, so they cannot
-     prove a refill), and prints each storm's final observed exposure (the
-     return-period input) before vs after.
+  8. verifies: no duplicate tracks; buffers where the tracks call for them;
+     completion markers wherever a stage's INPUT has rows (a time with no
+     radii-bearing storm has no buffer and, correctly, no marker), stamped
+     after this run's start for every overwrite pass — which proves the
+     recompute ran even where the live runs' markers survived the deletes;
+     every backed-up buffer / polygon (time, storm) is back; and prints each
+     storm's final observed exposure (the return-period input) before vs
+     after.
 
 Rerunnable: restores skip present products, backups are taken once, the
 persisted scope is reused, deletes stay inside it, recomputes use overwrite.
@@ -342,36 +349,63 @@ def affected(engine, t0, t_cut, gap_times, new_its) -> dict:
     }
 
 
-# (table, time column, scope key, 4-storms-only?)
+# Rows deleted before the recompute: (table, time column, scope key, who).
+#   "storms"      the 4 storms' rows.
+#   "storms+null" plus unmatched (atcf_id IS NULL) rows. The WSP fcastonly
+#                 overwrite path deletes and rebuilds EVERY polygon at an
+#                 issued_time, unmatched ones included, so the exposure delete
+#                 has to cover them too (`atcf_id = any(...)` never matches
+#                 NULL).
+#   "all"         every row at those times: where the matching itself is
+#                 rebuilt, a polygon can move between NULL and a storm, and an
+#                 exposure row left under its old key would double-count.
 DELETE_SCOPE = [
-    ("nhc_tracks_obsv_buffers", "valid_time", "obsv_times", True),
-    ("nhc_tracks_obsv_exposure", "valid_time", "obsv_times", True),
-    ("nhc_tracks_fcastonly_buffers", "issued_time", "fcast_times", True),
-    ("nhc_tracks_fcastonly_exposure", "issued_time", "fcast_times", True),
-    ("nhc_wsp_fcastonly_exposure", "issued_time", "wsp_its", True),
-    ("nhc_wsp_exposure", "issued_time", "matched_redo_its", True),
-    # All storms incl. NULL atcf_id: the matcher upserts, so a polygon that
-    # the restored rows now assign to a storm would leave a NULL orphan.
-    ("nhc_wsp_polygon_matched", "issued_time", "matched_redo_its", False),
+    ("nhc_tracks_obsv_buffers", "valid_time", "obsv_times", "storms"),
+    ("nhc_tracks_obsv_exposure", "valid_time", "obsv_times", "storms"),
+    ("nhc_tracks_fcastonly_buffers", "issued_time", "fcast_times", "storms"),
+    ("nhc_tracks_fcastonly_exposure", "issued_time", "fcast_times", "storms"),
+    ("nhc_wsp_fcastonly_exposure", "issued_time", "wsp_its", "storms+null"),
+    ("nhc_wsp_fcastonly_exposure", "issued_time", "matched_redo_its", "all"),
+    ("nhc_wsp_exposure", "issued_time", "matched_redo_its", "all"),
+    ("nhc_wsp_polygon_matched", "issued_time", "matched_redo_its", "all"),
 ]
-# Backed up for ALL storms at the affected times (overwrite passes rewrite
-# other storms' rows at the same times; the WSP fcastonly overwrite path
-# DELETEs every storm's rows at an issued_time itself).
-BACKUP_SCOPE = DELETE_SCOPE + [("nhc_wsp_fcastonly_polygon", "issued_time", "wsp_its", False)]
+# One backup per table, EVERY row at the affected times (the overwrite passes
+# rewrite other storms' rows at the same times; the WSP fcastonly overwrite
+# path DELETEs every row at an issued_time itself). matched_redo_its is a
+# subset of wsp_its, so the wsp_its backup covers both delete entries above.
+BACKUP_SCOPE = [
+    ("nhc_tracks_obsv_buffers", "valid_time", "obsv_times"),
+    ("nhc_tracks_obsv_exposure", "valid_time", "obsv_times"),
+    ("nhc_tracks_fcastonly_buffers", "issued_time", "fcast_times"),
+    ("nhc_tracks_fcastonly_exposure", "issued_time", "fcast_times"),
+    ("nhc_wsp_fcastonly_exposure", "issued_time", "wsp_its"),
+    ("nhc_wsp_exposure", "issued_time", "matched_redo_its"),
+    ("nhc_wsp_polygon_matched", "issued_time", "matched_redo_its"),
+    ("nhc_wsp_fcastonly_polygon", "issued_time", "wsp_its"),
+]
+_WHO_SQL = {
+    "storms": " and atcf_id = any(:a)",
+    "storms+null": " and (atcf_id = any(:a) or atcf_id is null)",
+    "all": "",
+}
 
 
 def scope_counts(engine, scope) -> pd.DataFrame:
     rows = []
-    for table, col, key, four in BACKUP_SCOPE:
-        times = list(scope[key])
-        n4 = q(engine, f"select count(*) n from storms.{table} where atcf_id = any(:a) "
-                       f"and {col} = any(:t)", a=STORMS, t=times).n.iloc[0]
+    for table, col, key in BACKUP_SCOPE:
         nall = q(engine, f"select count(*) n from storms.{table} where {col} = any(:t)",
-                 t=times).n.iloc[0]
-        deleted = (n4 if four else nall) if (table, col, key, four) in DELETE_SCOPE else 0
-        rows.append({"table": table, "times": len(times),
-                     "rows deleted before recompute": deleted,
-                     "rows backed up (all storms)": nall})
+                 t=list(scope[key])).n.iloc[0]
+        # Rows matched by ANY delete entry for this table (entries can overlap).
+        conds, params = [], {"a": STORMS}
+        for i, (dt, dcol, dkey, who) in enumerate(DELETE_SCOPE):
+            if dt == table:
+                conds.append(f"({dcol} = any(:t{i}){_WHO_SQL[who]})")
+                params[f"t{i}"] = list(scope[dkey])
+        deleted = (q(engine, f"select count(*) n from storms.{table} where "
+                             + " or ".join(conds), **params).n.iloc[0] if conds else 0)
+        rows.append({"table": table, "times": len(scope[key]),
+                     "rows deleted before recompute": int(deleted),
+                     "rows backed up (all rows)": int(nall)})
     return pd.DataFrame(rows)
 
 
@@ -417,8 +451,11 @@ def live_job_active() -> bool:
 
 def execute(read_eng, write_eng, inv, missing):
     if live_job_active():
-        raise SystemExit("The live NHC Pipeline job has an active run — start this "
-                         "right after a cycle finishes (e.g. hh:45 for hh in 00,03,...).")
+        raise SystemExit("The live NHC Pipeline job has an active run — start this once "
+                         "it has finished (it runs at 03:30, 09:30, 15:30, 21:30 UTC).")
+    # DB clock at the start of THIS run: completion markers refreshed by an
+    # overwrite pass get completed_at = now(), which verify() checks against.
+    run_started = q(read_eng, "select now()::timestamp t").t.iloc[0]
     gap = gap_products(inv)
     gap_times = sorted(set(gap.issued_time))
     new_its = wsp_new_its(gap)
@@ -453,35 +490,23 @@ def execute(read_eng, write_eng, inv, missing):
     log.info(f"window [{t0}, {t_cut}]: " + ", ".join(f"{k}={len(v)}" for k, v in scope.items()))
     before = final_obsv_snapshot(read_eng)
 
-    # 4. additive work BEFORE any delete (keeps network/blob I/O out of the
-    # post-delete window): exposure session, WSP archive fetch, new-issuance
-    # matching + WSP exposure, fcast buffers + exposure at restored times.
-    session = P.build_exposure_session(mode="prod")
-    for it in scope["new_its"]:
-        n_raw = q(read_eng, "select count(*) n from storms.nhc_wsp_polygon_raw where issued_time=:t",
-                  t=it).n.iloc[0]
-        if n_raw == 0:
-            gdf = fetch_wsp_archive(it)
-            if gdf is None or gdf.empty:
-                raise SystemExit(f"WSP archive returned nothing for {it}")
-            P.process_wsp_polygons(gdf, write_eng, CHUNK)
-            log.info(f"WSP raw {it}: {len(gdf)} polygons fetched from the archive")
-        n_m = q(read_eng, "select count(*) n from storms.nhc_wsp_polygon_matched where issued_time=:t",
-                t=it).n.iloc[0]
-        if n_m and first_run:
-            raise SystemExit(f"nhc_wsp_polygon_matched already has {n_m} rows at {it}; "
-                             "expected none for a lost advisory — investigate")
-        if not n_m:
-            P.process_nhc_wsp_polygon_matched(write_eng, issued_time=it)
-        P.run_nhc_wsp_exp(mode="prod", issued_time=it, session=session)
-    for t in scope["restored_times"]:
-        P.process_nhc_tracks_fcast_buffers(read_eng, write_eng, CHUNK, issued_time=t)
-        P.run_nhc_tracks_fcast_exp(mode="prod", issued_time=t, session=session)
-
-    # 5. backups + meta, one transaction, first run only
+    # 4. backups + meta, one transaction, first run only — BEFORE any derived
+    # write, so every later failure leaves a state the rerun recognises as its
+    # own (meta present => not a first run). The additive work in step 5 never
+    # touches a backed-up (table, time): it writes WSP raw / matched / exposure
+    # at the NEW issuances and fcast buffers / exposure at the restored times,
+    # none of which is in BACKUP_SCOPE.
     if first_run:
+        # Pre-state guard for the lost WSP issuances, checked while nothing of
+        # this backfill has been written yet.
+        for it in new_its:
+            n_m = q(read_eng, "select count(*) n from storms.nhc_wsp_polygon_matched "
+                              "where issued_time=:t", t=it).n.iloc[0]
+            if n_m:
+                raise SystemExit(f"nhc_wsp_polygon_matched already has {n_m} rows at {it}; "
+                                 "expected none for a lost advisory — investigate")
         with write_eng.begin() as conn:
-            for table, col, key, _ in BACKUP_SCOPE:
+            for table, col, key in BACKUP_SCOPE:
                 bak = f"_bak_{BACKUP_TAG}_{table}"
                 if conn.execute(text("select to_regclass(:t) is not null"),
                                 {"t": f"storms.{bak}"}).scalar():
@@ -498,13 +523,34 @@ def execute(read_eng, write_eng, inv, missing):
                          {"a": t0, "b": t_cut,
                           "s": json.dumps({k: [str(x) for x in v] for k, v in scope.items()})})
 
+    # 5. additive work BEFORE any delete (keeps network/blob I/O out of the
+    # post-delete window): exposure session, WSP archive fetch, new-issuance
+    # matching + WSP exposure, fcast buffers + exposure at restored times.
+    # Every call here skips what an earlier attempt already wrote.
+    session = P.build_exposure_session(mode="prod")
+    for it in scope["new_its"]:
+        n_raw = q(read_eng, "select count(*) n from storms.nhc_wsp_polygon_raw where issued_time=:t",
+                  t=it).n.iloc[0]
+        if n_raw == 0:
+            gdf = fetch_wsp_archive(it)
+            if gdf is None or gdf.empty:
+                raise SystemExit(f"WSP archive returned nothing for {it}")
+            P.process_wsp_polygons(gdf, write_eng, CHUNK)
+            log.info(f"WSP raw {it}: {len(gdf)} polygons fetched from the archive")
+        # No-op when matched rows already exist at `it` (an earlier attempt).
+        P.process_nhc_wsp_polygon_matched(write_eng, issued_time=it)
+        P.run_nhc_wsp_exp(mode="prod", issued_time=it, session=session)
+    for t in scope["restored_times"]:
+        P.process_nhc_tracks_fcast_buffers(read_eng, write_eng, CHUNK, issued_time=t)
+        P.run_nhc_tracks_fcast_exp(mode="prod", issued_time=t, session=session)
+
     # 6. scoped deletes — only times inside the persisted, backed-up scope
     with write_eng.begin() as conn:
-        for table, col, key, four in DELETE_SCOPE:
-            where = f"{col} = any(:t)" + (" and atcf_id = any(:a)" if four else "")
-            r = conn.execute(text(f"delete from storms.{table} where {where}"),
+        for table, col, key, who in DELETE_SCOPE:
+            r = conn.execute(text(f"delete from storms.{table} where {col} = any(:t)"
+                                  f"{_WHO_SQL[who]}"),
                              {"a": STORMS, "t": list(scope[key])})
-            log.info(f"deleted {r.rowcount} rows from storms.{table}")
+            log.info(f"deleted {r.rowcount} rows from storms.{table} ({key}, {who})")
 
     # 7. recompute (DB-only from here; the session is already loaded)
     for t in scope["obsv_times"]:
@@ -523,7 +569,7 @@ def execute(read_eng, write_eng, inv, missing):
         P.run_nhc_wsp_fcastonly_exp(mode="prod", issued_time=it, overwrite=True, session=session)
 
     # 8. verify
-    problems = verify(read_eng, scope)
+    problems = verify(read_eng, scope, run_started)
     after = final_obsv_snapshot(read_eng)
     cmp = before.merge(after, on=["atcf_id", "iso3", "wind_speed_kt"], how="outer",
                        suffixes=("_before", "_after"))
@@ -533,7 +579,54 @@ def execute(read_eng, write_eng, inv, missing):
     log.info(f"DONE. Backups: storms._bak_{BACKUP_TAG}_* — drop once reviewed.")
 
 
-def verify(engine, scope) -> list[str]:
+def marker_expectations(scope) -> list:
+    """(out_table, input table, input time column, times, fresh?) — see the
+    completion-marker comment in verify()."""
+    return [
+        ("nhc_tracks_obsv_exposure", "nhc_tracks_obsv_buffers", "valid_time",
+         scope["obsv_times"], True),
+        ("nhc_tracks_fcastonly_exposure", "nhc_tracks_fcastonly_buffers", "issued_time",
+         scope["fcast_times"], True),
+        ("nhc_tracks_fcast_exposure", "nhc_tracks_fcast_buffers", "issued_time",
+         scope["restored_times"], False),
+        ("nhc_wsp_fcastonly_exposure", "nhc_wsp_fcastonly_polygon", "issued_time",
+         scope["wsp_its"], True),
+        ("nhc_wsp_exposure", "nhc_wsp_polygon_matched", "issued_time",
+         scope["matched_redo_its"], True),
+        ("nhc_wsp_exposure", "nhc_wsp_polygon_matched", "issued_time",
+         scope["new_its"], False),
+    ]
+
+
+def check_marker_rule(engine, scope) -> list[str]:
+    """Plan-mode self-test of verify()'s marker rule against what the LIVE
+    pipeline wrote: at every in-scope time where a stage's input table has
+    rows today, both completion markers must already exist. If this fails, the
+    rule would fail a correct run after all its writes."""
+    problems = []
+    for out_table, in_table, in_col, times, _ in marker_expectations(scope):
+        expected = _times_with_rows(engine, in_table, in_col, times)
+        done = q(engine, "select key_val, count(*) n from storms.exposure_completion "
+                         "where out_table = :o and key_val = any(:t) group by 1",
+                 o=out_table, t=list(expected))
+        lacking = sorted(set(expected) - set(done[done.n >= 2].key_val))
+        log.info(f"marker rule {out_table}: {len(times)} scope times, {len(expected)} "
+                 f"with input rows today, {len(lacking)} of those without markers")
+        if lacking:
+            problems.append(f"marker rule: {out_table} has input rows but no markers "
+                            f"at {lacking}")
+    return problems
+
+
+def _times_with_rows(engine, table, col, times) -> list:
+    """The subset of ``times`` at which ``table`` has at least one row."""
+    if not len(times):
+        return []
+    return sorted(q(engine, f"select distinct {col} t from storms.{table} "
+                            f"where {col} = any(:t)", t=list(times)).t)
+
+
+def verify(engine, scope, run_started) -> list[str]:
     problems = []
     dup = q(engine, """select atcf_id, issued_time, leadtime, count(*) n from storms.nhc_tracks_geo
         where atcf_id = any(:a) and issued_time >= :lo group by 1,2,3 having count(*) > 1""",
@@ -561,41 +654,60 @@ def verify(engine, scope) -> list[str]:
            a=STORMS, t=list(scope["fcast_times"]))
     if len(fc):
         problems.append(f"fcast buffers without fcastonly buffers:\n{fc}")
-    restored_radii = q(engine, f"select distinct issued_time from storms.nhc_tracks_geo "
-                               f"where atcf_id = any(:a) and issued_time = any(:t) and {_RADII}",
-                       a=STORMS, t=list(scope["restored_times"])).issued_time
-    for table, times in [("nhc_tracks_obsv_exposure", scope["obsv_times"]),
-                         ("nhc_tracks_fcastonly_exposure", scope["fcast_times"]),
-                         ("nhc_tracks_fcast_exposure", list(restored_radii)),
-                         ("nhc_wsp_fcastonly_exposure", scope["wsp_its"]),
-                         ("nhc_wsp_exposure", scope["new_its"] + scope["matched_redo_its"])]:
-        done = q(engine, "select key_val, count(*) n from storms.exposure_completion "
-                         "where out_table = :o and key_val = any(:t) group by 1",
-                 o=table, t=list(times))
-        lacking = set(times) - set(done[done.n >= 2].key_val)
-        if lacking:
-            problems.append(f"{table}: no completion markers for {sorted(lacking)}")
     for table, its in [("nhc_wsp_polygon_matched", scope["new_its"] + scope["matched_redo_its"]),
                        ("nhc_wsp_fcastonly_polygon", scope["new_its"])]:
-        have = set(q(engine, f"select distinct issued_time from storms.{table} "
-                             "where issued_time = any(:t)", t=list(its)).issued_time)
+        have = set(_times_with_rows(engine, table, "issued_time", its))
         if set(its) - have:
             problems.append(f"{table}: no rows for {sorted(set(its) - have)}")
-    # Refill check: completion markers from the original live runs survive the
-    # deletes, so they cannot prove a deleted row was rebuilt. Compare, per
-    # (table, time), the backed-up count with what is there now.
-    for table, col, key, four in BACKUP_SCOPE:
-        f4 = " and atcf_id = any(:a)" if four else ""
-        bak = q(engine, f"select {col} t, count(*) n from storms._bak_{BACKUP_TAG}_{table} "
-                        f"where true{f4} group by 1", a=STORMS)
-        now = q(engine, f"select {col} t, count(*) n from storms.{table} "
-                        f"where {col} = any(:tt){f4} group by 1", tt=list(scope[key]), a=STORMS)
-        m = bak.merge(now, on="t", how="left", suffixes=("_bak", "_now")).fillna({"n_now": 0})
-        lost = m[(m.n_bak > 0) & (m.n_now == 0)]
+
+    # Completion markers. An exposure pass only writes its marker when its
+    # INPUT has rows at that time (an empty buffer/polygon load returns early),
+    # so the expectation is derived from the input table, not from the scope:
+    # a time where no storm carries radii has no obsv buffer and no marker,
+    # and that is correct. `fresh` passes ran with overwrite in this run, so
+    # their marker must carry completed_at >= this run's start — which proves
+    # the recompute ran even where the markers of the original live runs
+    # survived the deletes.
+    for out_table, in_table, in_col, times, fresh in marker_expectations(scope):
+        expected = _times_with_rows(engine, in_table, in_col, times)
+        done = q(engine, "select key_val, count(*) n, min(completed_at) oldest "
+                         "from storms.exposure_completion "
+                         "where out_table = :o and key_val = any(:t) group by 1",
+                 o=out_table, t=list(expected))
+        lacking = set(expected) - set(done[done.n >= 2].key_val)
+        if lacking:
+            problems.append(f"{out_table}: no completion markers for {sorted(lacking)}")
+        if fresh:
+            stale = sorted(done[(done.n >= 2) & (done.oldest < run_started)].key_val)
+            if stale:
+                problems.append(f"{out_table}: markers older than this run "
+                                f"(not recomputed) at {stale}")
+        log.info(f"markers {out_table}: {len(expected)} expected of {len(times)} scope "
+                 f"times ({'fresh' if fresh else 'present'}), {len(lacking)} missing")
+
+    # Refill of the geometry tables: a buffer / polygon row is written for
+    # every input row whatever its geometry, so every (time, storm) the backup
+    # had must be back. Exposure tables are NOT checked by count: their row
+    # set can legitimately shrink (the corrected observed swath can remove a
+    # pcode from a forecast-only exposure, a re-matched polygon moves between
+    # NULL and a storm) — the fresh markers above cover them.
+    for table, col, key in BACKUP_SCOPE:
+        bak = q(engine, f"select {col} t, coalesce(atcf_id, 'NULL') a, count(*) n "
+                        f"from storms._bak_{BACKUP_TAG}_{table} group by 1, 2")
+        now = q(engine, f"select {col} t, coalesce(atcf_id, 'NULL') a, count(*) n "
+                        f"from storms.{table} where {col} = any(:tt) group by 1, 2",
+                tt=list(scope[key]))
+        log.info(f"refill {table}: backup {int(bak.n.sum())} rows -> now {int(now.n.sum())}")
+        if "exposure" in table or key == "matched_redo_its":
+            continue
+        m = bak.merge(now, on=["t", "a"], how="left", suffixes=("_bak", "_now"))
+        lost = m[m.n_now.isna()]
+        if table == "nhc_wsp_fcastonly_polygon":
+            # At a re-matched issuance the storm a polygon belongs to can change.
+            lost = lost[~lost.t.isin(scope["matched_redo_its"])]
         if len(lost):
-            problems.append(f"{table}: rows deleted but not rebuilt at {sorted(lost.t)}")
-        log.info(f"refill {table}: backup {int(m.n_bak.sum())} rows -> now "
-                 f"{int(m.n_now.sum())} at the backed-up times")
+            problems.append(f"{table}: rows deleted but not rebuilt:\n"
+                            f"{lost[['t', 'a', 'n_bak']].to_string(index=False)}")
     return problems
 
 
@@ -639,6 +751,14 @@ def main():
                  + ", ".join(f"{k}={len(v)}" for k, v in scope.items())
                  + f"; matched_redo_its={[str(t) for t in scope['matched_redo_its']]}")
         log.info("PLAN backup/delete scope:\n" + scope_counts(read_eng, scope).to_string(index=False))
+        nulls = q(read_eng, "select count(*) n from storms.nhc_wsp_fcastonly_exposure "
+                            "where atcf_id is null and issued_time = any(:t)",
+                  t=list(scope["wsp_its"])).n.iloc[0]
+        log.info(f"PLAN unmatched (NULL atcf_id) WSP fcastonly exposure rows in scope: {nulls}")
+        found = check_marker_rule(read_eng, scope)
+        for p in found:
+            log.error(p)
+        problems += found
         have_raw = set(q(read_eng, "select distinct issued_time from storms.nhc_wsp_polygon_raw "
                                    "where issued_time = any(:t)", t=new_its).issued_time)
         for it in new_its:
