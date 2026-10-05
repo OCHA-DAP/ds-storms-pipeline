@@ -403,8 +403,13 @@ def scope_counts(engine, scope) -> pd.DataFrame:
                 params[f"t{i}"] = list(scope[dkey])
         deleted = (q(engine, f"select count(*) n from storms.{table} where "
                              + " or ".join(conds), **params).n.iloc[0] if conds else 0)
+        by = "this script"
+        if table == "nhc_wsp_fcastonly_polygon":
+            # No entry in DELETE_SCOPE: process_nhc_wsp_fcastonly_polygons(
+            # overwrite=True) deletes every row at an issued_time itself.
+            deleted, by = nall, "pipeline overwrite"
         rows.append({"table": table, "times": len(scope[key]),
-                     "rows deleted before recompute": int(deleted),
+                     "rows deleted before recompute": int(deleted), "deleted by": by,
                      "rows backed up (all rows)": int(nall)})
     return pd.DataFrame(rows)
 
@@ -655,7 +660,8 @@ def verify(engine, scope, run_started) -> list[str]:
     if len(fc):
         problems.append(f"fcast buffers without fcastonly buffers:\n{fc}")
     for table, its in [("nhc_wsp_polygon_matched", scope["new_its"] + scope["matched_redo_its"]),
-                       ("nhc_wsp_fcastonly_polygon", scope["new_its"])]:
+                       ("nhc_wsp_fcastonly_polygon",
+                        scope["new_its"] + scope["matched_redo_its"])]:
         have = set(_times_with_rows(engine, table, "issued_time", its))
         if set(its) - have:
             problems.append(f"{table}: no rows for {sorted(set(its) - have)}")
@@ -698,7 +704,27 @@ def verify(engine, scope, run_started) -> list[str]:
                         f"from storms.{table} where {col} = any(:tt) group by 1, 2",
                 tt=list(scope[key]))
         log.info(f"refill {table}: backup {int(bak.n.sum())} rows -> now {int(now.n.sum())}")
-        if "exposure" in table or key == "matched_redo_its":
+        if "exposure" in table:
+            # Other storms' rows at these times are rewritten by the overwrite
+            # passes (upsert). Their inputs did not change, so they must come
+            # back identical. Reported, not failed: an integer flip from
+            # floating-point noise would otherwise fail a correct run.
+            cols = list(q(engine, f"select * from storms._bak_{BACKUP_TAG}_{table} limit 0").columns)
+            keys = [c for c in cols if c != "pop_exposed"]
+            sel = ", ".join(cols)
+            b_o = q(engine, f"select {sel} from storms._bak_{BACKUP_TAG}_{table} "
+                            "where atcf_id <> all(:a)", a=STORMS)
+            n_o = q(engine, f"select {sel} from storms.{table} where {col} = any(:tt) "
+                            "and atcf_id <> all(:a)", tt=list(scope[key]), a=STORMS)
+            d = b_o.merge(n_o, on=keys, how="outer", suffixes=("_bak", "_now"), indicator=True)
+            diff = d[(d._merge != "both") | (d.pop_exposed_bak != d.pop_exposed_now)]
+            if len(diff):
+                log.warning(f"other storms' rows in {table}: {len(diff)} of {len(b_o)} differ "
+                            f"from the backup:\n{diff.head(20).to_string(index=False)}")
+            else:
+                log.info(f"other storms' rows in {table}: {len(b_o)} rows, identical to the backup")
+            continue
+        if key == "matched_redo_its":
             continue
         m = bak.merge(now, on=["t", "a"], how="left", suffixes=("_bak", "_now"))
         lost = m[m.n_now.isna()]
