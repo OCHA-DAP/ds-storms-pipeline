@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Dict, Optional, Set, Tuple
 
-import coloredlogs
 import ocha_stratus as stratus
 import pandas as pd
 import requests
@@ -386,10 +385,6 @@ def run_gdacs_current(
     (eventid, episodeid, wind_speed_kt, admin_level, iso3,
     admin_name).
     """
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting GDACS Current ETL pipeline...")
 
     now = datetime.now(timezone.utc)
@@ -415,10 +410,6 @@ def run_gdacs_archive(
     Idempotent: re-running picks up events not already in
     storms.gdacs_exposure (upsert is constraint-based).
     """
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting GDACS Archive ETL pipeline...")
 
     if to_date is None:

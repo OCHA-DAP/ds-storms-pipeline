@@ -5,7 +5,7 @@
 #                           dispatched via databricks/dispatch.py
 #   • gdacs_adam_pipeline — GDACS→ADAM→match cascade (3 chained tasks),
 #                           dispatched via databricks/dispatch_gdacs_adam.py
-#   • ibtracs_pipeline    — daily IBTrACS best-track ETL (single task),
+#   • ibtracs_pipeline    — weekly IBTrACS best-track ETL (single task),
 #                           run_pipeline.py ibtracs
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
@@ -84,12 +84,21 @@ resources:
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
-      # Fires at :00 AND :30 of every 3rd hour. The :30 run is a WSP
-      # late-arrival retry (NHC often publishes the cycle's WSP zip after
-      # the :00 run); it's fill-only — stages short-circuit on an
-      # already-present issued_time or upsert identical rows.
+      # TEMPORARY (cost saving, 2026-09-30): ONE run per NHC advisory, at
+      # :30 of 03/09/15/21 UTC. By :30 both the advisory's tracks and its
+      # WSP zip are normally out (NHC publishes WSP after the tracks), so
+      # the single run lands everything. Normal schedule, to restore:
+      # "0 0,30 0/3 * * ?" — :00 AND :30 of every 3rd hour, the :30 run a
+      # fill-only WSP late-arrival retry.
+      # Not captured meanwhile (backfill later if wanted): the 00/06/12/18
+      # intermediate advisories NHC issues for storms under coastal
+      # watches/warnings (updated position + observed-track exposure), and
+      # any off-cycle special advisory.
+      # Reverting also needs the trigger_cuba_forecast minute param below
+      # and the downstream crons moved for this (ds-storms-alerts
+      # storm_alert, ds-aa-hti-hurricanes hti_monitoring).
       schedule:
-        quartz_cron_expression: "0 0,30 0/3 * * ?"
+        quartz_cron_expression: "0 30 3,9,15,21 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
@@ -165,12 +174,13 @@ resources:
             source: GIT
             parameters:
               - "${var.cuba_forecast_job_id}"
-              # Scheduled minute of this run (UTC, rounded down): the cron
-              # fires at :00 and :30; the :30 run is only a WSP late-arrival
-              # retry, so the monitor (needs tracks only, landed at :00) is
-              # skipped on it. Anything other than "30" fires (fail-open, so
-              # manual/ad-hoc runs still trigger). See issue #35.
-              - "{{job.trigger.time.minute}}"
+              # Scheduled-minute gate: trigger_job.py skips a run whose
+              # minute is "30" (normally a WSP-only retry; tracks landed
+              # at :00). TEMPORARY (2026-09-30): every run is now a :30 run
+              # that lands the tracks, so pass "" to fire on every run.
+              # Restore "{{job.trigger.time.minute}}" along with the
+              # schedule above. See issue #35.
+              - ""
           libraries: *storm_libs
 
         - task_key: tracks_processing
@@ -285,10 +295,14 @@ resources:
         git_provider: gitHub
         git_branch: ${var.git_branch}
 
-      # Every 3h (matches the NHC cadence). GDACS/ADAM current-mode is
-      # idempotent (7d/14d lookback), so re-runs skip existing rows.
+      # 03/09/15/21 UTC, same hours as the NHC cadence. GDACS/ADAM
+      # current-mode is idempotent (7d/14d lookback), so re-runs skip
+      # existing rows. Runs take ~10-15 min, so each lands well before
+      # the Storm Alert reads it (temporarily :15 of the following hour).
+      # TEMPORARY (cost saving, 2026-09-30): was every 3rd hour,
+      # "0 0 0/3 * * ?". Restore it (with NHC's) to revert.
       schedule:
-        quartz_cron_expression: "0 0 0/3 * * ?"
+        quartz_cron_expression: "0 0 3,9,15,21 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
@@ -381,7 +395,7 @@ resources:
           libraries: *gdacs_libs
 
     # ===================================================================
-    # IBTrACS pipeline — single daily task running the full best-track
+    # IBTrACS pipeline — single weekly task running the full best-track
     # ETL (run_pipeline.py ibtracs --dataset-type ALL). Replaces the
     # UI-created "Run IBTrACS" job (638351145729392), which pinned
     # ocha-lens==0.4.2 — too old for calculate_wind_buffers_gdf — and
@@ -405,7 +419,7 @@ resources:
         git_branch: ${var.git_branch}
 
       schedule:
-        quartz_cron_expression: "27 0 16 * * ?"
+        quartz_cron_expression: "27 0 16 ? * MON"   # weekly, Mondays 16:00 UTC
         timezone_id: UTC
         pause_status: UNPAUSED
 
@@ -584,8 +598,8 @@ targets:
       etl_mode: prod
     # NHC prod runs on an ephemeral Job Compute cluster (policy bakes in the
     # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral
-    # single-worker job cluster (num_workers: 1 — the policy forbids the
-    # actual singleNode profile).
+    # single-worker job cluster (num_workers: 1, fixed by the Job Compute
+    # policy). IBTrACS below uses the single-node policy instead.
     resources:
       jobs:
         nhc_pipeline:
@@ -645,15 +659,18 @@ targets:
               job_cluster_key: gdacs_adam_cluster
             - task_key: match
               job_cluster_key: gdacs_adam_cluster
-        # IBTrACS / ECMWF prod: ephemeral single-worker Job Compute clusters
-        # (same policy pattern as above), and — unlike the NHC cutover —
-        # mode=prod: these ETLs own the prod storms.ibtracs_* / ecmwf_*
-        # tables, matching the workspace jobs they replace.
+        # IBTrACS / ECMWF prod: ephemeral Job Compute clusters (same policy
+        # pattern as above), and — unlike the NHC cutover — mode=prod: these
+        # ETLs own the prod storms.ibtracs_* / ecmwf_* tables, matching the
+        # workspace jobs they replace. IBTrACS is on the single-node variant:
+        # the ETL is plain pandas, so the worker VM sat idle.
         ibtracs_pipeline:
           job_clusters:
             - job_cluster_key: ibtracs_cluster
               new_cluster:
-                policy_id: "000C79D951EAF0D6"
+                # Job Compute (single node) policy (0017962FF5D1E3B9): same
+                # dsci secrets as Job Compute, fixes num_workers=0.
+                policy_id: "0017962FF5D1E3B9"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 # DS4_v2 (28 GB): the full --dataset-type ALL ETL OOM-killed
@@ -661,7 +678,7 @@ targets:
                 # 643238152152676) — the old workspace job never got past
                 # its import error, so DS3 had never actually been tested.
                 node_type_id: "Standard_DS4_v2"
-                num_workers: 1
+                num_workers: 0
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: download_ibtracs

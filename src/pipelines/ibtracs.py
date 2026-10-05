@@ -7,7 +7,6 @@ import logging
 import os
 import warnings
 
-import coloredlogs
 import geopandas as gpd
 import ocha_lens as lens
 import pandas as pd
@@ -138,11 +137,6 @@ def run_ibtracs(
     save_to_blob flag to determine whether the netcdf file should be saved
     mode [dev or prod]
     """
-
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
 
     logger.info("Starting IBTrACS ETL pipeline...")
 
@@ -295,7 +289,7 @@ def process_wind_buffers(
     cols = ["sid", "wind_speed_kt", "geometry"]
     batch = []
     with write_engine.connect() as conn:
-        for sid, group in tqdm(gdf_tracks.groupby("sid")):
+        for sid, group in tqdm(gdf_tracks.groupby("sid"), disable=None):
             gdf_buffers = calculate_wind_buffers_gdf(group)
             gdf_buffers["sid"] = sid
             batch.append(gdf_buffers)
@@ -322,10 +316,6 @@ def run_wind_buffers(
     overwrite=False,
     sids=None,
 ):
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting IBTrACS wind buffers pipeline...")
     read_engine = stratus.get_engine(stage="prod")
     write_engine = stratus.get_engine(stage=write_mode, write=True)
@@ -506,10 +496,6 @@ def run_ibtracs_realtime(
     save_dir: str = "/tmp",
     chunksize: int = 10000,
 ) -> None:
-    coloredlogs.install(
-        logger=logger,
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
     logger.info("Starting IBTrACS realtime pipeline...")
 
     engine = stratus.get_engine(stage=mode, write=True)
