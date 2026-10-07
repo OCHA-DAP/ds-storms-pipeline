@@ -26,6 +26,11 @@
       "libraries": [
         {
           "pypi": {
+            "package": "sqlalchemy==2.1.3"
+          }
+        },
+        {
+          "pypi": {
             "package": "ocha-stratus"
           }
         },
