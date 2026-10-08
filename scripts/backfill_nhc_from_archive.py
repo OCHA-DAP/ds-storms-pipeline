@@ -63,8 +63,31 @@ Modes
 Rerunnable: restores skip present products, backups are taken once, the
 persisted scope is reused, deletes stay inside it, recomputes use overwrite.
 
+``--resume`` (Databricks only): finishes an ``--execute`` run that stopped in
+the LAST recompute pass (WSP fcastonly polygons + exposure), without repeating
+the deletes and passes that completed. A full pass over this window takes
+~5.2 h (track exposure ~1.2-1.5 min per issuance, WSP fcastonly ~2.3 min), and
+a rerun of ``--execute`` deletes the storms' observed exposure — the
+return-period history ds-storms-alerts reads — for ~3.5 h while it rebuilds
+it. ``--resume``:
+  - refuses unless every EARLIER overwrite pass already carries completion
+    markers stamped after the backups were taken (``_meta.created_at``) at
+    every time verify() expects one. Those passes only run after the step-6
+    deletes, so this also proves the deletes committed;
+  - redoes the last pass only at the issuances whose marker is not fresh,
+    repeating that table's step-6 delete at exactly those issuances first
+    (clears what an interrupted pass half-wrote);
+  - runs the same verify(), with ``_meta.created_at`` as the freshness floor —
+    once before any write (refusing on any problem outside the last pass) and
+    once at the end.
+Anything else interrupted => rerun ``--execute``. Valid after ONE interrupted
+``--execute`` only: completion markers survive the step-6 deletes, so after a
+second ``--execute`` that died in an earlier pass the markers of the first
+would still look fresh.
+
     python scripts/backfill_nhc_from_archive.py --plan
     python scripts/backfill_nhc_from_archive.py --execute
+    python scripts/backfill_nhc_from_archive.py --resume
 """
 
 from __future__ import annotations
@@ -738,11 +761,114 @@ def verify(engine, scope, run_started) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# resume
+# ---------------------------------------------------------------------------
+LAST_PASS = "nhc_wsp_fcastonly_exposure"  # out_table of the final recompute pass
+
+
+def meta_created_at(engine) -> pd.Timestamp:
+    """When the backups + scope were committed: before every delete and
+    recompute, so an overwrite-pass marker stamped later was written by this
+    backfill (the live job only stamps its newest issuance, > T_CUT)."""
+    return q(engine, f"select created_at t from storms.{META}").t.iloc[0]
+
+
+def unrefreshed(engine, scope, floor) -> dict:
+    """{out_table: scope times not recomputed since ``floor``} for the
+    overwrite passes — verify()'s completion-marker rule, per pass: a time is
+    listed when its input table has rows and it lacks two markers stamped at
+    or after ``floor``."""
+    out = {}
+    for out_table, in_table, in_col, times, fresh in marker_expectations(scope):
+        if not fresh:
+            continue
+        expected = _times_with_rows(engine, in_table, in_col, times)
+        done = q(engine, "select key_val, count(*) n, min(completed_at) oldest "
+                         "from storms.exposure_completion "
+                         "where out_table = :o and key_val = any(:t) group by 1",
+                 o=out_table, t=list(expected))
+        ok = set(done[(done.n >= 2) & (done.oldest >= floor)].key_val)
+        out[out_table] = sorted(set(expected) - ok)
+    return out
+
+
+def resume(read_eng, write_eng):
+    if live_job_active():
+        raise SystemExit("The live NHC Pipeline job has an active run — start this once "
+                         "it has finished (it runs at 03:30, 09:30, 15:30, 21:30 UTC).")
+    meta = load_meta(read_eng)
+    if meta is None:
+        raise SystemExit(f"storms.{META} not found — no interrupted run to resume; "
+                         "use --execute")
+    t0, t_cut, scope = meta
+    floor = meta_created_at(read_eng)
+    log.info(f"RESUME: persisted window [{t0}, {t_cut}], freshness floor {floor}")
+    todo = unrefreshed(read_eng, scope, floor)
+    for out_table, times in todo.items():
+        log.info(f"RESUME {out_table}: {len(times)} time(s) not recomputed since the floor")
+    earlier = {o: len(ts) for o, ts in todo.items() if o != LAST_PASS and ts}
+    if earlier:
+        raise SystemExit(f"RESUME refused: passes before the last one are incomplete {earlier} "
+                         "— run --execute, which repeats the deletes and every pass")
+    # Evidence, not inference, before any write: everything verify() checks
+    # (buffers where the tracks call for them, geometry refill, markers of
+    # the earlier passes) must already hold, leaving only the last pass's
+    # marker lines.
+    log.info("RESUME pre-check: verify() before any write")
+    other = [p for p in verify(read_eng, scope, floor) if not p.startswith(f"{LAST_PASS}: ")]
+    if other:
+        raise SystemExit("RESUME refused: problems outside the last pass — run --execute:\n"
+                         + "\n".join(other))
+    stale = set(todo[LAST_PASS])
+    if stale - set(scope["wsp_its"]):
+        raise SystemExit(f"RESUME: stale {LAST_PASS} times outside wsp_its: "
+                         f"{sorted(stale - set(scope['wsp_its']))}")
+    # An issuance with no fcastonly polygon rows expects no marker, so
+    # unrefreshed() cannot list it; the full run would still run its pass.
+    have = set(_times_with_rows(read_eng, "nhc_wsp_fcastonly_polygon", "issued_time",
+                                scope["wsp_its"]))
+    pending = stale | (set(scope["wsp_its"]) - have)
+    its = [t for t in scope["wsp_its"] if t in pending]
+    log.info(f"RESUME: {len(its)} of {len(scope['wsp_its'])} WSP issuances to recompute: "
+             f"{[str(t) for t in its]}")
+
+    if its:
+        session = P.build_exposure_session(mode="prod")
+        # Step 6 again, for this pass's table at the issuances about to be
+        # recomputed only — inside the persisted, backed-up scope.
+        with write_eng.begin() as conn:
+            for table, col, key, who in DELETE_SCOPE:
+                if table != LAST_PASS:
+                    continue
+                times = [t for t in scope[key] if t in pending]
+                if not times:
+                    continue
+                r = conn.execute(text(f"delete from storms.{table} where {col} = any(:t)"
+                                      f"{_WHO_SQL[who]}"),
+                                 {"a": STORMS, "t": times})
+                log.info(f"deleted {r.rowcount} rows from storms.{table} "
+                         f"({key}, {who}, {len(times)} pending issuances)")
+        for it in its:
+            P.process_nhc_wsp_fcastonly_polygons(write_eng, issued_time=it, overwrite=True)
+            P.run_nhc_wsp_fcastonly_exp(mode="prod", issued_time=it, overwrite=True, session=session)
+
+    log.info("RESUME: final verify()")
+    problems = verify(read_eng, scope, floor)
+    log.info("final observed exposure (admin0) now:\n"
+             + final_obsv_snapshot(read_eng).to_string(index=False))
+    if problems:
+        raise SystemExit("VERIFY FAILED:\n" + "\n".join(problems))
+    log.info(f"DONE. Backups: storms._bak_{BACKUP_TAG}_* — drop once reviewed.")
+
+
+# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--plan", action="store_true", help="read-only (default)")
     g.add_argument("--execute", action="store_true", help="write to prod (Databricks)")
+    g.add_argument("--resume", action="store_true",
+                   help="finish an --execute run interrupted in its last pass (Databricks)")
     args = ap.parse_args()
 
     read_eng = stratus.get_engine("prod")
@@ -761,6 +887,15 @@ def main():
             log.error(p)
         problems += found
 
+    if args.resume:
+        if problems:
+            raise SystemExit("self-checks failed — not resuming")
+        if len(missing):
+            raise SystemExit("products are still missing from prod — nothing to resume; "
+                             "use --execute")
+        resume(read_eng, stratus.get_engine("prod", write=True))
+        return
+
     if not args.execute:
         gap = gap_products(inv)
         gap_times = sorted(set(gap.issued_time))
@@ -768,6 +903,9 @@ def main():
         meta = load_meta(read_eng)
         if meta is not None:
             log.info(f"PLAN note: a previous execute run persisted window {meta[:2]}")
+            todo = unrefreshed(read_eng, meta[2], meta_created_at(read_eng))
+            log.info("PLAN note: times not recomputed since its backups (what --resume "
+                     "would see): " + ", ".join(f"{o}={len(ts)}" for o, ts in todo.items()))
         t0 = min(gap_times)
         t_cut = q(read_eng, "select max(issued_time) t from storms.nhc_tracks_geo "
                             "where atcf_id = any(:a) and leadtime = 0", a=STORMS).t.iloc[0]
