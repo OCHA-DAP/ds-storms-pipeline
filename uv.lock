@@ -810,7 +810,7 @@ requires-dist = [
     { name = "coloredlogs", specifier = "==15.0.1" },
     { name = "geoalchemy2", specifier = "==0.18.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "ocha-lens", specifier = "==0.6.1" },
+    { name = "ocha-lens", specifier = "==0.6.2" },
     { name = "ocha-stratus", specifier = "==0.1.7" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.0" },
@@ -2085,7 +2085,7 @@ wheels = [
 
 [[package]]
 name = "ocha-lens"
-version = "0.6.1"
+version = "0.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "antimeridian" },
@@ -2103,9 +2103,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "xarray" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/86/70/a98024d10c183df40fb33d344941e2e80fbce3bc3a5ae21f90ca686c1821/ocha_lens-0.6.1.tar.gz", hash = "sha256:9d5bf79a8e8328d1da0ed3eaf418eea7165387bde716591060f8e4affe387c12", size = 6747894, upload-time = "2026-09-01T18:41:33.386Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/97/3a/23c3609f5ca6798fd809bc51381cb8a8e54d16edfa489671d2724abd40b4/ocha_lens-0.6.2.tar.gz", hash = "sha256:e6745dccf4d9658e0beaf6af52df787096b93378849bb9b33bb41a0d49906407", size = 6748756, upload-time = "2026-10-08T21:40:31.341Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/5f/9389dfacac9fe5073a6aecc619ec42ed72127a75df9cd52177f2055c1875/ocha_lens-0.6.1-py3-none-any.whl", hash = "sha256:f6eb855d8be6fa94954f265dec1f4ec6c97c5efe207dc1753ad7e8f25dc301ab", size = 73483, upload-time = "2026-09-01T18:41:31.92Z" },
+    { url = "https://files.pythonhosted.org/packages/48/32/cad3b4408d60ba90ce270db44bdb0f7f1cabe36ecde45cc5095d72624230/ocha_lens-0.6.2-py3-none-any.whl", hash = "sha256:35a8ac087175815a3b7fdbd1bfe940be5f64201bb7791f72e49e969e7edc4dc2", size = 73954, upload-time = "2026-10-08T21:40:29.518Z" },
 ]
 
 [[package]]

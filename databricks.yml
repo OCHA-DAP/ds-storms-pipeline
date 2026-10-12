@@ -149,7 +149,7 @@ resources:
               - "{{job.parameters.admin_level}}"
           libraries: &storm_libs
             - pypi: { package: "ocha-stratus" }
-            - pypi: { package: "ocha-lens==0.6.1" }
+            - pypi: { package: "ocha-lens==0.6.2" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "rasterio" }
@@ -352,7 +352,7 @@ resources:
             # APIs (get_exposure_adm0/adm1, match_to_atcf, …). Matches the
             # pin on main / requirements.txt. Bump when a newer release adds
             # what we need.
-            - pypi: { package: "ocha-lens==0.6.1" }
+            - pypi: { package: "ocha-lens==0.6.2" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "coloredlogs" }
             - pypi: { package: "tqdm" }
@@ -467,10 +467,11 @@ resources:
             # the installed version. netCDF4/cftime/xarray/pandera come in
             # transitively via ocha-lens.
             - pypi: { package: "ocha-stratus" }
-            # 0.6.1 matches requirements.txt / the other jobs (bumped on
-            # main by #45); 0.4.2 (the old workspace pin) predates
-            # calculate_wind_buffers_gdf.
-            - pypi: { package: "ocha-lens==0.6.1" }
+            # Matches requirements.txt / the other jobs. 0.6.2 masks the
+            # 999 reunion_gust sentinel that made get_tracks fail schema
+            # validation from NCEI's 2026-10-02 release on; 0.4.2 (the old
+            # workspace pin) predates calculate_wind_buffers_gdf.
+            - pypi: { package: "ocha-lens==0.6.2" }
             - pypi: { package: "python-dotenv" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "coloredlogs" }
