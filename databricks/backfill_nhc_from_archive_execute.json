@@ -1,0 +1,104 @@
+{
+  "run_name": "[ops] NHC 2026-09-24 outage backfill (execute)",
+  "git_source": {
+    "git_url": "https://github.com/OCHA-DAP/ds-storms-pipeline.git",
+    "git_provider": "gitHub",
+    "git_branch": "ops/backfill-nhc-2026-09-24-outage"
+  },
+  "tasks": [
+    {
+      "task_key": "backfill",
+      "spark_python_task": {
+        "python_file": "scripts/backfill_nhc_from_archive.py",
+        "source": "GIT",
+        "parameters": [
+          "--execute"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "000C79D951EAF0D6",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 1,
+        "data_security_mode": "SINGLE_USER"
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "sqlalchemy==2.1.3"
+          }
+        },
+        {
+          "pypi": {
+            "package": "ocha-stratus"
+          }
+        },
+        {
+          "pypi": {
+            "package": "ocha-lens==0.6.1"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geopandas"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rasterio"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rioxarray"
+          }
+        },
+        {
+          "pypi": {
+            "package": "exactextract"
+          }
+        },
+        {
+          "pypi": {
+            "package": "antimeridian"
+          }
+        },
+        {
+          "pypi": {
+            "package": "coloredlogs"
+          }
+        },
+        {
+          "pypi": {
+            "package": "tqdm"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geoalchemy2"
+          }
+        },
+        {
+          "pypi": {
+            "package": "databricks-sdk"
+          }
+        }
+      ],
+      "timeout_seconds": 28800
+    }
+  ],
+  "run_as": {
+    "user_name": "adm.tdowning@global.un.org"
+  },
+  "email_notifications": {
+    "on_failure": [
+      "tristan.downing@un.org"
+    ]
+  }
+}
