@@ -8,7 +8,7 @@ up until a new version can't install over an old one
 ocha-lens entry except the one you want to keep, then restart the cluster.
 
     uv run python scripts/clean_cluster_lens.py --keep 0.5.1
-    databricks clusters restart 0515-161935-i2w5mxhc -p default
+    databricks clusters restart 0515-161935-i2w5mxhc -p DEFAULT
 
 Uninstalls only take effect on restart, so the restart is required.
 (Delete this script once the bundle moves to an ephemeral job cluster.)
@@ -20,7 +20,7 @@ import subprocess
 import sys
 
 CLUSTER_ID = "0515-161935-i2w5mxhc"
-PROFILE = "default"
+PROFILE = "DEFAULT"
 
 
 def _cli(args: list[str]) -> str:
