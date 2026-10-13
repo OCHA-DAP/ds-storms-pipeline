@@ -598,19 +598,20 @@ targets:
       mode: prod
       etl_mode: prod
     # NHC prod runs on an ephemeral Job Compute cluster (policy bakes in the
-    # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral
-    # single-worker job cluster (num_workers: 1, fixed by the Job Compute
-    # policy). IBTrACS below uses the single-node policy instead.
+    # dsci DB/blob secrets). GDACS/ADAM prod runs on its own ephemeral job
+    # cluster. All four jobs are on the Job Compute (single node) policy:
+    # one VM per run (num_workers: 0, fixed by the policy).
     resources:
       jobs:
         nhc_pipeline:
           job_clusters:
             - job_cluster_key: nhc_cluster
               new_cluster:
-                # Job Compute policy (000C79D951EAF0D6): fixes cluster_type=job,
-                # num_workers=1, STANDARD engine, and injects all dsci secret
-                # env vars (DEV+PROD DB/blob), so no spark_env_vars block needed.
-                policy_id: "000C79D951EAF0D6"
+                # Job Compute (single node) policy (0017962FF5D1E3B9): fixes
+                # cluster_type=job, num_workers=0, STANDARD engine, and injects
+                # all dsci secret env vars (DEV+PROD DB/blob), so no
+                # spark_env_vars block needed.
+                policy_id: "0017962FF5D1E3B9"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 # DS4_v2 (28 GB), not DS3_v2 (14 GB): the WSP fcastonly
@@ -620,7 +621,7 @@ targets:
                 # treats as done. ~15 min x 8 runs/day, so the cost delta is
                 # negligible next to silent WSP exposure gaps.
                 node_type_id: "Standard_DS4_v2"
-                num_workers: 1
+                num_workers: 0
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: etl
@@ -641,17 +642,17 @@ targets:
           job_clusters:
             - job_cluster_key: gdacs_adam_cluster
               new_cluster:
-                # Job Compute policy (000C79D951EAF0D6): lets adm.tdowning
-                # create the cluster without the global allow-cluster-create
-                # entitlement (a raw new_cluster 403s with PERMISSION_DENIED),
-                # and injects all dsci DB/blob secrets — so no spark_env_vars
-                # block. Policy fixes cluster_type=job/num_workers=1 and
-                # forbids the singleNode profile.
-                policy_id: "000C79D951EAF0D6"
+                # Job Compute (single node) policy (0017962FF5D1E3B9): lets
+                # adm.tdowning create the cluster without the global
+                # allow-cluster-create entitlement (a raw new_cluster 403s
+                # with PERMISSION_DENIED), and injects all dsci DB/blob
+                # secrets — so no spark_env_vars block. Policy fixes
+                # cluster_type=job/num_workers=0 and the singleNode profile.
+                policy_id: "0017962FF5D1E3B9"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 node_type_id: "Standard_DS3_v2"
-                num_workers: 1
+                num_workers: 0
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: gdacs
@@ -663,8 +664,8 @@ targets:
         # IBTrACS / ECMWF prod: ephemeral Job Compute clusters (same policy
         # pattern as above), and — unlike the NHC cutover — mode=prod: these
         # ETLs own the prod storms.ibtracs_* / ecmwf_* tables, matching the
-        # workspace jobs they replace. IBTrACS is on the single-node variant:
-        # the ETL is plain pandas, so the worker VM sat idle.
+        # workspace jobs they replace. IBTrACS moved to the single-node policy
+        # first: the ETL is plain pandas, so the worker VM sat idle.
         ibtracs_pipeline:
           job_clusters:
             - job_cluster_key: ibtracs_cluster
@@ -688,11 +689,11 @@ targets:
           job_clusters:
             - job_cluster_key: ecmwf_cluster
               new_cluster:
-                policy_id: "000C79D951EAF0D6"
+                policy_id: "0017962FF5D1E3B9"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 node_type_id: "Standard_DS3_v2"
-                num_workers: 1
+                num_workers: 0
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: download_ecmwf
