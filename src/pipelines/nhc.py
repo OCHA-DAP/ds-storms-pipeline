@@ -1161,14 +1161,32 @@ def _load_nhc_tracks_obsv_buffer_tracks(
             f" WHERE leadtime = 0 AND issued_time = '{issued_time}')",
             f"issued_time <= '{issued_time}'",
         ]
+    elif since or until:
+        # When a time window is specified, identify active storms in that window,
+        # but load their complete observation history up to 'until' so that cumulative
+        # swaths include observations preceding 'since'.
+        target_filters = base_filters[:]
+        if basin:
+            target_filters.append(f"basin = '{basin}'")
+        if since:
+            target_filters.append(f"issued_time >= '{since}'")
+        if until:
+            target_filters.append(f"issued_time < '{until}'")
+        target_where = " AND ".join(target_filters)
+
+        filters = base_filters + [
+            f"atcf_id IN ("
+            f"SELECT DISTINCT atcf_id FROM storms.nhc_tracks_geo"
+            f" WHERE {target_where})"
+        ]
+        if basin:
+            filters.append(f"basin = '{basin}'")
+        if until:
+            filters.append(f"issued_time < '{until}'")
     else:
         filters = base_filters[:]
         if basin:
             filters.append(f"basin = '{basin}'")
-        if since:
-            filters.append(f"issued_time >= '{since}'")
-        if until:
-            filters.append(f"issued_time < '{until}'")
 
     where = " AND ".join(filters)
     query = f"""
@@ -1263,6 +1281,13 @@ def process_nhc_tracks_obsv_buffers(
     logger.info("Calculating and writing cumulative NHC observational track buffers...")
     cols = ["atcf_id", "valid_time", "wind_speed_kt", "geometry"]
     batch = []
+    since_ts = pd.Timestamp(since) if since else None
+    until_ts = pd.Timestamp(until) if until else None
+    if since_ts is not None and since_ts.tzinfo:
+        since_ts = since_ts.tz_convert("UTC").tz_localize(None)
+    if until_ts is not None and until_ts.tzinfo:
+        until_ts = until_ts.tz_convert("UTC").tz_localize(None)
+
     with write_engine.connect() as conn:
         for atcf_id, storm_gdf in tqdm(
             gdf_obsv.groupby("atcf_id"),
@@ -1273,6 +1298,13 @@ def process_nhc_tracks_obsv_buffers(
             sorted_times = sorted(storm_gdf["issued_time"].unique())
             for t in sorted_times:
                 if issued_time is not None and t != issued_time:
+                    continue
+                t_ts = pd.Timestamp(t)
+                if t_ts.tzinfo:
+                    t_ts = t_ts.tz_convert("UTC").tz_localize(None)
+                if since_ts is not None and t_ts < since_ts:
+                    continue
+                if until_ts is not None and t_ts >= until_ts:
                     continue
                 if (atcf_id, t) in existing:
                     continue
