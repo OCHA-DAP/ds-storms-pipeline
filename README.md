@@ -173,6 +173,36 @@ uv run python run_pipeline.py nhc-scrub --atcf-id AL142024 --issued-time 2024-10
 uv run python run_pipeline.py nhc-scrub --sample --dry-run
 ```
 
+### FMS (RSMC Nadi) — forecast tracks
+
+RSMC Nadi (Fiji Meteorological Service) emails each forecast track as a CSV
+export of its forecast software. `src/pipelines/fms.py` archives the raw file
+to the `storm` blob container (`fms/raw/<DisturbanceId>/...`) and writes the
+issuance to the `fms_*` tables. It has its own CLI rather than a
+`run_pipeline.py` subcommand: the pa-aa-fji-storms Databricks job runs it on
+a Python 3.11 cluster without this repo's other dependencies, so the module
+only imports pandas, sqlalchemy, python-dotenv and ocha-stratus.
+
+```bash
+# Tables (idempotent)
+uv run python scripts/init_db_fms.py --mode dev
+
+# One CSV, from a local file or a blob
+uv run python -m src.pipelines.fms ingest --csv-path forecast.csv --mode dev
+uv run python -m src.pipelines.fms ingest --csv-blob <name> --mode dev
+
+# Every CSV under some blob prefixes (earlier prefixes win on duplicates)
+uv run python -m src.pipelines.fms backfill --blob-prefix <prefix> --mode dev --dry-run
+```
+
+Live ingest: FMS email → Power Automate → poller → the pa-aa-fji-storms
+Databricks job, which runs `ingest` and then the Fiji AA trigger monitor on
+the same cluster. One-off table creation + backfill:
+`databricks jobs submit --json @databricks/fms_init_backfill_{dev,prod}.json`.
+
+Analysis and best tracks are skipped (`status: skipped`); only
+"... Forecast Track" files are written.
+
 ## Database schema
 
 All tables live in the `storms` schema. Geometries are EPSG:4326.
@@ -230,6 +260,14 @@ Same key tuple in both: `(issued_time, wind_threshold_kt, percentage, atcf_id, a
 |---|---|
 | `nhc_wsp_exposure` | `nhc_wsp_polygon_matched` |
 | `nhc_wsp_fcastonly_exposure` | `nhc_wsp_fcastonly_polygon` |
+
+### FMS (RSMC Nadi)
+
+| Table | Key | Notes |
+|---|---|---|
+| `fms_storms` | `disturbance_id` (e.g. `2526-11F`) | `genesis_basin` = `SP`. `season` = the year the season ends. `name` from the latest named forecast (pronunciation guide removed: `RAE [RAY]` → `RAE`). |
+| `fms_forecasts` | `(disturbance_id, track_type, issued_time)` | One row per CSV: `name_as_issued`, `content_sha256`, `raw_blob`, `n_points`. Deleting a row cascades to its track points. |
+| `fms_tracks_geo` | `(disturbance_id, track_type, issued_time, valid_time)` | NHC-shaped track points (`quadrant_radius_34/50/64` JSON `[NE,SE,SW,NW]`, nm) plus FMS columns: 48 kt radii, symmetric `radius_*`, `uncertainty`, `category`, and `raw_fields` (JSONB) for every other CSV column. Longitude in [-180, 180). No range CHECKs on physical values, so one odd value can't stop a forecast landing. |
 
 ### Shared
 
