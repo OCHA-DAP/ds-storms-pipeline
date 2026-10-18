@@ -58,6 +58,16 @@ SCALAR_COLS = {
     "Uncertainty": "uncertainty",
 }
 
+# Archived folders also hold hand-edited copies made for simulation
+# exercises and tests; never backfill those as real forecasts.
+BACKFILL_EXCLUDE = (
+    "MODIFIED_",
+    "inject_forecast",
+    "_edited",
+    " copy",
+    "/test/",
+)
+
 _DISTURBANCE_RE = re.compile(r"^(\d{2})(\d{2})-(\d{2}[A-Z])$")
 _PRONUNCIATION_RE = re.compile(r"[\[(][^\])]*[\])]")
 _UNNAMED = {"", "NONAME", "NO NAME", "UNNAMED"}
@@ -481,15 +491,18 @@ def backfill_fms(
     blob_stage: str = "dev",
     container: str = "projects",
     dry_run: bool = False,
+    exclude: tuple[str, ...] = BACKFILL_EXCLUDE,
 ) -> dict:
     """Ingest every forecast-track CSV under ``prefixes``, oldest first.
+
+    Blob names containing any of ``exclude`` are left out and reported.
 
     Prefixes are in priority order: when several files hold the same
     issuance, the copy under the earliest prefix is written and copies with
     different content are reported. (Some archived copies were re-exported
     with rounded positions; the emailed originals should win.)
     """
-    names = []
+    names, excluded = [], []
     for prefix in prefixes:
         for name in sorted(
             stratus.list_container_blobs(
@@ -498,8 +511,12 @@ def backfill_fms(
                 container_name=container,
             )
         ):
-            if name.lower().endswith(".csv") and name not in names:
-                names.append(name)
+            if not name.lower().endswith(".csv") or name in names:
+                continue
+            if any(pattern in name for pattern in exclude):
+                excluded.append(name)
+                continue
+            names.append(name)
     logger.info(f"{len(names)} CSV files under {prefixes}")
 
     by_key, skipped, failed = {}, [], []
@@ -557,6 +574,7 @@ def backfill_fms(
         "files": len(names),
         "issuances": len(chosen),
         "written": len(results),
+        "excluded": excluded,
         "skipped": skipped,
         "failed": failed,
         "differing_duplicates": duplicates,
@@ -564,7 +582,8 @@ def backfill_fms(
     logger.info(
         f"Backfill {mode}: {report['issuances']} issuances from "
         f"{report['files']} files, {len(results)} written, "
-        f"{len(skipped)} skipped, {len(failed)} failed, "
+        f"{len(skipped)} skipped, {len(excluded)} excluded, "
+        f"{len(failed)} failed, "
         f"{len(duplicates)} issuances with differing copies"
     )
     return report
@@ -641,4 +660,6 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # the Azure SDK logs every HTTP request and response at INFO
+    logging.getLogger("azure").setLevel(logging.WARNING)
     raise SystemExit(main())

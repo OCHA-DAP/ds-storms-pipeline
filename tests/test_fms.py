@@ -318,3 +318,42 @@ def test_schema_has_every_track_column():
         )
     }
     assert set(fms.TRACK_COLUMNS) <= declared
+
+
+def test_backfill_excludes_test_files_and_prefers_earlier_prefix(monkeypatch):
+    blobs = {
+        "a/onedrive/f1.csv": make_csv(),
+        "a/onedrive/MODIFIED_f1.csv": make_csv(name="FAKE"),
+        "b/archive/f1.csv": make_csv(rows=ROWS[:2]),
+        "b/archive/test/f2.csv": make_csv(disturbance_id="2526-12F"),
+        "b/archive/notes.txt": b"x",
+    }
+    monkeypatch.setattr(
+        fms.stratus,
+        "list_container_blobs",
+        lambda name_starts_with, stage, container_name: [
+            b for b in blobs if b.startswith(name_starts_with)
+        ],
+    )
+    monkeypatch.setattr(
+        fms.stratus,
+        "load_blob_data",
+        lambda name, stage, container_name: blobs[name],
+    )
+    report = fms.backfill_fms(["a/", "b/"], "dev", dry_run=True)
+    assert sorted(report["excluded"]) == [
+        "a/onedrive/MODIFIED_f1.csv",
+        "b/archive/test/f2.csv",
+    ]
+    assert report["issuances"] == 1
+    assert report["differing_duplicates"] == [
+        {
+            "key": [
+                "2526-11F",
+                "Official Forecast Track",
+                "2026-04-07 00:00:00",
+            ],
+            "written": "a/onedrive/f1.csv",
+            "not_written": ["b/archive/f1.csv"],
+        }
+    ]
