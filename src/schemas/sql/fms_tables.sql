@@ -16,9 +16,11 @@
 -- its track points) and re-inserted in one transaction, so a reissued CSV
 -- with fewer points can't leave stale rows behind.
 --
--- Physical values carry no range CHECKs, unlike nhc_tracks_geo: this table
--- feeds a live alert path, and one odd value must not stop a forecast from
--- landing. The raw CSV is archived to blob (fms_forecasts.raw_blob).
+-- Physical values are DOUBLE PRECISION, so they hold the CSV's values
+-- exactly (REAL rounds 967.8333129882812 to 967.8333), and carry no range
+-- CHECKs, unlike nhc_tracks_geo: this table feeds a live alert path, and
+-- one odd value must not stop a forecast from landing. The raw CSV is
+-- archived to blob (fms_forecasts.raw_blob).
 -- ============================================================================
 
 -- ============================================================================
@@ -129,18 +131,18 @@ CREATE TABLE IF NOT EXISTS storms.fms_tracks_geo
     issued_time TIMESTAMP NOT NULL,
     valid_time TIMESTAMP NOT NULL,
     leadtime INTEGER NOT NULL CHECK (leadtime >= 0),
-    wind_speed REAL,
-    gust_speed REAL,
-    pressure REAL,
-    max_wind_radius REAL,
-    last_closed_isobar_radius REAL,
-    last_closed_isobar_pressure REAL,
-    category REAL,
-    uncertainty REAL,
-    radius_34 REAL,
-    radius_48 REAL,
-    radius_50 REAL,
-    radius_64 REAL,
+    wind_speed DOUBLE PRECISION,
+    gust_speed DOUBLE PRECISION,
+    pressure DOUBLE PRECISION,
+    max_wind_radius DOUBLE PRECISION,
+    last_closed_isobar_radius DOUBLE PRECISION,
+    last_closed_isobar_pressure DOUBLE PRECISION,
+    category DOUBLE PRECISION,
+    uncertainty DOUBLE PRECISION,
+    radius_34 DOUBLE PRECISION,
+    radius_48 DOUBLE PRECISION,
+    radius_50 DOUBLE PRECISION,
+    radius_64 DOUBLE PRECISION,
     quadrant_radius_34 TEXT,
     quadrant_radius_48 TEXT,
     quadrant_radius_50 TEXT,
