@@ -51,13 +51,15 @@ Two choices differ from the NHC tables and pipelines:
 
 ### Consequences
 
-* The parser checks what the database doesn't. A value that can't be read
-  as a number fails the file (`FmsParseError`) if the Fiji trigger reads
-  that column (`TRIGGER_COLS`: position, wind, category, uncertainty,
-  34/50/64 kt radii), so the monitor falls back to the CSV. In any other
-  column it is logged and stored as NULL. Blank cells are missing values.
-  A file with no points, or a point without a readable time or position,
-  also fails.
+* The parser checks what the database doesn't. A value that isn't a finite
+  number (`inf` included) fails the file (`FmsParseError`) if the Fiji
+  trigger reads that column (`TRIGGER_COLS`: position, wind, category,
+  uncertainty, 34/50/64 kt radii), so the monitor falls back to the CSV. In
+  any other column it is logged and stored as NULL. Blank cells and pandas'
+  NA markers (`NaN`, `NA`, `N/A`, `null`, ...) are missing values. A file
+  without one of the trigger's columns (the symmetric radii are optional),
+  with no points, or with a point without a readable time or position also
+  fails.
 * Good: the alert path never runs on a silently degraded forecast, and an
   odd value elsewhere never stops a forecast landing.
 * Bad: the FMS tables don't follow the NHC tables' conventions. Code that

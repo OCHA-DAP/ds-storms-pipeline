@@ -165,19 +165,43 @@ def test_blank_cell_is_missing_and_keeps_the_column():
 
 @pytest.mark.parametrize(
     "col, value",
-    [("NEHurricaneRadius", "?"), ("MeanWind", "-"), ("Latitude", "?")],
+    [
+        ("NEHurricaneRadius", "?"),
+        ("MeanWind", "-"),
+        ("Latitude", "?"),
+        # read_csv reads inf as a number; it must not reach the trigger,
+        # and an infinite longitude would never wrap into range.
+        ("MeanWind", "inf"),
+        ("Longitude", "inf"),
+        ("Longitude", "-inf"),
+    ],
 )
 def test_unreadable_trigger_value_fails(col, value):
     with pytest.raises(fms.FmsParseError, match=f"unreadable {col}"):
         fms.parse_fms_csv(with_cell(2, col, value))
 
 
-def test_unreadable_other_value_is_logged_and_null(caplog):
+@pytest.mark.parametrize("value", ["-", "inf"])
+def test_unreadable_other_value_is_logged_and_null(caplog, value):
     with caplog.at_level(logging.WARNING, logger=fms.logger.name):
-        t = fms.parse_fms_csv(with_cell(2, "WindGust", "-")).tracks
+        t = fms.parse_fms_csv(with_cell(2, "WindGust", value)).tracks
     assert t["gust_speed"].iloc[0] == 120.0
     assert t["gust_speed"].iloc[1:].isna().all()
-    assert "unreadable WindGust values ['-']" in caplog.text
+    assert f"unreadable WindGust values ['{value}']" in caplog.text
+
+
+def test_missing_trigger_column_fails():
+    data = make_csv().replace(b",MeanWind,", b",MeanWindX,")
+    with pytest.raises(
+        fms.FmsParseError, match=r"missing columns \['MeanWind'\]"
+    ):
+        fms.parse_fms_csv(data)
+
+
+def test_unreadable_base_time_fails():
+    data = make_csv(line1="# trackType=Official Forecast Track,baseTime=soon")
+    with pytest.raises(fms.FmsParseError, match="baseTime"):
+        fms.parse_fms_csv(data)
 
 
 def test_raw_fields_keep_numbers_beside_an_unreadable_cell():

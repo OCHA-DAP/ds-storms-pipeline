@@ -203,10 +203,11 @@ after changing `fms.py`, tag main and bump `storms_pipeline_ref` in its
 `databricks jobs submit --json @databricks/fms_init_backfill_{dev,prod}.json`.
 
 Analysis and best tracks are skipped (`status: skipped`); only
-"... Forecast Track" files are written. A value that can't be read as a
-number fails the file if the Fiji trigger reads that column (position, wind,
-category, uncertainty, 34/50/64 kt radii); elsewhere it is stored as NULL with
-a warning. See `docs/decisions/0002-fms-tables-and-standalone-cli.md`.
+"... Forecast Track" files are written. A value that isn't a finite number
+fails the file if the Fiji trigger reads that column (position, wind,
+category, uncertainty, 34/50/64 kt radii), and so does a file missing one of
+those columns; elsewhere it is stored as NULL with a warning. Blank cells and
+`NaN` are missing values. See `docs/decisions/0002-fms-tables-and-standalone-cli.md`.
 
 ## Database schema
 

@@ -208,24 +208,24 @@ def _read_numbers(df: pd.DataFrame, label: str) -> None:
     """Make the numeric columns numeric, cell by cell, in place.
 
     One unreadable cell makes ``read_csv`` type its whole column as text,
-    which would otherwise lose every value in it. Blank cells are missing
-    values. Any other unreadable value fails the file if the Fiji trigger
-    reads that column (TRIGGER_COLS); elsewhere it is logged and stored as
-    NULL.
+    which would otherwise lose every value in it. Blank cells and pandas' NA
+    markers (NaN, NA, N/A, null, ...) are missing values. Any other value
+    that isn't a finite number (``inf`` included) fails the file if the Fiji
+    trigger reads that column (TRIGGER_COLS); elsewhere it is logged and
+    stored as NULL.
     """
     for col in sorted(_numeric_columns() & set(df.columns)):
-        if pd.api.types.is_numeric_dtype(df[col]):
-            continue
         values = df[col].map(lambda v: v.strip() if isinstance(v, str) else v)
         blank = values.isna() | values.eq("")
         numbers = pd.to_numeric(values.where(~blank), errors="coerce")
-        bad = sorted(set(values[~blank & numbers.isna()]))
-        if bad:
+        unreadable = ~blank & ~numbers.map(math.isfinite)
+        if unreadable.any():
+            bad = sorted({str(v) for v in values[unreadable]})
             message = f"{label}: unreadable {col} values {bad}"
             if col in TRIGGER_COLS:
                 raise FmsParseError(message)
             logger.warning(f"{message}, stored as NULL")
-        df[col] = numbers
+        df[col] = numbers.where(~unreadable)
 
 
 def _raw_value(value) -> float | str | None:
@@ -293,7 +293,12 @@ def parse_fms_csv(data: bytes, filename: str | None = None) -> FmsForecast:
 
     disturbance_id = header["DisturbanceId"]
     season = season_from_disturbance_id(disturbance_id)
-    issued = pd.Timestamp(header["baseTime"])
+    try:
+        issued = pd.Timestamp(header["baseTime"])
+    except ValueError as exc:
+        raise FmsParseError(
+            f"Unreadable baseTime {header['baseTime']!r}"
+        ) from exc
     if issued.tzinfo is not None:
         issued = issued.tz_convert(None)
     issued_time = issued.to_pydatetime()
@@ -308,9 +313,14 @@ def parse_fms_csv(data: bytes, filename: str | None = None) -> FmsForecast:
 
     label = f"{disturbance_id} {issued_time}"
     df = pd.read_csv(io.StringIO("\n".join(csv_lines)))
-    for col in (TIME_COL, "Latitude", "Longitude"):
-        if col not in df.columns:
-            raise FmsParseError(f"Missing column {col!r}")
+    # The symmetric radii are optional: the trigger falls back to them only
+    # where a point has no quadrant radii.
+    required = {TIME_COL, *TRIGGER_COLS} - {
+        f"{RADIUS_WORDS[speed]}Radius" for speed in (34, 50, 64)
+    }
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise FmsParseError(f"{label}: missing columns {missing}")
     # An empty file must not replace a stored issuance's points with none.
     if df.empty:
         raise FmsParseError(f"{label}: no track points")
@@ -331,7 +341,7 @@ def parse_fms_csv(data: bytes, filename: str | None = None) -> FmsForecast:
         df = df[~duplicated]
     leadtime = (df["valid_time"] - issued_time) / pd.Timedelta(hours=1)
     if (leadtime < 0).any():
-        raise FmsParseError("Track point before baseTime")
+        raise FmsParseError(f"{label}: track point before baseTime")
 
     consumed = _consumed_columns()
     rows = []
