@@ -197,11 +197,16 @@ uv run python -m src.pipelines.fms backfill --blob-prefix <prefix> --mode dev --
 
 Live ingest: FMS email → Power Automate → poller → the pa-aa-fji-storms
 Databricks job, which runs `ingest` and then the Fiji AA trigger monitor on
-the same cluster. One-off table creation + backfill:
+the same cluster. That job clones this repo at a tag (`fms-v*`), not `main`:
+after changing `fms.py`, tag main and bump `storms_pipeline_ref` in its
+`databricks.yml`. One-off table creation + backfill:
 `databricks jobs submit --json @databricks/fms_init_backfill_{dev,prod}.json`.
 
 Analysis and best tracks are skipped (`status: skipped`); only
-"... Forecast Track" files are written.
+"... Forecast Track" files are written. A value that can't be read as a
+number fails the file if the Fiji trigger reads that column (position, wind,
+category, uncertainty, 34/50/64 kt radii); elsewhere it is stored as NULL with
+a warning. See `docs/decisions/0002-fms-tables-and-standalone-cli.md`.
 
 ## Database schema
 

@@ -5,8 +5,11 @@ The CSVs are synthetic: same layout as the FMS export (header comments,
 writer is checked against a fake connection that records each statement.
 """
 
+import ast
 import json
+import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -148,6 +151,71 @@ def test_raw_fields_hold_the_other_columns():
     assert pd.isna(t["raw_fields"].iloc[1])
 
 
+def with_cell(index, col, value):
+    rows = [dict(r) for r in ROWS]
+    rows[index][col] = value
+    return make_csv(rows=rows)
+
+
+def test_blank_cell_is_missing_and_keeps_the_column():
+    t = fms.parse_fms_csv(with_cell(2, "HurricaneRadius", " ")).tracks
+    assert t["radius_64"].iloc[:2].tolist() == [25.0, 20.0]
+    assert pd.isna(t["radius_64"].iloc[2])
+
+
+@pytest.mark.parametrize(
+    "col, value",
+    [("NEHurricaneRadius", "?"), ("MeanWind", "-"), ("Latitude", "?")],
+)
+def test_unreadable_trigger_value_fails(col, value):
+    with pytest.raises(fms.FmsParseError, match=f"unreadable {col}"):
+        fms.parse_fms_csv(with_cell(2, col, value))
+
+
+def test_unreadable_other_value_is_logged_and_null(caplog):
+    with caplog.at_level(logging.WARNING, logger=fms.logger.name):
+        t = fms.parse_fms_csv(with_cell(2, "WindGust", "-")).tracks
+    assert t["gust_speed"].iloc[0] == 120.0
+    assert t["gust_speed"].iloc[1:].isna().all()
+    assert "unreadable WindGust values ['-']" in caplog.text
+
+
+def test_raw_fields_keep_numbers_beside_an_unreadable_cell():
+    rows = [dict(r) for r in ROWS]
+    rows[1]["P5Wind"] = 90.0
+    rows[2]["P5Wind"] = "-"
+    t = fms.parse_fms_csv(make_csv(rows=rows)).tracks
+    assert [json.loads(r) for r in t["raw_fields"]] == [
+        {"P5Wind": 105.0},
+        {"P5Wind": 90.0},
+        {"P5Wind": "-"},
+    ]
+
+
+@pytest.mark.parametrize("time", ["", "not a time"])
+def test_unreadable_time_fails(time):
+    with pytest.raises(fms.FmsParseError, match="readable time"):
+        fms.parse_fms_csv(with_cell(1, HEADINGS[0], time))
+
+
+def test_file_without_points_fails():
+    with pytest.raises(fms.FmsParseError, match="no track points"):
+        fms.parse_fms_csv(make_csv(rows=[]))
+
+
+def test_imports_stay_light():
+    # pa-aa-fji-storms runs fms.py on a cluster with only these installed.
+    tree = ast.parse(Path(fms.__file__).read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add("." if node.level else node.module.split(".")[0])
+    allowed = {"dotenv", "ocha_stratus", "pandas", "sqlalchemy"}
+    assert imported - set(sys.stdlib_module_names) <= allowed
+
+
 def test_header_variants():
     # Analysis-style line 1 with an extra field, trailing commas, CRLF.
     data = make_csv(
@@ -285,7 +353,7 @@ def test_write_forecast_replaces_issuance_and_renames():
     track_params = conn.calls[3][1]
     assert len(track_params) == 3
     assert track_params[0]["leadtime"] == 0
-    assert type(track_params[0]["leadtime"]) is int
+    assert isinstance(track_params[0]["leadtime"], int)
     # NaN goes in as NULL.
     assert track_params[2]["wind_speed"] is None
     assert conn.calls[5][1] == {

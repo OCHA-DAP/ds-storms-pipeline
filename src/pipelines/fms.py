@@ -11,7 +11,9 @@ blob and writes that one issuance.
 The pa-aa-fji-storms Databricks job runs this module on its own cluster
 (``python -m src.pipelines.fms ingest ...``), which has Python 3.11 and none
 of this repo's other dependencies. Keep the imports here to pandas,
-sqlalchemy, python-dotenv and ocha-stratus.
+sqlalchemy, python-dotenv and ocha-stratus (tests/test_fms.py checks). That
+job runs a tagged version of this repo (``fms-v*``): after changing this
+module, tag main and bump ``storms_pipeline_ref`` in its databricks.yml.
 """
 
 import argparse
@@ -56,6 +58,23 @@ SCALAR_COLS = {
     "PressureOCI": "last_closed_isobar_pressure",
     "Category": "category",
     "Uncertainty": "uncertainty",
+}
+
+# The columns the pa-aa-fji-storms trigger reads: position, wind, category,
+# uncertainty and the 34/50/64 kt radii. An unreadable value in one of these
+# fails the file, so the Fiji monitor falls back to the emailed CSV instead
+# of running the trigger on a NULL.
+TRIGGER_COLS = {
+    "Latitude",
+    "Longitude",
+    "MeanWind",
+    "Category",
+    "Uncertainty",
+    *(
+        f"{quad}{RADIUS_WORDS[speed]}Radius"
+        for speed in (34, 50, 64)
+        for quad in ("", *QUADS)
+    ),
 }
 
 # Archived folders also hold hand-edited copies made for simulation
@@ -174,7 +193,53 @@ def _num(value) -> float | None:
         value = float(value)
     except (TypeError, ValueError):
         return None
-    return None if math.isnan(value) else value
+    return value if math.isfinite(value) else None
+
+
+def _numeric_columns() -> set[str]:
+    cols = {"Latitude", "Longitude", *SCALAR_COLS}
+    for word in RADIUS_WORDS.values():
+        cols.add(f"{word}Radius")
+        cols.update(f"{quad}{word}Radius" for quad in QUADS)
+    return cols
+
+
+def _read_numbers(df: pd.DataFrame, label: str) -> None:
+    """Make the numeric columns numeric, cell by cell, in place.
+
+    One unreadable cell makes ``read_csv`` type its whole column as text,
+    which would otherwise lose every value in it. Blank cells are missing
+    values. Any other unreadable value fails the file if the Fiji trigger
+    reads that column (TRIGGER_COLS); elsewhere it is logged and stored as
+    NULL.
+    """
+    for col in sorted(_numeric_columns() & set(df.columns)):
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        values = df[col].map(lambda v: v.strip() if isinstance(v, str) else v)
+        blank = values.isna() | values.eq("")
+        numbers = pd.to_numeric(values.where(~blank), errors="coerce")
+        bad = sorted(set(values[~blank & numbers.isna()]))
+        if bad:
+            message = f"{label}: unreadable {col} values {bad}"
+            if col in TRIGGER_COLS:
+                raise FmsParseError(message)
+            logger.warning(f"{message}, stored as NULL")
+        df[col] = numbers
+
+
+def _raw_value(value) -> float | str | None:
+    """A cell for ``raw_fields``: a number where it reads as one."""
+    if not isinstance(value, str):
+        return _num(value)
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    return number if math.isfinite(number) else value
 
 
 def _wrap_longitude(lon: float) -> float:
@@ -195,11 +260,7 @@ def _quadrants(row: pd.Series, word: str) -> str | None:
 
 
 def _consumed_columns() -> set[str]:
-    cols = {TIME_COL, "valid_time", "Latitude", "Longitude", *SCALAR_COLS}
-    for word in RADIUS_WORDS.values():
-        cols.add(f"{word}Radius")
-        cols.update(f"{quad}{word}Radius" for quad in QUADS)
-    return cols
+    return {TIME_COL, "valid_time", *_numeric_columns()}
 
 
 def _raw_fields(row: pd.Series, consumed: set[str]) -> str | None:
@@ -207,10 +268,9 @@ def _raw_fields(row: pd.Series, consumed: set[str]) -> str | None:
     for col, value in row.items():
         if col in consumed:
             continue
-        if isinstance(value, str):
+        value = _raw_value(value)
+        if value is not None:
             fields[col] = value
-        elif _num(value) is not None:
-            fields[col] = float(value)
     return json.dumps(fields) if fields else None
 
 
@@ -246,15 +306,22 @@ def parse_fms_csv(data: bytes, filename: str | None = None) -> FmsForecast:
     name = clean_name(name_as_issued)
     storm_id = make_storm_id(name, season)
 
+    label = f"{disturbance_id} {issued_time}"
     df = pd.read_csv(io.StringIO("\n".join(csv_lines)))
     for col in (TIME_COL, "Latitude", "Longitude"):
         if col not in df.columns:
             raise FmsParseError(f"Missing column {col!r}")
-    df["valid_time"] = pd.to_datetime(df[TIME_COL], utc=True).dt.tz_localize(
-        None
-    )
+    # An empty file must not replace a stored issuance's points with none.
+    if df.empty:
+        raise FmsParseError(f"{label}: no track points")
+    _read_numbers(df, label)
+    df["valid_time"] = pd.to_datetime(
+        df[TIME_COL], utc=True, errors="coerce"
+    ).dt.tz_localize(None)
+    if df["valid_time"].isna().any():
+        raise FmsParseError(f"{label}: track point without a readable time")
     if df[["Latitude", "Longitude"]].isna().any().any():
-        raise FmsParseError("Track point without a position")
+        raise FmsParseError(f"{label}: track point without a position")
     duplicated = df["valid_time"].duplicated()
     if duplicated.any():
         logger.warning(
