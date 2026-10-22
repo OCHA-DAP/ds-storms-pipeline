@@ -1,0 +1,94 @@
+{
+  "run_name": "[ops] FMS tables + backfill (prod)",
+  "git_source": {
+    "git_url": "https://github.com/OCHA-DAP/ds-storms-pipeline.git",
+    "git_provider": "gitHub",
+    "git_branch": "main"
+  },
+  "tasks": [
+    {
+      "task_key": "init_db",
+      "spark_python_task": {
+        "python_file": "scripts/init_db_fms.py",
+        "source": "GIT",
+        "parameters": [
+          "--mode",
+          "prod"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        }
+      ],
+      "timeout_seconds": 1800
+    },
+    {
+      "task_key": "backfill",
+      "depends_on": [
+        {
+          "task_key": "init_db"
+        }
+      ],
+      "spark_python_task": {
+        "python_file": "databricks/run_fms.py",
+        "source": "GIT",
+        "parameters": [
+          "backfill",
+          "--blob-prefix",
+          "pa-aa-fji-storms/raw/fms/backfill_staging/",
+          "--blob-prefix",
+          "pa-aa-fji-storms/raw/fms/archive_2023_2024/",
+          "--blob-prefix",
+          "pa-aa-fji-storms/raw/fms/TC Data/",
+          "--mode",
+          "prod"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        }
+      ],
+      "timeout_seconds": 3600
+    }
+  ],
+  "run_as": {
+    "user_name": "adm.tdowning@global.un.org"
+  },
+  "email_notifications": {
+    "on_failure": [
+      "ocha-datascience@un.org"
+    ]
+  }
+}
