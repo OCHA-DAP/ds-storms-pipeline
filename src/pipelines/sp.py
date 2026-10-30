@@ -38,8 +38,10 @@ import numpy as np
 import ocha_stratus as stratus
 import pandas as pd
 import shapely
-from ocha_lens.utils.storm import calculate_wind_buffers_gdf, split_at_antimeridian
+from ocha_lens.utils.storm import calculate_wind_buffers_gdf
 from pyproj import Geod
+from shapely.geometry import box
+from shapely.validation import make_valid
 from sqlalchemy import bindparam, text
 
 from src.utils.exposure import calculate_exposure, load_adm_units, load_pop
@@ -101,6 +103,32 @@ def _country_aeqd(gdf: gpd.GeoDataFrame) -> str:
     )
 
 
+def _split_at_antimeridian(geom):
+    """A polygon with continuous longitudes (0 to 360 here) back into
+    [-180, 180]: parts beyond 180 are clipped off and shifted by 360.
+
+    Admin units, unlike wind swaths, have vertices exactly on ±180 (FieldMaps
+    cuts countries there), which a wrapped ring makes ambiguous: one of the
+    sea-extended Fiji test units came back spanning -180 to 180 through
+    ocha_lens.utils.storm.fix_antimeridian. Clipping continuous longitudes
+    has no such ambiguity.
+    """
+    if geom is None or geom.is_empty:
+        return geom
+    if not geom.is_valid:
+        geom = make_valid(geom)
+    parts = []
+    for k in (-1, 0, 1):
+        piece = geom.intersection(box(-180.0 + 360.0 * k, -90.0, 180.0 + 360.0 * k, 90.0))
+        if piece.is_empty:
+            continue
+        if k:
+            piece = shapely.affinity.translate(piece, xoff=-360.0 * k)
+        parts.extend(p for p in getattr(piece, "geoms", [piece]) if p.geom_type == "Polygon")
+    out = shapely.union_all(parts) if parts else shapely.Polygon()
+    return out if out.is_valid else make_valid(out)
+
+
 def expand_units_into_sea(
     units: gpd.GeoDataFrame, metres: float = SEA_EXPANSION_M
 ) -> gpd.GeoDataFrame:
@@ -125,7 +153,7 @@ def expand_units_into_sea(
         geoms.append(shapely.union(g, sea))
     p["geometry"] = geoms
     back = p.to_crs(_LONWRAP180)
-    back["geometry"] = back.geometry.apply(split_at_antimeridian)
+    back["geometry"] = back.geometry.apply(_split_at_antimeridian)
     return back.set_crs("EPSG:4326", allow_override=True)
 
 
