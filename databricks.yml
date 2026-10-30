@@ -9,6 +9,13 @@
 #                           run_pipeline.py ibtracs
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
+#   • sp_history_pipeline — weekly South Pacific historical exposure refresh
+#                           (run_pipeline.py sp-history --overwrite)
+#   • fms_sp_pipeline     — South Pacific: buffers, exposure and uncertainty
+#                           scenarios for every new FMS (RSMC Nadi) forecast,
+#                           run_pipeline.py fms-sp, then starts the South
+#                           Pacific alert. No schedule: started by the
+#                           pa-aa-fji-storms job after each FMS ingest.
 #
 # The jobs stay separate in the Workflows UI (own DAG / schedule /
 # compute). "One bundle" just means one databricks.yml deploys them all.
@@ -60,6 +67,12 @@ variables:
       Hurricane Monitoring job (ds-aa-hti-hurricanes bundle, runs main),
       which also has its own :50 cron as a fallback.
     default: "586426884912849"   # HTI Hurricane Monitoring (shared, runs main)
+  sp_alert_job_id:
+    description: >-
+      Job ID fms_sp_pipeline starts after processing (fire-and-forget):
+      ds-storms-alerts' "Storm Alert (South Pacific)". Empty string => the
+      trigger task no-ops (until that job is deployed).
+    default: ""
 
 resources:
   jobs:
@@ -533,6 +546,121 @@ resources:
               - "{{job.parameters.mode}}"
           libraries: *ibtracs_libs
 
+    # ===================================================================
+    # South Pacific (RSMC Nadi / FMS) — src/pipelines/sp.py. FMS emails
+    # forecasts irregularly, one storm at a time; the pa-aa-fji-storms job
+    # ingests each into storms.fms_* and then starts this job, which
+    # processes every Official forecast not yet complete (per-storm
+    # completion markers, so a missed run is caught up by the next) and
+    # then starts the South Pacific alert. Needs ocha-lens with
+    # calculate_wind_buffers_gdf(method="geodesic").
+    # ===================================================================
+    fms_sp_pipeline:
+      name: South Pacific FMS Pipeline
+      description: "Wind swaths, population exposure and track-uncertainty scenarios for every new RSMC Nadi (FMS) forecast; then starts the South Pacific storm alert"
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+      max_concurrent_runs: 1
+      # Two FMS batches close together: the second run waits, then finds
+      # whatever the first left (usually nothing).
+      queue:
+        enabled: true
+      tags:
+        databricks: job
+        type: exposure
+        hazard: tropical-cyclone
+        kb: storms-pipeline
+        output_schema: storms.fms_tracks_*,storms.fms_processing_completion
+      email_notifications:
+        on_failure:
+          - tristan.downing@un.org
+        no_alert_for_skipped_runs: true
+      parameters:
+        - name: mode
+          default: ${var.mode}
+      tasks:
+        - task_key: fms_sp
+          timeout_seconds: 7200
+          spark_python_task:
+            python_file: run_pipeline.py
+            source: GIT
+            parameters:
+              - "fms-sp"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+          libraries: &sp_libs
+            - pypi: { package: "ocha-stratus" }
+            - pypi: { package: "ocha-lens==0.7.0" }
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
+            - pypi: { package: "antimeridian" }
+            - pypi: { package: "coloredlogs" }
+            - pypi: { package: "tqdm" }
+            - pypi: { package: "geoalchemy2" }
+            - pypi: { package: "databricks-sdk" }
+        - task_key: trigger_sp_alert
+          depends_on:
+            - task_key: fms_sp
+          spark_python_task:
+            python_file: databricks/trigger_job.py
+            source: GIT
+            parameters:
+              - "${var.sp_alert_job_id}"
+              - ""
+          libraries: *sp_libs
+
+    # Weekly refresh of the South Pacific historical record (return periods),
+    # after Monday's IBTrACS release: recomputes every storm since 2001/02 and
+    # drops superseded provisional records. Its own job because it needs a
+    # newer ocha-lens than ibtracs_pipeline pins (one cluster, one version).
+    sp_history_pipeline:
+      name: South Pacific History
+      description: "Recompute the South Pacific historical wind swaths and population exposure from the latest IBTrACS (return periods for the South Pacific storm alert)"
+      permissions:
+        - group_name: dsci
+          level: CAN_MANAGE
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-pipeline.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * TUE"
+        timezone_id: UTC
+      max_concurrent_runs: 1
+      tags:
+        databricks: job
+        type: exposure
+        hazard: tropical-cyclone
+        kb: storms-pipeline
+        output_schema: storms.ibtracs_sp_wind_buffers,storms.ibtracs_sp_wind_exposure
+      email_notifications:
+        on_failure:
+          - tristan.downing@un.org
+        no_alert_for_skipped_runs: true
+      parameters:
+        - name: mode
+          default: ${var.mode}
+      tasks:
+        - task_key: sp_history
+          timeout_seconds: 5400
+          spark_python_task:
+            python_file: run_pipeline.py
+            source: GIT
+            parameters:
+              - "sp-history"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+              - "--overwrite"
+          libraries: *sp_libs
+
 targets:
   dev:
     mode: development
@@ -576,6 +704,16 @@ targets:
         ecmwf_pipeline:
           tasks:
             - task_key: download_ecmwf
+              existing_cluster_id: ${var.existing_cluster_id}
+        fms_sp_pipeline:
+          tasks:
+            - task_key: fms_sp
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: trigger_sp_alert
+              existing_cluster_id: ${var.existing_cluster_id}
+        sp_history_pipeline:
+          tasks:
+            - task_key: sp_history
               existing_cluster_id: ${var.existing_cluster_id}
 
   prod:
@@ -698,3 +836,31 @@ targets:
           tasks:
             - task_key: download_ecmwf
               job_cluster_key: ecmwf_cluster
+        fms_sp_pipeline:
+          job_clusters:
+            - job_cluster_key: fms_sp_cluster
+              new_cluster:
+                policy_id: "0017962FF5D1E3B9"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS4_v2"
+                num_workers: 0
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: fms_sp
+              job_cluster_key: fms_sp_cluster
+            - task_key: trigger_sp_alert
+              job_cluster_key: fms_sp_cluster
+        sp_history_pipeline:
+          job_clusters:
+            - job_cluster_key: sp_history_cluster
+              new_cluster:
+                policy_id: "0017962FF5D1E3B9"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS4_v2"
+                num_workers: 0
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: sp_history
+              job_cluster_key: sp_history_cluster

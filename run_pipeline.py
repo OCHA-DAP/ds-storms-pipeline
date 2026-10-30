@@ -73,6 +73,7 @@ from src.pipelines.nhc import (
 from src.pipelines.gdacs import run_gdacs_archive, run_gdacs_current
 from src.pipelines.adam import run_adam_archive, run_adam_current
 from src.pipelines.match import run_match
+from src.pipelines.sp import run_fms_realtime, run_sp_admin_population, run_sp_history
 
 
 def main():
@@ -497,6 +498,46 @@ def main():
     )
 
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # South Pacific (RSMC Nadi / FMS): src/pipelines/sp.py
+    # ------------------------------------------------------------------ #
+    fms_sp_parser = subparsers.add_parser(
+        "fms-sp",
+        parents=[common],
+        help=(
+            "FMS forecast buffers, exposure and uncertainty scenarios for every "
+            "Official forecast not yet processed (or the one given)"
+        ),
+    )
+    fms_sp_parser.add_argument("--disturbance-id", metavar="ID", help="e.g. 2526-11F")
+    fms_sp_parser.add_argument("--issued-time", metavar="YYYY-MM-DDTHH")
+    fms_sp_parser.add_argument("--since", metavar="YYYY-MM-DD")
+    fms_sp_parser.add_argument("--overwrite", action="store_true")
+    fms_sp_parser.add_argument(
+        "--no-scenarios", action="store_true",
+        help="Skip the 36 uncertainty-shifted tracks",
+    )
+
+    sp_history_parser = subparsers.add_parser(
+        "sp-history",
+        parents=[common],
+        help="Historical South Pacific buffers + exposure from IBTrACS",
+    )
+    sp_history_parser.add_argument("--first-season", type=int, default=2002)
+    sp_history_parser.add_argument("--sids", nargs="+", metavar="SID")
+    sp_history_parser.add_argument("--overwrite", action="store_true")
+    sp_history_parser.add_argument("--nc-path", help="Local IBTrACS.SP netCDF (else downloaded)")
+    sp_history_parser.add_argument(
+        "--out-dir", help="Write parquet here instead of the database (dry run)"
+    )
+
+    sp_pop_parser = subparsers.add_parser(
+        "sp-admin-population",
+        parents=[common],
+        help="Total population per South Pacific (sea-extended) admin unit",
+    )
+    sp_pop_parser.add_argument("--out-dir", help="Write parquet here instead of the database")
+
     args = parser.parse_args()
 
     if args.pipeline == "ibtracs":
@@ -784,6 +825,26 @@ def main():
                 chunksize=args.chunksize,
                 all_episodes=args.all_episodes,
             )
+    elif args.pipeline == "fms-sp":
+        run_fms_realtime(
+            mode=args.mode,
+            disturbance_id=args.disturbance_id,
+            issued_time=_parse_it(args.issued_time),
+            since=_parse_it(args.since),
+            overwrite=args.overwrite,
+            scenarios=not args.no_scenarios,
+        )
+    elif args.pipeline == "sp-history":
+        run_sp_history(
+            mode=args.mode,
+            first_season=args.first_season,
+            sids=args.sids,
+            overwrite=args.overwrite,
+            nc_path=args.nc_path,
+            out_dir=args.out_dir,
+        )
+    elif args.pipeline == "sp-admin-population":
+        run_sp_admin_population(mode=args.mode, out_dir=args.out_dir)
     elif args.pipeline == "match":
         run_match(mode=args.mode)
     elif args.pipeline == "adam":
