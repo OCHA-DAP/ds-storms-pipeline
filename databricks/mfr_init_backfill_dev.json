@@ -1,0 +1,136 @@
+{
+  "run_name": "[ops] MFR tables + backfill + first poll (dev)",
+  "git_source": {
+    "git_url": "https://github.com/OCHA-DAP/ds-storms-pipeline.git",
+    "git_provider": "gitHub",
+    "git_branch": "main"
+  },
+  "tasks": [
+    {
+      "task_key": "init_db",
+      "spark_python_task": {
+        "python_file": "scripts/init_db_mfr.py",
+        "source": "GIT",
+        "parameters": [
+          "--mode",
+          "dev"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus==0.1.7"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        }
+      ],
+      "timeout_seconds": 1800
+    },
+    {
+      "task_key": "backfill",
+      "depends_on": [
+        {
+          "task_key": "init_db"
+        }
+      ],
+      "spark_python_task": {
+        "python_file": "databricks/run_mfr.py",
+        "source": "GIT",
+        "parameters": [
+          "backfill",
+          "--blob-prefix",
+          "ds-storms-pipeline/raw/mfr/backfill_staging/",
+          "--blob-stage",
+          "dev",
+          "--mode",
+          "dev"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus==0.1.7"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        }
+      ],
+      "timeout_seconds": 1800
+    },
+    {
+      "task_key": "poll",
+      "depends_on": [
+        {
+          "task_key": "backfill"
+        }
+      ],
+      "spark_python_task": {
+        "python_file": "databricks/run_mfr.py",
+        "source": "GIT",
+        "parameters": [
+          "poll",
+          "--mode",
+          "dev"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER",
+        "spark_env_vars": {
+          "FTP_HOST": "{{secrets/dsci/FTP_HOST}}",
+          "FTP_USER": "{{secrets/dsci/FTP_USER}}",
+          "FTP_PASS": "{{secrets/dsci/FTP_PASS}}",
+          "FORECAST_DIR": "{{secrets/dsci/FORECAST_DIR}}"
+        }
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus==0.1.7"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        }
+      ],
+      "timeout_seconds": 1800
+    }
+  ],
+  "run_as": {
+    "user_name": "adm.tdowning@global.un.org"
+  },
+  "email_notifications": {
+    "on_failure": [
+      "tristan.downing@un.org"
+    ]
+  }
+}

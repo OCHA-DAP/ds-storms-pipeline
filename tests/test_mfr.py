@@ -1,0 +1,568 @@
+"""Tests for the Météo-France La Réunion (MFR) track parser, writer and poller.
+
+The files are synthetic: same layout as Météo-France's CMRSTRACK_SWI JSON
+(analysis + forecast points, wind contours by sector, uncertainty cone),
+made-up values. No DB, blob or FTP needed: the writer runs against a fake
+connection that records each statement, the poller against a fake FTP.
+"""
+
+import ast
+import copy
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from src.pipelines import mfr
+
+
+def _contour(speed, ne=None, se=None, sw=None, nw=None, sectors=None):
+    values = {"NEQ": ne, "SEQ": se, "SWQ": sw, "NWQ": nw}
+    keep = sectors or ("NEQ", "SEQ", "SWQ", "NWQ")
+    return {
+        "wind_speed_kt": speed,
+        "radius": [{"sector": s, "value": values[s]} for s in keep],
+    }
+
+
+def _point(data_type, time, lon, lat, wind, contours=None, **extra):
+    props = {
+        "data_type": data_type,
+        "time": time,
+        "position_accuracy": extra.pop("position_accuracy", 30),
+        "cyclone_data": {
+            "development": extra.pop("development", "tropical cyclone"),
+            "minimum_pressure": 970,
+            "maximum_wind": {"wind_speed_kt": wind, "wind_speed_gust_kt": 90},
+            **({"wind_contours": contours} if contours else {}),
+        },
+        **extra,
+    }
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+        "properties": props,
+    }
+
+
+DOC = {
+    "product": "Cyclone trajectory",
+    "update_time": "2026-02-09T18:23:53Z",
+    "production_center": "METEO-FRANCE",
+    "cyclone_name": "TESTA",
+    "cyclone_number": 10,
+    "cyclone_id": "SWI$10/20252026",
+    "basin": "SWI",
+    "season": 20252026,
+    "reference_time": "2026-02-09T18:00:00Z",
+    "type": "FeatureCollection",
+    "features": [
+        _point("analysis", "2026-02-09T06:00:00Z", 60.0, -14.0, 35),
+        _point(
+            "analysis",
+            "2026-02-09T18:00:00Z",
+            58.0,
+            -15.0,
+            60,
+            [_contour(34, 40, 50, 70, 60)],
+        ),
+        _point(
+            "forecast",
+            "2026-02-09T18:00:00Z",
+            58.0,
+            -15.0,
+            60,
+            [
+                _contour(28, 60, 75, 95, 85),
+                _contour(34, 40, 50, 70, 60),
+                _contour(48, 30, 30, 45, 50),
+            ],
+            position_accuracy=30,
+        ),
+        _point(
+            "forecast",
+            "2026-02-10T06:00:00Z",
+            55.0,
+            -16.0,
+            80,
+            [
+                _contour(34, se=180, sw=100, sectors=("SEQ", "SWQ")),
+                _contour(64, 20, 20, 25, 20),
+            ],
+            position_accuracy=43,
+            hour=12,
+        ),
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [[58, -14], [54, -15], [54, -17], [58, -16], [58, -14]]
+                ],
+            },
+            "properties": {"data_type": "uncertainty_cone"},
+        },
+    ],
+}
+
+FILENAME = "CMRSTRACK_SWI$10_20252026_TESTA_2026_02_09_18Z.json"
+
+
+def _bytes(doc=DOC) -> bytes:
+    return json.dumps(doc).encode()
+
+
+def _parse(doc=DOC, filename=FILENAME):
+    return mfr.parse_mfr_json(_bytes(doc), filename)
+
+
+def test_parse_ids_times_and_counts():
+    fc = _parse()
+    assert fc.storm == {
+        "disturbance_id": "10-20252026",
+        "cyclone_id": "SWI$10/20252026",
+        "name": "TESTA",
+        "number": 10,
+        "season": 2026,
+        "genesis_basin": "SI",
+        "provider": "mfr",
+        "storm_id": "testa_si_2026",
+    }
+    f = fc.forecast
+    assert f["issued_time"] == datetime(2026, 2, 9, 18)
+    assert f["update_time"] == datetime(2026, 2, 9, 18, 23, 53)
+    assert f["late_reissue"] is False
+    assert (f["n_analysis"], f["n_forecast"], f["max_leadtime"]) == (2, 2, 12)
+    assert f["source_filename"] == FILENAME
+    assert json.loads(fc.uncertainty_cone)["type"] == "Polygon"
+
+
+def test_reference_time_not_filename_hour():
+    # Uploaded at 02Z, the file is the 00Z forecast.
+    doc = copy.deepcopy(DOC)
+    doc["reference_time"] = "2026-02-10T00:00:00Z"
+    doc["update_time"] = "2026-02-10T02:34:00Z"
+    for feat in doc["features"][:3]:
+        feat["properties"]["time"] = "2026-02-10T00:00:00Z"
+    doc["features"][0]["properties"]["time"] = "2026-02-09T12:00:00Z"
+    doc["features"][3]["properties"]["time"] = "2026-02-10T12:00:00Z"
+    fc = _parse(doc, "CMRSTRACK_SWI$10_20252026_TESTA_2026_02_10_02Z.json")
+    assert fc.forecast["issued_time"] == datetime(2026, 2, 10, 0)
+
+
+def test_leadtimes_and_both_copies_of_the_reference_analysis():
+    t = _parse().tracks
+    assert list(zip(t.data_type, t.leadtime)) == [
+        ("analysis", -12),
+        ("analysis", 0),
+        ("forecast", 0),
+        ("forecast", 12),
+    ]
+
+
+def test_radii_in_ne_se_sw_nw_order_and_missing_sectors_null():
+    t = _parse().tracks
+    lt0 = t[(t.data_type == "forecast") & (t.leadtime == 0)].iloc[0]
+    assert json.loads(lt0.quadrant_radius_28) == [60, 75, 95, 85]
+    assert json.loads(lt0.quadrant_radius_48) == [30, 30, 45, 50]
+    assert pd.isna(lt0.quadrant_radius_64)
+    lt12 = t[t.leadtime == 12].iloc[0]
+    assert json.loads(lt12.quadrant_radius_34) == [None, 180, 100, None]
+    assert json.loads(lt12.quadrant_radius_64) == [20, 20, 25, 20]
+
+
+def test_scalars_and_geometry():
+    t = _parse().tracks
+    row = t[t.leadtime == 12].iloc[0]
+    assert row.wind_speed == 80 and row.gust_speed == 90
+    assert row.pressure == 970 and row.position_accuracy == 43
+    assert row.development == "tropical cyclone"
+    assert row.geometry == "POINT (55.0 -16.0)"
+    assert pd.isna(row.raw_fields)  # "hour" is read, not kept raw
+
+
+def test_unknown_contour_speed_kept_raw(caplog):
+    doc = copy.deepcopy(DOC)
+    contours = doc["features"][2]["properties"]["cyclone_data"]
+    contours["wind_contours"].append(_contour(50, 35, 35, 40, 45))
+    t = _parse(doc).tracks
+    lt0 = t[(t.data_type == "forecast") & (t.leadtime == 0)].iloc[0]
+    raw = json.loads(lt0.raw_fields)
+    assert raw["cyclone_data.wind_contours"][0]["wind_speed_kt"] == 50
+    assert "50" in caplog.text
+
+
+def test_unnamed_system():
+    doc = copy.deepcopy(DOC)
+    doc["cyclone_name"] = "10-20252026"
+    fc = _parse(doc)
+    assert fc.storm["name"] is None and fc.storm["storm_id"] is None
+    assert fc.tracks.storm_id.isna().all()
+    assert fc.forecast["name_as_issued"] == "10-20252026"
+
+
+def test_late_reissue_flag():
+    doc = copy.deepcopy(DOC)
+    doc["update_time"] = "2026-06-27T13:00:00Z"
+    assert _parse(doc).forecast["late_reissue"] is True
+
+
+@pytest.mark.parametrize(
+    "cyclone_id",
+    ["SWI$10/2025", "SWI$10/20252027", "SIO$10/20252026", None],
+)
+def test_bad_cyclone_id(cyclone_id):
+    doc = copy.deepcopy(DOC)
+    doc["cyclone_id"] = cyclone_id
+    with pytest.raises(mfr.MfrParseError):
+        _parse(doc)
+
+
+def test_not_json_fails():
+    with pytest.raises(mfr.MfrParseError):
+        mfr.parse_mfr_json(b"<html>", "x.json")
+
+
+def test_missing_reference_time_fails():
+    doc = copy.deepcopy(DOC)
+    del doc["reference_time"]
+    with pytest.raises(mfr.MfrParseError):
+        _parse(doc)
+
+
+def test_point_without_position_fails():
+    doc = copy.deepcopy(DOC)
+    doc["features"][3]["geometry"]["coordinates"] = []
+    with pytest.raises(mfr.MfrParseError):
+        _parse(doc)
+
+
+def test_forecast_before_reference_time_fails():
+    doc = copy.deepcopy(DOC)
+    doc["features"][3]["properties"]["time"] = "2026-02-09T12:00:00Z"
+    with pytest.raises(mfr.MfrParseError):
+        _parse(doc)
+
+
+def test_file_without_points_fails():
+    doc = copy.deepcopy(DOC)
+    doc["features"] = doc["features"][4:]
+    with pytest.raises(mfr.MfrParseError):
+        _parse(doc)
+
+
+def test_repeated_point_keeps_first(caplog):
+    doc = copy.deepcopy(DOC)
+    doc["features"].insert(4, copy.deepcopy(doc["features"][3]))
+    doc["features"][4]["properties"]["cyclone_data"]["maximum_wind"][
+        "wind_speed_kt"
+    ] = 99
+    t = _parse(doc).tracks
+    assert (t.leadtime == 12).sum() == 1
+    assert t[t.leadtime == 12].wind_speed.iloc[0] == 80
+    assert "repeated" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw, clean",
+    [
+        ("GEZANI", "GEZANI"),
+        (" gezani ", "GEZANI"),
+        ("05-20242025", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_clean_name(raw, clean):
+    assert mfr.clean_name(raw) == clean
+
+
+def test_raw_blob_name():
+    fc = _parse()
+    sha = fc.forecast["content_sha256"]
+    assert mfr.raw_blob_name(FILENAME, sha, fc) == (
+        "mfr/raw/2026/10-20252026/"
+        f"CMRSTRACK_SWI_10_20252026_TESTA_2026_02_09_18Z_{sha[:12]}.json"
+    )
+    assert mfr.raw_blob_name("odd name.txt", sha, None) == (
+        f"mfr/raw/unparsed/odd_name_{sha[:12]}.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    "old_late, new_late, old_up, new_up, replace",
+    [
+        (False, False, 1, 2, True),  # a correction
+        (False, False, 2, 1, False),  # older version arrives later
+        (False, True, 1, 9, False),  # late re-issue never replaces
+        (True, False, 9, 1, True),  # operational replaces a late one
+        (True, True, 8, 9, True),
+        (False, False, None, 1, True),
+        (False, False, 1, None, False),
+    ],
+)
+def test_should_replace(old_late, new_late, old_up, new_up, replace):
+    def t(h):
+        return None if h is None else datetime(2026, 2, 9, h)
+
+    assert mfr.should_replace(t(old_up), old_late, t(new_up), new_late)[0] is (
+        replace
+    )
+
+
+def test_imports_stay_light():
+    tree = ast.parse(Path(mfr.__file__).read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add("." if node.level else node.module.split(".")[0])
+    allowed = {"dotenv", "ocha_stratus", "pandas", "sqlalchemy"}
+    assert imported - set(sys.stdlib_module_names) <= allowed
+
+
+# ---------------------------------------------------------------------------
+# Writer
+# ---------------------------------------------------------------------------
+
+
+class FakeResult:
+    def __init__(self, first=None, scalars=()):
+        self._first = first
+        self._scalars = list(scalars)
+
+    def first(self):
+        return self._first
+
+    def scalars(self):
+        return iter(self._scalars)
+
+
+class FakeNested:
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+
+class FakeConn:
+    """Records (sql, params); answers the existing-forecast and name SELECTs."""
+
+    def __init__(self, existing=None, names=("TESTA",)):
+        self.calls = []
+        self.existing = existing
+        self.names = names
+
+    def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        self.calls.append((sql, params))
+        if sql.startswith("SELECT content_sha256"):
+            return FakeResult(first=self.existing)
+        if sql.startswith("SELECT name_as_issued"):
+            return FakeResult(scalars=self.names)
+        return FakeResult()
+
+    def begin_nested(self):
+        return FakeNested()
+
+    def statements(self):
+        return [sql.split(" (")[0].split(" WHERE")[0] for sql, _ in self.calls]
+
+
+def test_write_new_forecast():
+    conn = FakeConn()
+    status, _ = mfr.write_forecast(conn, _parse(), "mfr/raw/x.json")
+    assert status == "written"
+    stmts = conn.statements()
+    assert stmts[0].startswith("INSERT INTO storms.mfr_storms")
+    assert not any(s.startswith("DELETE") for s in stmts)
+    assert any("SET uncertainty_cone" in s for s, _ in conn.calls)
+    track_insert = [
+        p
+        for s, p in conn.calls
+        if s.startswith("INSERT INTO storms.mfr_tracks_geo")
+    ][0]
+    assert len(track_insert) == 4
+    assert set(track_insert[0]) == set(mfr.TRACK_COLUMNS)
+    rename = [
+        p for s, p in conn.calls if s.startswith("UPDATE storms.mfr_storms")
+    ]
+    assert rename == [
+        {
+            "disturbance_id": "10-20252026",
+            "name": "TESTA",
+            "storm_id": "testa_si_2026",
+        }
+    ]
+
+
+def test_same_content_is_unchanged():
+    fc = _parse()
+    conn = FakeConn(existing=(fc.forecast["content_sha256"], None, False))
+    assert mfr.write_forecast(conn, fc, None)[0] == "unchanged"
+    assert not any(
+        s.startswith("INSERT INTO storms.mfr_forecasts") for s, _ in conn.calls
+    )
+
+
+def test_late_reissue_does_not_replace():
+    doc = copy.deepcopy(DOC)
+    doc["update_time"] = "2026-06-27T13:00:00Z"
+    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 9, 18, 20), False))
+    status, message = mfr.write_forecast(conn, _parse(doc), None)
+    assert status == "kept_existing" and "late" in message
+    assert not any(s.startswith("DELETE") for s, _ in conn.calls)
+
+
+def test_correction_replaces():
+    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 9, 18, 10), False))
+    assert mfr.write_forecast(conn, _parse(), None)[0] == "written"
+    assert any(
+        s.startswith("DELETE FROM storms.mfr_forecasts") for s, _ in conn.calls
+    )
+
+
+def test_schema_has_every_column():
+    sql = (
+        Path(mfr.__file__).parents[1] / "schemas" / "sql" / "mfr_tables.sql"
+    ).read_text()
+    tracks = sql.split("CREATE TABLE IF NOT EXISTS storms.mfr_tracks_geo")[1]
+    tracks = tracks.split(")\nTABLESPACE")[0]
+    for col in mfr.TRACK_COLUMNS:
+        assert f"\n    {col} " in tracks, col
+    forecasts = sql.split("CREATE TABLE IF NOT EXISTS storms.mfr_forecasts")[1]
+    forecasts = forecasts.split(")\nTABLESPACE")[0]
+    for col in mfr._FORECAST_COLUMNS + ["uncertainty_cone"]:
+        assert f"\n    {col} " in forecasts, col
+
+
+# ---------------------------------------------------------------------------
+# FTP poll
+# ---------------------------------------------------------------------------
+
+
+class FakeFTP:
+    """Only the read commands the poller may use; anything else fails."""
+
+    ALLOWED = {"login", "cwd", "mlsd", "nlst", "retrbinary", "quit", "close"}
+
+    def __init__(self, files, mlsd=True):
+        self.files = files  # name -> (bytes, modify)
+        self.mlsd_ok = mlsd
+        self.commands = []
+
+    def __call__(self, host, timeout=None):
+        self.commands.append(("connect", host, timeout))
+        return self
+
+    def __getattr__(self, name):
+        raise AssertionError(f"poller called FTP.{name}")
+
+    def login(self, user, password):
+        self.commands.append(("login",))
+
+    def cwd(self, path):
+        self.commands.append(("cwd",))
+
+    def mlsd(self):
+        self.commands.append(("mlsd",))
+        if not self.mlsd_ok:
+            import ftplib
+
+            raise ftplib.error_perm("500 MLSD not understood")
+        yield ".", {"type": "cdir"}
+        yield "sub", {"type": "dir"}
+        for name, (data, modify) in self.files.items():
+            yield (
+                name,
+                {"type": "file", "size": str(len(data)), "modify": modify},
+            )
+
+    def nlst(self):
+        self.commands.append(("nlst",))
+        return list(self.files)
+
+    def retrbinary(self, cmd, callback):
+        name = cmd.split(" ", 1)[1]
+        self.commands.append(("retr", name))
+        callback(self.files[name][0])
+
+    def quit(self):
+        self.commands.append(("quit",))
+
+    def close(self):
+        self.commands.append(("close",))
+
+
+@pytest.fixture
+def ftp_env(monkeypatch):
+    for key, value in {
+        "FTP_HOST": "ftp.example",
+        "FTP_USER": "u",
+        "FTP_PASS": "p",
+        "FORECAST_DIR": "/d",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_files_to_fetch_skips_known_and_refetches_changed():
+    listing = {
+        "CMRSTRACK_SWI$01_new.json": {
+            "size": 10,
+            "modified": datetime(2026, 1, 2),
+        },
+        "CMRSTRACK_SWI$01_old.json": {
+            "size": 10,
+            "modified": datetime(2026, 1, 1),
+        },
+        "CMRSTRACK_SWI$01_changed.json": {
+            "size": 12,
+            "modified": datetime(2026, 1, 1),
+        },
+        "README.txt": {"size": 1, "modified": None},
+        "CMRSTRACK_SWI_dir": {"type": "dir"},
+    }
+    known = {
+        "CMRSTRACK_SWI$01_old.json": {(10, datetime(2026, 1, 1))},
+        "CMRSTRACK_SWI$01_changed.json": {(10, datetime(2026, 1, 1))},
+    }
+    assert mfr.files_to_fetch(listing, known) == [
+        "CMRSTRACK_SWI$01_changed.json",
+        "CMRSTRACK_SWI$01_new.json",
+    ]
+
+
+def test_poll_dry_run_reads_only(ftp_env):
+    ftp = FakeFTP(
+        {
+            FILENAME: (_bytes(), "20260209182400"),
+            "CMRSTRACK_SWI$10_bad.json": (b"not json", "20260209182500"),
+            "other.txt": (b"x", "20260209182500"),
+        }
+    )
+    report = mfr.poll_ftp("dev", dry_run=True, ftp_factory=ftp)
+    retrieved = [c[1] for c in ftp.commands if c[0] == "retr"]
+    assert retrieved == [FILENAME, "CMRSTRACK_SWI$10_bad.json"]
+    assert ftp.commands[-1] == ("quit",)
+    assert report["fetched"] == 2
+    assert report["results"][0]["disturbance_id"] == "10-20252026"
+    assert report["failed"][0]["filename"] == "CMRSTRACK_SWI$10_bad.json"
+
+
+def test_poll_falls_back_to_nlst(ftp_env):
+    ftp = FakeFTP({FILENAME: (_bytes(), "20260209182400")}, mlsd=False)
+    report = mfr.poll_ftp("dev", dry_run=True, ftp_factory=ftp)
+    assert ("nlst",) in ftp.commands
+    assert report["fetched"] == 1
+
+
+def test_poll_needs_ftp_settings(monkeypatch):
+    for key in ("FTP_HOST", "FTP_USER", "FTP_PASS", "FORECAST_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(RuntimeError, match="FTP_HOST"):
+        mfr.poll_ftp("dev", dry_run=True, ftp_factory=FakeFTP({}))
