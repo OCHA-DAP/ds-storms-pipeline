@@ -224,8 +224,12 @@ pandas, sqlalchemy, python-dotenv and ocha-stratus.
 # Tables (idempotent; --drop-first rebuilds them, dev only)
 uv run python scripts/init_db_mfr.py --mode dev
 
-# New files from the Data Factory copy (dev blob container meteofr)
-uv run python -m src.pipelines.mfr sync --mode dev --dry-run
+# New or changed files from the Data Factory copy (dev blob container
+# meteofr); a dry run has no database to compare with, so it reads them all
+uv run python -m src.pipelines.mfr sync --mode dev
+uv run python -m src.pipelines.mfr sync --mode dev --retry-failed  # after a parser fix
+
+# Older CXML forecasts (e.g. the 2010/11-2023/24 archive) go through backfill
 
 # Local files, or every file under some blob prefixes
 uv run python -m src.pipelines.mfr ingest path/to/CMRSTRACK_SWI*.json --mode dev
@@ -235,9 +239,13 @@ uv run python -m src.pipelines.mfr backfill --blob-prefix <prefix> --mode dev --
 Live ingest: the `mfr_ingest` job (`databricks.yml`) runs `sync` at :45 of
 01/07/13/19 UTC. It reads the dev blob container `meteofr`, which the Azure
 Data Factory pipeline `CopyMeteoFRToBlob` (DsciDevDataFactory) fills from
-Météo-France's SFTP every 6 h, landing at ~:13 of those hours (since Oct 2024).
-`mfr_files` remembers every path read, so each file is downloaded once. The
-job never logs in to Météo-France. `poll` reads Météo-France's FTP directly
+Météo-France's SFTP every 6 h since Feb 2026, landing at ~:13 of those hours
+(daily at ~14–15 UTC before that); it holds files from Oct 2024 on.
+`mfr_files` remembers every path read with its size and modification time: a
+path is read again when either changes, and recognised by its hash if the
+content is the same (Data Factory rewrites files for about two weeks). Files
+that fail to parse are not retried unless `--retry-failed`. The job never
+logs in to Météo-France. `poll` reads Météo-France's FTP directly
 (list + download only) but is not scheduled: that login is the Mozambique
 cyclone monitor's (ds-aa-moz-cyclones-monitoring). One-off table creation +
 first sync: `databricks jobs submit --json
@@ -245,12 +253,17 @@ first sync: `databricks jobs submit --json
 
 Files are keyed on `reference_time` inside the file: the hour in the filename
 is the upload hour. A file without forecast points is stored as `kind =
-'track'`, apart from the forecasts; the latest revision wins. A forecast file
+'track'`, apart from the forecasts; a system keeps one final track, its latest
+revision, even when a revision moves the reference time. A forecast file
 produced more than 24 h after its reference time is stored with
 `late_reissue = true` only if no operational version exists, and never
-replaces one; a newer operational version (a correction) does. Wind contours
-are 28/34/48/64 kt in the JSON files (27/34/50/64 in the older CXML product),
-10-minute winds.
+replaces one; a newer operational version (a correction) does. Equal update
+times fall back to the content hash, so the outcome never depends on reading
+order. Wind contours are 28/34/48/64 kt in the JSON files (27/34/50/64 in the
+older CXML product, which `parse_mfr_cxml` reads into the same rows, refusing
+files in other units), 10-minute winds. One odd value never stops a file:
+non-finite numbers and NUL characters are made safe in `raw_fields`, and any
+unexpected structure fails only that file (archived, recorded `failed`).
 
 ## Database schema
 
@@ -324,7 +337,7 @@ Same key tuple in both: `(issued_time, wind_threshold_kt, percentage, atcf_id, a
 |---|---|---|
 | `mfr_storms` | `disturbance_id` (e.g. `10-20252026`) | Also `cyclone_id` as in the file (`SWI$10/20252026`). `genesis_basin` = `SI`. `season` = the year the season ends. `storm_id` = `{name}_si_{season}`, as in `ibtracs_storms`. |
 | `mfr_forecasts` | `(disturbance_id, issued_time, kind)` | One row per forecast (`kind = 'forecast'`) or final track (`'track'`): `update_time`, `late_reissue`, `content_sha256`, `raw_blob`, `n_analysis`, `n_forecast`, `max_leadtime`, `uncertainty_cone` (polygon). Deleting a row cascades to its track points. |
-| `mfr_tracks_geo` | `(disturbance_id, issued_time, kind, data_type, valid_time)` | Analysis points (the track so far, `leadtime` <= 0) and forecast points (0–120 h). `quadrant_radius_{27,28,34,48,50,64}` JSON `[NE,SE,SW,NW]` in nm (a sector Météo-France leaves out is null), `position_accuracy` (nm, = cone half-width), `development`, Dvorak, motion; `raw_fields` (JSONB) for anything else. |
+| `mfr_tracks_geo` | `(disturbance_id, issued_time, kind, data_type, valid_time)` | Analysis points (the track so far; `leadtime` <= 0 in forecast files, a few hours past the reference time in some final tracks) and forecast points (0–120 h). `quadrant_radius_{27,28,34,48,50,64}` JSON `[NE,SE,SW,NW]` in nm (a sector Météo-France leaves out is null), `position_accuracy` (nm, = cone half-width), `development`, Dvorak, motion; `raw_fields` (JSONB) for anything else. |
 | `mfr_files` | `(source, source_path, content_sha256)` | Every file read (`meteofr_blob`, `ftp`, `backfill`, `local`), its `raw_blob` and what happened to it (`written`, `unchanged`, `kept_existing`, `failed`). `last_seen` = last listing it was in. |
 
 ### Shared

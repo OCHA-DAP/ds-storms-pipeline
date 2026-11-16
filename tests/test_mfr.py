@@ -8,6 +8,7 @@ connection that records each statement, the poller against a fake FTP.
 
 import ast
 import copy
+import hashlib
 import json
 import re
 import sys
@@ -477,13 +478,32 @@ def test_late_reissue_does_not_replace():
     assert not any(s.startswith("DELETE") for s, _ in conn.calls)
 
 
-def test_existing_lookup_is_by_kind():
-    conn = FakeConn()
-    mfr.write_forecast(conn, _parse(_track_only()), None)
+def test_track_is_compared_and_replaced_per_system():
+    # A track revision with another reference time (GEZANI 2026: 12Z then
+    # 18Z) must replace the stored track, not sit beside it.
+    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 10), False))
+    status, _ = mfr.write_forecast(conn, _parse(_track_only()), None)
+    assert status == "written"
     lookup = [
-        p for s, p in conn.calls if s.startswith("SELECT content_sha256")
+        s for s, _ in conn.calls if s.startswith("SELECT content_sha256")
     ]
-    assert lookup[0]["kind"] == "track"
+    assert "kind = 'track'" in lookup[0] and "issued_time" not in lookup[0]
+    deletes = [s for s, _ in conn.calls if s.startswith("DELETE")]
+    assert deletes and "issued_time" not in deletes[0]
+
+
+def test_first_track_of_a_system_clears_nothing_else():
+    conn = FakeConn()
+    assert mfr.write_forecast(conn, _parse(_track_only()), None)[0] == (
+        "written"
+    )
+
+
+def test_older_track_revision_is_kept_out():
+    conn = FakeConn(existing=("0" * 64, datetime(2026, 3, 1), False))
+    status, _ = mfr.write_forecast(conn, _parse(_track_only()), None)
+    assert status == "kept_existing"
+    assert not any(s.startswith("DELETE") for s, _ in conn.calls)
 
 
 def test_correction_replaces():
@@ -555,10 +575,12 @@ class FakeContainer:
 
 
 class FakeEngine:
-    """Answers the known-files query with ``known`` rows."""
+    """Answers the known-files query with ``known`` rows (source_path,
+    size, modified, sha, status); records other statements."""
 
     def __init__(self, known_rows=()):
         self.known_rows = list(known_rows)
+        self.calls = []
 
     def connect(self):
         engine = self
@@ -571,9 +593,15 @@ class FakeEngine:
                 return False
 
             def execute(self, stmt, params=None):
+                engine.calls.append((" ".join(str(stmt).split()), params))
                 return iter(engine.known_rows)
 
         return _Conn()
+
+    begin = connect
+
+
+SHA = hashlib.sha256(_bytes()).hexdigest()
 
 
 def test_sync_reads_only_new_track_files():
@@ -588,7 +616,15 @@ def test_sync_reads_only_new_track_files():
             "elsewhere/" + FILENAME: _bytes(),
         }
     )
-    known = [(f"{prefix}{FILENAME}", len(_bytes()), None)]
+    known = [
+        (
+            f"{prefix}{FILENAME}",
+            len(_bytes()),
+            datetime(2026, 11, 16, 13, 14),
+            SHA,
+            "written",
+        )
+    ]
     report = mfr.sync_blob(
         "dev",
         dry_run=True,
@@ -600,17 +636,64 @@ def test_sync_reads_only_new_track_files():
     assert report["results"][0]["disturbance_id"] == "10-20252026"
 
 
-def test_sync_refetches_a_path_whose_size_changed():
+@pytest.mark.parametrize(
+    "size, modified",
+    [(5, datetime(2026, 11, 16, 13, 14)), (None, datetime(2026, 1, 1))],
+    ids=["size changed", "rewritten, same size"],
+)
+def test_sync_rereads_a_path_whose_listing_changed(size, modified):
     path = mfr.SYNC_PREFIX + FILENAME
+    size = len(_bytes()) if size is None else size
     container = FakeContainer({path: _bytes()})
-    known = [(path, 5, datetime(2026, 1, 1))]
-    mfr.sync_blob(
+    known = [(path, size, modified, "f" * 64, "written")]
+    report = mfr.sync_blob(
         "dev",
         dry_run=True,
         engine=FakeEngine(known),
         container_client=container,
     )
     assert container.downloaded == [path]
+    assert report["results"][0]["disturbance_id"] == "10-20252026"
+
+
+def test_sync_same_content_rewritten_is_only_touched(monkeypatch):
+    path = mfr.SYNC_PREFIX + FILENAME
+    container = FakeContainer({path: _bytes()})
+    engine = FakeEngine(
+        [(path, len(_bytes()), datetime(2026, 1, 1), SHA, "written")]
+    )
+    monkeypatch.setattr(
+        mfr, "ingest_mfr_bytes", lambda *a, **k: pytest.fail("re-ingested")
+    )
+    report = mfr.sync_blob("dev", engine=engine, container_client=container)
+    assert container.downloaded == [path]
+    assert report["counts"] == {"seen_before": 1}
+    touched = [
+        p
+        for s, p in engine.calls
+        if s.startswith(
+            "UPDATE storms.mfr_files SET last_seen = (now() AT TIME ZONE 'utc'), size_bytes"
+        )
+    ]
+    assert touched[0]["source_modified"] == datetime(2026, 11, 16, 13, 14)
+
+
+def test_failed_files_are_skipped_unless_retried():
+    path = mfr.SYNC_PREFIX + FILENAME
+    rows = [
+        (path, len(_bytes()), datetime(2026, 11, 16, 13, 14), SHA, "failed")
+    ]
+    assert path in mfr._known(FakeEngine(rows), "meteofr_blob")
+    assert path not in mfr._known(
+        FakeEngine(rows), "meteofr_blob", retry_failed=True
+    )
+
+
+def test_backfill_reads_only_track_and_cxml_files():
+    assert mfr._is_backfill_file("x/CMRSTRACK_SWI$01_20242025_A_2024.json")
+    assert mfr._is_backfill_file("x/F20232024_07_2024022306.1.TESTB.cxml")
+    assert not mfr._is_backfill_file("x/34ktCMRS_SWI$01_20242025_A.json")
+    assert not mfr._is_backfill_file("x/SPICYTRACKS_SWI$01_20242025_A.json")
 
 
 class FakeFTP:
@@ -695,18 +778,24 @@ def test_files_to_fetch_skips_known_and_refetches_changed():
         "CMRSTRACK_SWI_dir": {"type": "dir"},
     }
     known = {
-        "CMRSTRACK_SWI$01_old.json": {(10, datetime(2026, 1, 1))},
-        "CMRSTRACK_SWI$01_changed.json": {(10, datetime(2026, 1, 1))},
+        "CMRSTRACK_SWI$01_old.json": {
+            "versions": {(10, datetime(2026, 1, 1))},
+            "shas": {"a"},
+        },
+        "CMRSTRACK_SWI$01_changed.json": {
+            "versions": {(10, datetime(2026, 1, 1))},
+            "shas": {"b"},
+        },
     }
     assert mfr.files_to_fetch(listing, known) == [
         "CMRSTRACK_SWI$01_changed.json",
         "CMRSTRACK_SWI$01_new.json",
     ]
-    # Blob copies are rewritten every few hours: only sizes are compared.
-    known["CMRSTRACK_SWI$01_old.json"] = {(10, datetime(2025, 1, 1))}
-    assert "CMRSTRACK_SWI$01_old.json" not in mfr.files_to_fetch(
-        listing, known, use_modified=False
-    )
+    # A new modification time alone (same size) is read again too.
+    known["CMRSTRACK_SWI$01_old.json"]["versions"] = {
+        (10, datetime(2025, 1, 1))
+    }
+    assert "CMRSTRACK_SWI$01_old.json" in mfr.files_to_fetch(listing, known)
 
 
 def test_poll_dry_run_reads_only(ftp_env):
@@ -823,3 +912,67 @@ def test_cxml_id_from_filename_when_no_local_id():
     data = CXML.replace(b"<localID>SWI$07/20232024</localID>", b"")
     fc = mfr.parse_mfr_cxml(data, "F20232024_07_2024022306.x.TESTB.cxml")
     assert fc.storm["cyclone_id"] == "SWI$07/20232024"
+
+
+@pytest.mark.parametrize("old_up", [datetime(2026, 2, 9, 18), None])
+def test_ties_are_broken_by_content_hash_in_either_order(old_up):
+    a, b = "a" * 64, "b" * 64
+    first = mfr.should_replace("forecast", old_up, False, old_up, False, a, b)
+    second = mfr.should_replace("forecast", old_up, False, old_up, False, b, a)
+    assert first[0] is True and second[0] is False
+
+
+def test_non_finite_and_nul_values_are_json_safe():
+    doc = copy.deepcopy(DOC)
+    props = doc["features"][3]["properties"]
+    props["odd"] = float("nan")
+    props["note"] = "a\x00b"
+    props["cyclone_data"]["development"] = "trop\x00ical"
+    t = _parse(doc).tracks
+    row = t[t.leadtime == 12].iloc[0]
+    raw = json.loads(row.raw_fields)
+    assert raw["odd"] == "nan" and raw["note"] == "ab"
+    assert row.development == "tropical"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["features"][2]["properties"]["cyclone_data"].update(
+            wind_contours="oops"
+        ),
+        lambda d: d["features"][3].update(properties=["not", "a", "dict"]),
+    ],
+    ids=["contours as text", "properties as list"],
+)
+def test_malformed_structure_is_a_parse_error(mutate):
+    doc = copy.deepcopy(DOC)
+    mutate(doc)
+    with pytest.raises(mfr.MfrParseError):
+        mfr.parse_mfr_file(_bytes(doc), FILENAME)
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        (b'<speed units="kt">50', b'<speed units="m/s">50'),
+        (b'<radius units="nm">25', b'<radius units="km">25'),
+        (b'units="deg S">23.5', b'units="deg South">23.5'),
+        (b'units="deg S">23.5', b'units="deg S">-23.5'),
+        (b"<cycloneNumber>7<", b"<cycloneNumber>seven<"),
+    ],
+    ids=[
+        "speed m/s",
+        "radius km",
+        "deg South",
+        "negative with deg S",
+        "number",
+    ],
+)
+def test_cxml_refuses_unexpected_units_and_signs(old, new):
+    data = CXML.replace(old, new)
+    if b"seven" in new:
+        data = data.replace(b"<localID>SWI$07/20232024</localID>", b"")
+    assert data != CXML
+    with pytest.raises(mfr.MfrParseError):
+        mfr.parse_mfr_file(data, "F20232024_07_2024022306.x.TESTB.cxml")

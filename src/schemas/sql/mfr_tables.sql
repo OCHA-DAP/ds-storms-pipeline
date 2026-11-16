@@ -16,10 +16,12 @@
 --   - storms.mfr_files:       every source file read, whether or not it was
 --                             written (what the sync reads to skip files)
 --
--- Each file carries the system's whole analysed track so far (data_type
--- 'analysis', leadtime <= 0) and the forecast (data_type 'forecast',
--- leadtime 0 to 120 h). Both are kept. The analysis at the reference time
--- appears twice, once of each type, as in the file.
+-- A forecast file carries the system's whole analysed track so far
+-- (data_type 'analysis', leadtime <= 0) and the forecast (data_type
+-- 'forecast', leadtime 0 to 120 h). Both are kept. The analysis at the
+-- reference time appears twice, once of each type, as in the file. A
+-- track-only file (kind 'track') has analysis points only, sometimes a few
+-- hours past its reference time; a system keeps one, its latest revision.
 --
 -- Physical values are DOUBLE PRECISION without range CHECKs (same reasoning
 -- as docs/decisions/0002-fms-tables-and-standalone-cli.md): one odd value
@@ -106,7 +108,7 @@ ALTER TABLE IF EXISTS storms.mfr_forecasts
 COMMENT ON TABLE storms.mfr_forecasts IS
     'RSMC La Réunion forecasts and track-only files - one row per system, reference time and kind';
 COMMENT ON COLUMN storms.mfr_forecasts.kind IS
-    'forecast (the file has forecast points) or track (track-only file: the final track, sent when a system ends and revised later; the latest revision is kept)';
+    'forecast (the file has forecast points) or track (track-only file: the final track, sent when a system ends and revised later; one per system, its latest revision, whatever its reference time)';
 COMMENT ON COLUMN storms.mfr_forecasts.issued_time IS
     'reference_time in the file (UTC): the analysis time the forecast starts from. The hour in the filename is the upload hour, not this';
 COMMENT ON COLUMN storms.mfr_forecasts.update_time IS
@@ -284,7 +286,7 @@ COMMENT ON COLUMN storms.mfr_files.source_filename IS
 COMMENT ON COLUMN storms.mfr_files.size_bytes IS
     'Size in bytes from the source listing (else of the bytes read)';
 COMMENT ON COLUMN storms.mfr_files.source_modified IS
-    'Modification time from the source listing (UTC) when first read';
+    'Modification time from the latest source listing that showed this content (UTC)';
 COMMENT ON COLUMN storms.mfr_files.first_seen IS
     'First time this file was read (UTC)';
 COMMENT ON COLUMN storms.mfr_files.last_seen IS
