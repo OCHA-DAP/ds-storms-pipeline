@@ -90,8 +90,12 @@ SECTORS = ("NEQ", "SEQ", "SWQ", "NWQ")
 LATE_REISSUE = timedelta(hours=24)
 
 _CYCLONE_ID_RE = re.compile(r"^SWI\$(\d{1,2})/(\d{4})(\d{4})$")
-_UNNAMED_RE = re.compile(r"^\d{1,2}-\d{8}$")
-_UNNAMED = {"", "NONAME", "NO NAME", "UNNAMED"}
+# Unnamed systems: '10-20252026' in the JSON product; '0120102011', or the
+# season alone, in CXML.
+_UNNAMED_RE = re.compile(r"^(\d{1,2}-?)?\d{8}$")
+_UNNAMED = {"", "NONAME", "NO NAME", "UNNAMED", "INVEST"}
+# 'EX-GUAMBE': the same storm after it weakened.
+_EX_PREFIX_RE = re.compile(r"^EX[-\s]+")
 
 # Point properties read into columns, as paths in the file. Everything else
 # with a value goes to raw_fields.
@@ -169,7 +173,7 @@ def clean_name(name_as_issued: str | None) -> str | None:
     """Storm name, or None for an unnamed system ('10-20252026')."""
     if name_as_issued is None:
         return None
-    name = str(name_as_issued).strip().upper()
+    name = _EX_PREFIX_RE.sub("", str(name_as_issued).strip().upper())
     if name in _UNNAMED or _UNNAMED_RE.match(name):
         return None
     return name
@@ -324,6 +328,15 @@ _CXML_SCALARS = {
     "Dvorak/currentIntensity": "Dvorak.current_intensity",
 }
 _CXML_FILENAME_RE = re.compile(r"F(\d{8})_(\d{1,2})_")
+# Children of <fix> read above; any others go to raw_fields.
+_CXML_FIX_READ = {
+    "validTime",
+    "latitude",
+    "longitude",
+    "accuracy",
+    "navAccuracy",
+    "cycloneData",
+}
 # The units each element must carry (when it carries any): a file in other
 # units fails rather than storing numbers in the wrong unit.
 _CXML_UNITS = {
@@ -331,6 +344,7 @@ _CXML_UNITS = {
     "gusts": "kt",
     "radius": "nm",
     "accuracy": "nm",
+    "navAccuracy": "nm",
     "pressure": "hPa",
     "directionToward": "deg",
     "windSpeed": "kt",
@@ -424,9 +438,16 @@ def parse_mfr_cxml(
         if hour == 0:
             reference_time = valid
         props = {"data_type": "forecast", "time": valid, "hour": hour}
+        # 2010/11 files call it navAccuracy; later ones, accuracy.
         accuracy = fix.find("accuracy")
+        if accuracy is None:
+            accuracy = fix.find("navAccuracy")
         if accuracy is not None:
             props["position_accuracy"] = accuracy.text
+        # Other elements of the fix (e.g. onGoingChange) are kept raw.
+        for child in fix:
+            if child.tag not in _CXML_FIX_READ and not len(child):
+                props[child.tag] = (child.text or "").strip() or None
         cyclone = {}
         data_el = fix.find("cycloneData")
         consumed = set()

@@ -330,6 +330,10 @@ def test_repeated_point_keeps_first(caplog):
         ("GEZANI", "GEZANI"),
         (" gezani ", "GEZANI"),
         ("05-20242025", None),
+        ("0120102011", None),
+        ("20182019", None),
+        ("INVEST", None),
+        ("EX-GUAMBE", "GUAMBE"),
         ("", None),
         (None, None),
     ],
@@ -901,6 +905,31 @@ def test_cxml_parses_into_the_same_rows():
     assert raw["cyclone_data.systemDepth"] == "deep"
     assert raw["cyclone_data.Dvorak_extra.pastChange"] == "W0.5"
     assert t[t.leadtime == 12].iloc[0].wind_speed == 40
+
+
+def test_cxml_2010_layout_nav_accuracy_and_extra_fix_elements():
+    # 2010/11 files: navAccuracy instead of accuracy; an unnamed system is
+    # called e.g. 0720232024; stray fix elements are kept raw.
+    data = (
+        CXML.replace(b"<accuracy units", b"<navAccuracy units")
+        .replace(b"</accuracy>", b"</navAccuracy>")
+        .replace(b"TESTB", b"0720232024")
+        .replace(
+            b"<cycloneData>\n     <development>",
+            b"<onGoingChange>W</onGoingChange>"
+            b"<cycloneData>\n     <development>",
+        )
+    )
+    fc = mfr.parse_mfr_file(data, "F20232024_07_2024022306.x.0720232024.cxml")
+    assert fc.storm["name"] is None and fc.storm["storm_id"] is None
+    t = fc.tracks
+    assert t.position_accuracy.tolist() == [20, 21]
+    assert json.loads(t.iloc[0].raw_fields)["onGoingChange"] == "W"
+    with pytest.raises(mfr.MfrParseError):
+        mfr.parse_mfr_file(
+            data.replace(b'navAccuracy units="nm"', b'navAccuracy units="km"'),
+            "x.cxml",
+        )
 
 
 def test_cxml_without_hour_0_fails():
