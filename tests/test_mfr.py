@@ -466,7 +466,9 @@ def test_write_new_forecast():
 
 def test_same_content_is_unchanged():
     fc = _parse()
-    conn = FakeConn(existing=(fc.forecast["content_sha256"], None, False))
+    conn = FakeConn(
+        existing=(fc.forecast["content_sha256"], None, False, "TESTA")
+    )
     assert mfr.write_forecast(conn, fc, None)[0] == "unchanged"
     assert not any(
         s.startswith("INSERT INTO storms.mfr_forecasts") for s, _ in conn.calls
@@ -476,7 +478,9 @@ def test_same_content_is_unchanged():
 def test_late_reissue_does_not_replace():
     doc = copy.deepcopy(DOC)
     doc["update_time"] = "2026-06-27T13:00:00Z"
-    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 9, 18, 20), False))
+    conn = FakeConn(
+        existing=("0" * 64, datetime(2026, 2, 9, 18, 20), False, "TESTA")
+    )
     status, message = mfr.write_forecast(conn, _parse(doc), None)
     assert status == "kept_existing" and "late" in message
     assert not any(s.startswith("DELETE") for s, _ in conn.calls)
@@ -485,7 +489,7 @@ def test_late_reissue_does_not_replace():
 def test_track_is_compared_and_replaced_per_system():
     # A track revision with another reference time (GEZANI 2026: 12Z then
     # 18Z) must replace the stored track, not sit beside it.
-    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 10), False))
+    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 10), False, "TESTA"))
     status, _ = mfr.write_forecast(conn, _parse(_track_only()), None)
     assert status == "written"
     lookup = [
@@ -504,14 +508,16 @@ def test_first_track_of_a_system_clears_nothing_else():
 
 
 def test_older_track_revision_is_kept_out():
-    conn = FakeConn(existing=("0" * 64, datetime(2026, 3, 1), False))
+    conn = FakeConn(existing=("0" * 64, datetime(2026, 3, 1), False, "TESTA"))
     status, _ = mfr.write_forecast(conn, _parse(_track_only()), None)
     assert status == "kept_existing"
     assert not any(s.startswith("DELETE") for s, _ in conn.calls)
 
 
 def test_correction_replaces():
-    conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 9, 18, 10), False))
+    conn = FakeConn(
+        existing=("0" * 64, datetime(2026, 2, 9, 18, 10), False, "TESTA")
+    )
     assert mfr.write_forecast(conn, _parse(), None)[0] == "written"
     assert any(
         s.startswith("DELETE FROM storms.mfr_forecasts") for s, _ in conn.calls
@@ -924,12 +930,68 @@ def test_cxml_2010_layout_nav_accuracy_and_extra_fix_elements():
     assert fc.storm["name"] is None and fc.storm["storm_id"] is None
     t = fc.tracks
     assert t.position_accuracy.tolist() == [20, 21]
-    assert json.loads(t.iloc[0].raw_fields)["onGoingChange"] == "W"
+    assert json.loads(t.iloc[0].raw_fields)["fix_extra.onGoingChange"] == "W"
     with pytest.raises(mfr.MfrParseError):
         mfr.parse_mfr_file(
             data.replace(b'navAccuracy units="nm"', b'navAccuracy units="km"'),
             "x.cxml",
         )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b"<cyclone_data.minimum_pressure>29</cyclone_data.minimum_pressure>",
+        b"<data_type>analysis</data_type>",
+        b"<time>2031-01-01T00:00:00Z</time>",
+        b"<position_accuracy>5</position_accuracy>",
+    ],
+)
+def test_cxml_fix_extras_cannot_reach_columns(extra):
+    data = CXML.replace(
+        b"<cycloneData>\n     <development>",
+        extra + b"<cycloneData>\n     <development>",
+    )
+    assert data != CXML
+    try:
+        fc = mfr.parse_mfr_file(data, "F20232024_07_2024022306.x.TESTB.cxml")
+    except mfr.MfrParseError:
+        return
+    lt0 = fc.tracks[fc.tracks.leadtime == 0].iloc[0]
+    assert fc.forecast["kind"] == "forecast"
+    assert lt0.data_type == "forecast"
+    assert lt0.valid_time == datetime(2024, 2, 23, 6)
+    assert (lt0.pressure, lt0.position_accuracy) == (988, 20)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b"<minimum_pressure>29</minimum_pressure>",
+        b"<maximum_wind>99</maximum_wind>",
+        b"<wind_contours>zz</wind_contours>",
+        b"<a.b>1</a.b>",
+    ],
+)
+def test_cxml_cyclone_data_extra_cannot_reach_a_column(extra):
+    data = CXML.replace(
+        b"<systemDepth>deep</systemDepth>",
+        b"<systemDepth>deep</systemDepth>" + extra,
+    )
+    with pytest.raises(mfr.MfrParseError):
+        mfr.parse_mfr_file(data, "F20232024_07_2024022306.x.TESTB.cxml")
+
+
+@pytest.mark.parametrize(
+    "old_named, new_named", [(False, True), (True, False)]
+)
+def test_same_time_twins_keep_the_named_version(old_named, new_named):
+    up = datetime(2018, 1, 1, 6)
+    for a, b in (("a" * 64, "b" * 64), ("b" * 64, "a" * 64)):
+        replace, _ = mfr.should_replace(
+            "forecast", up, False, up, False, a, b, old_named, new_named
+        )
+        assert replace is new_named
 
 
 def test_cxml_without_hour_0_fails():

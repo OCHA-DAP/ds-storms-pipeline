@@ -375,6 +375,12 @@ def _check_cxml_units(fix, label: str) -> None:
             )
 
 
+def _check_cxml_tag(tag: str, label: str) -> None:
+    """Element names become dotted paths in raw_fields: refuse a dot."""
+    if not isinstance(tag, str) or "." in tag:
+        raise MfrParseError(f"{label}: unexpected element {tag!r}")
+
+
 def _cxml_coordinate(el, label: str, what: str, signs: dict) -> float:
     """Degrees with the sign from the units ('deg S' -> negative); the value
     itself must be positive and the units one of ``signs``."""
@@ -444,10 +450,14 @@ def parse_mfr_cxml(
             accuracy = fix.find("navAccuracy")
         if accuracy is not None:
             props["position_accuracy"] = accuracy.text
-        # Other elements of the fix (e.g. onGoingChange) are kept raw.
+        # Other elements of the fix (e.g. onGoingChange) are kept raw,
+        # under their own prefix so they can't land in a column.
         for child in fix:
-            if child.tag not in _CXML_FIX_READ and not len(child):
-                props[child.tag] = (child.text or "").strip() or None
+            if child.tag not in _CXML_FIX_READ:
+                _check_cxml_tag(child.tag, label)
+                props.setdefault("fix_extra", {})[child.tag] = (
+                    child.text or ""
+                ).strip() or None
         cyclone = {}
         data_el = fix.find("cycloneData")
         consumed = set()
@@ -474,6 +484,15 @@ def parse_mfr_cxml(
             # Anything else (e.g. systemDepth, Dvorak/pastChange) is kept.
             for child in data_el:
                 if child.tag not in consumed:
+                    _check_cxml_tag(child.tag, label)
+                    key = f"cyclone_data.{child.tag}"
+                    if any(
+                        c == key or c.startswith(f"{key}.") for c in _CONSUMED
+                    ):
+                        raise MfrParseError(
+                            f"{label}: <{child.tag}> would overwrite a "
+                            "column"
+                        )
                     cyclone[child.tag] = (child.text or "").strip() or None
                 for grandchild in child:
                     path = f"{child.tag}/{grandchild.tag}"
@@ -733,7 +752,7 @@ _INSERT_STORM = text(
 
 _EXISTING_FORECAST = text(
     """
-    SELECT content_sha256, update_time, late_reissue
+    SELECT content_sha256, update_time, late_reissue, name_as_issued
     FROM storms.mfr_forecasts
     WHERE disturbance_id = :disturbance_id AND issued_time = :issued_time
       AND kind = :kind
@@ -753,7 +772,7 @@ _DELETE_FORECAST = text(
 # (GEZANI 2026: 12Z, then 18Z), so tracks are compared per system.
 _EXISTING_TRACK = text(
     """
-    SELECT content_sha256, update_time, late_reissue
+    SELECT content_sha256, update_time, late_reissue, name_as_issued
     FROM storms.mfr_forecasts
     WHERE disturbance_id = :disturbance_id AND kind = 'track'
     ORDER BY update_time DESC NULLS LAST, content_sha256 DESC
@@ -877,14 +896,18 @@ def should_replace(
     new_late: bool,
     old_sha: str = "",
     new_sha: str = "",
+    old_named: bool = False,
+    new_named: bool = False,
 ) -> tuple[bool, str]:
     """Does a new version of a stored forecast (or track) replace it?
 
     For forecasts an operational file always wins over a late re-issue,
     whatever their order of arrival. Otherwise, and always for track-only
     files, the file produced last wins (a correction or a revision). Equal
-    update times (or none on both) fall back to the content hash, so the
-    result never depends on the order files are read in.
+    update times (or none on both) go to the version that names the
+    storm (CXML twins differ only in <cycloneName>: '0120172018' or AVA),
+    then to the content hash, so the result never depends on the order
+    files are read in.
     """
     if kind == "forecast":
         if new_late and not old_late:
@@ -892,6 +915,8 @@ def should_replace(
         if old_late and not new_late:
             return True, "operational forecast replaces a late re-issue"
     if old_update == new_update:
+        if old_named != new_named:
+            return new_named, "same update_time; the named version wins"
         if new_sha > old_sha:
             return True, "same update_time; tie broken by content hash"
         return False, "same update_time; tie broken by content hash"
@@ -919,7 +944,7 @@ def write_forecast(
     ).first()
     message = None
     if existing is not None:
-        old_sha, old_update, old_late = existing
+        old_sha, old_update, old_late, old_name = existing
         if old_sha == fc.forecast["content_sha256"]:
             return "unchanged", None
         replace, message = should_replace(
@@ -930,6 +955,8 @@ def write_forecast(
             fc.forecast["late_reissue"],
             old_sha,
             fc.forecast["content_sha256"],
+            old_named=clean_name(old_name) is not None,
+            new_named=clean_name(fc.forecast["name_as_issued"]) is not None,
         )
         if not replace:
             return "kept_existing", message
