@@ -23,22 +23,36 @@ What it does (one transaction)
 ------------------------------
 1. Lock the table against writers (readers keep working until step 3).
 2. Keep one row per (sid, valid_time) in a temp table, preferring a row
-   whose ``storm_id`` matches storms.ibtracs_storms. Among the remaining
-   copies the pick is arbitrary: there is no load timestamp, and copies
-   differ for ~870 keys where IBTrACS revised the data. Run the IBTrACS
-   ETL straight after this migration so every key still in the source is
-   overwritten with current values.
+   whose ``storm_id`` matches storms.ibtracs_storms, then set every kept
+   row's ``storm_id`` from storms.ibtracs_storms (it is derived from sid).
+   Among the remaining copies the pick is arbitrary (point_id is a random
+   uuid). Copies differ for 869 prod keys where IBTrACS revised the data;
+   all 869 are still in the 2026-11-14 ALL file, so the IBTrACS ETL run
+   straight after this migration overwrites them with current values.
 3. Drop the old constraint, TRUNCATE, re-insert the kept rows, add
-   ``UNIQUE (sid, valid_time)`` under the same name.
+   ``UNIQUE (sid, valid_time)`` under the same name, and drop
+   idx_ibtracs_tracks_geo_sid_valid, which the new constraint's index
+   duplicates.
 4. Check the row count equals the key count taken in step 1 and the SID
    count is unchanged; otherwise roll back.
 5. Commit (or roll back with ``--dry-run``), then ANALYZE.
 
+Writers are blocked for the whole run, readers from the DROP CONSTRAINT
+on (needs ACCESS EXCLUSIVE). Check pg_stat_activity for sessions idle in
+transaction on the table first: they hold the lock upgrade past the 60 s
+lock_timeout and the run fails (safely) after the expensive sort.
+
+There is no undo after commit short of a point-in-time restore. The
+removed rows are copies of kept keys, re-derivable from IBTrACS.
+
 TRUNCATE + re-insert rather than DELETE: ~96% of the prod heap is
 duplicates, so DELETE would leave ~1.8 GB of dead tuples behind.
 
-Not in scope: rows for (sid, valid_time) points that IBTrACS has since
-dropped stay in the table, as they did before.
+Not in scope: keys IBTrACS has since dropped stay in the table, as they
+did before (prod, 2026-11-16: 3,548 keys over 162 sids not in the
+2026-11-14 ALL file, mostly provisional storms re-issued under a new sid
+and pre-2000 reanalysis). The ETL never touches them, so the table is
+deduplicated, not a mirror of IBTrACS.
 
 Usage
 -----
@@ -46,7 +60,8 @@ Usage
     python scripts/migrations/2026_11_ibtracs_tracks_unique.py --mode dev
 
 Prod runs as a one-off Databricks job (prod write credentials only exist
-there): databricks/ibtracs_tracks_unique_prod.json.
+there): databricks/ibtracs_tracks_unique_prod_dryrun.json, then
+databricks/ibtracs_tracks_unique_prod_execute.json.
 
 Idempotent: if the constraint is already ``UNIQUE (sid, valid_time)`` it
 reports the state and exits.
@@ -62,10 +77,13 @@ from sqlalchemy import text
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+# Databricks' py4j logs a line every second at INFO.
+logging.getLogger("py4j").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TABLE = "storms.ibtracs_tracks_geo"
 CONSTRAINT = "ibtracs_tracks_geo_unique"
+REDUNDANT_INDEX = "storms.idx_ibtracs_tracks_geo_sid_valid"
 NEW_KEY = "UNIQUE (sid, valid_time)"
 
 
@@ -134,6 +152,16 @@ def migrate(engine, dry_run: bool) -> None:
             text("SELECT COUNT(*) FROM ibtracs_tracks_keep")
         ).scalar()
         logger.info(f"Keeping {n_keep} rows")
+        n_relabelled = conn.execute(
+            text(
+                "UPDATE ibtracs_tracks_keep k SET storm_id = s.storm_id "
+                "FROM storms.ibtracs_storms s WHERE s.sid = k.sid "
+                "AND k.storm_id IS DISTINCT FROM s.storm_id"
+            )
+        ).rowcount
+        logger.info(
+            f"Set storm_id from ibtracs_storms on {n_relabelled} kept rows"
+        )
 
         conn.execute(text(f"ALTER TABLE {TABLE} DROP CONSTRAINT {CONSTRAINT}"))
         conn.execute(text(f"TRUNCATE {TABLE}"))
@@ -146,6 +174,7 @@ def migrate(engine, dry_run: bool) -> None:
         conn.execute(
             text(f"ALTER TABLE {TABLE} ADD CONSTRAINT {CONSTRAINT} {NEW_KEY}")
         )
+        conn.execute(text(f"DROP INDEX IF EXISTS {REDUNDANT_INDEX}"))
 
         after = counts(conn)
         stale = conn.execute(
@@ -157,14 +186,14 @@ def migrate(engine, dry_run: bool) -> None:
         ).scalar()
         logger.info(f"After: {after}")
         logger.info(
-            f"Rows whose storm_id differs from ibtracs_storms "
-            f"(fixed by the next IBTrACS run): {stale}"
+            f"Rows whose storm_id differs from ibtracs_storms: {stale}"
         )
 
         if (
             after["n_rows"] != before["n_keys"]
             or after["n_keys"] != before["n_keys"]
             or after["n_sids"] != before["n_sids"]
+            or stale != 0
         ):
             conn.rollback()
             raise RuntimeError(
@@ -183,7 +212,7 @@ def migrate(engine, dry_run: bool) -> None:
             f"{CONSTRAINT} is now {constraint_def(conn)}"
         )
 
-    # ANALYZE cannot run inside the migration transaction.
+    # Fresh statistics for the rebuilt table, after the commit.
     with engine.connect().execution_options(
         isolation_level="AUTOCOMMIT"
     ) as conn:

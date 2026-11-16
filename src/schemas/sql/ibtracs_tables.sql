@@ -157,10 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_ibtracs_tracks_geo_valid_time
     ON storms.ibtracs_tracks_geo (valid_time)
     TABLESPACE pg_default;
 
--- Composite index for common query patterns (storm + time)
-CREATE INDEX IF NOT EXISTS idx_ibtracs_tracks_geo_sid_valid
-    ON storms.ibtracs_tracks_geo (sid, valid_time)
-    TABLESPACE pg_default;
+-- (sid, valid_time) lookups use the index behind ibtracs_tracks_geo_unique.
 
 -- Index on storm_id for joining with other datasets
 CREATE INDEX IF NOT EXISTS idx_ibtracs_tracks_geo_storm_id
