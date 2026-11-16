@@ -10,7 +10,8 @@
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
 #   • mfr_ingest          — 6-hourly Météo-France La Réunion forecast-track
-#                           sync from the meteofr blob, databricks/run_mfr.py sync
+#                           sync from the meteofr blob, databricks/run_mfr.py sync,
+#                           then swaths + exposure, databricks/run_swio.py realtime
 #
 # The jobs stay separate in the Workflows UI (own DAG / schedule /
 # compute). "One bundle" just means one databricks.yml deploys them all.
@@ -548,7 +549,7 @@ resources:
     # ===================================================================
     mfr_ingest:
       name: MFR Ingest (RSMC La Réunion)
-      description: "Load Météo-France La Réunion tropical cyclone forecast tracks (South-West Indian Ocean) from the meteofr blob copy into storms.mfr_*"
+      description: "Load Météo-France La Réunion tropical cyclone forecast tracks (South-West Indian Ocean) from the meteofr blob copy into storms.mfr_*, then compute their wind swaths and population exposure"
       permissions:
         - group_name: dsci
           level: CAN_MANAGE
@@ -569,7 +570,7 @@ resources:
         type: dataset-ingest
         hazard: tropical-cyclone
         kb: storms-pipeline
-        output_schema: storms.mfr_storms,storms.mfr_forecasts,storms.mfr_tracks_geo,storms.mfr_files
+        output_schema: storms.mfr_storms,storms.mfr_forecasts,storms.mfr_tracks_geo,storms.mfr_files,storms.mfr_tracks_*,storms.mfr_processing_completion
 
       email_notifications:
         on_failure:
@@ -606,6 +607,30 @@ resources:
           libraries:
             - pypi: { package: "ocha-stratus==0.1.7" }
             - pypi: { package: "python-dotenv" }
+        # Swaths, exposure and uncertainty scenarios for every forecast the
+        # sync brought in (src/pipelines/swio.py: forecasts of the last 5
+        # days not yet processed; nothing to do off-season).
+        - task_key: swio
+          depends_on:
+            - task_key: sync
+          job_cluster_key: mfr_cluster
+          timeout_seconds: 5400
+          spark_python_task:
+            python_file: databricks/run_swio.py
+            source: GIT
+            parameters:
+              - "realtime"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+          libraries:
+            - pypi: { package: "ocha-stratus==0.1.7" }
+            - pypi: { package: "ocha-lens==0.7.0" }
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
+            - pypi: { package: "geoalchemy2==0.18.0" }
 
 targets:
   dev:
