@@ -9,8 +9,8 @@
 #                           run_pipeline.py ibtracs
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
-#   • mfr_ingest          — 3-hourly Météo-France La Réunion forecast-track
-#                           poll (single task), databricks/run_mfr.py poll
+#   • mfr_ingest          — 6-hourly Météo-France La Réunion forecast-track
+#                           sync from the meteofr blob, databricks/run_mfr.py sync
 #
 # The jobs stay separate in the Workflows UI (own DAG / schedule /
 # compute). "One bundle" just means one databricks.yml deploys them all.
@@ -537,21 +537,18 @@ resources:
 
     # ===================================================================
     # MFR ingest — Météo-France La Réunion (RSMC La Réunion) forecast
-    # tracks for the South-West Indian Ocean, polled from Météo-France's
-    # FTP site (src/pipelines/mfr.py poll): every new track file is
-    # archived raw to the storm container and written to storms.mfr_*.
-    #
-    # The FTP login (dsci FTP_HOST / FTP_USER / FTP_PASS / FORECAST_DIR) is
-    # shared with the Mozambique cyclone monitor
-    # (ds-aa-moz-cyclones-monitoring, runs at :00 of 02/08/14/20 UTC). This
-    # job only lists and downloads, keeps its own state (storms.mfr_files)
-    # and runs at :30 so the two FTP sessions don't overlap. Every 3 hours:
-    # tracks for the 00/06/12/18Z forecasts land ~1-2 h after the hour, and
-    # some forecasts are issued off-cycle.
+    # tracks for the South-West Indian Ocean (src/pipelines/mfr.py sync).
+    # Reads the dev blob container `meteofr`, which the Azure Data Factory
+    # pipeline CopyMeteoFRToBlob (DsciDevDataFactory) fills from
+    # Météo-France's SFTP every 6 h (writes land at ~:13 of 01/07/13/19
+    # UTC); every new track file is archived to this stage's storm
+    # container and written to storms.mfr_*. This job never logs in to
+    # Météo-France: the FTP login belongs to the Mozambique cyclone monitor
+    # (ds-aa-moz-cyclones-monitoring), which this must not disturb.
     # ===================================================================
     mfr_ingest:
       name: MFR Ingest (RSMC La Réunion)
-      description: "Archive and load Météo-France La Réunion tropical cyclone forecast tracks (South-West Indian Ocean) from its FTP site into storms.mfr_*"
+      description: "Load Météo-France La Réunion tropical cyclone forecast tracks (South-West Indian Ocean) from the meteofr blob copy into storms.mfr_*"
       permissions:
         - group_name: dsci
           level: CAN_MANAGE
@@ -561,7 +558,7 @@ resources:
         git_branch: ${var.git_branch}
 
       schedule:
-        quartz_cron_expression: "0 30 2,5,8,11,14,17,20,23 * * ?"
+        quartz_cron_expression: "0 45 1,7,13,19 * * ?"
         timezone_id: UTC
         pause_status: UNPAUSED
 
@@ -587,29 +584,23 @@ resources:
         - job_cluster_key: mfr_cluster
           new_cluster:
             # Job Compute (single node) policy: injects the dsci DB/blob
-            # secrets. The FTP login is not in the policy, so it is added
-            # here from the same scope the Mozambique monitor reads.
+            # secrets (the meteofr container is on the dev account).
             policy_id: "0017962FF5D1E3B9"
             apply_policy_default_values: true
             spark_version: "18.2.x-scala2.13"
             node_type_id: "Standard_DS3_v2"
             num_workers: 0
             data_security_mode: SINGLE_USER
-            spark_env_vars:
-              FTP_HOST: "{{secrets/dsci/FTP_HOST}}"
-              FTP_USER: "{{secrets/dsci/FTP_USER}}"
-              FTP_PASS: "{{secrets/dsci/FTP_PASS}}"
-              FORECAST_DIR: "{{secrets/dsci/FORECAST_DIR}}"
 
       tasks:
-        - task_key: poll
+        - task_key: sync
           job_cluster_key: mfr_cluster
-          timeout_seconds: 1800
+          timeout_seconds: 3600
           spark_python_task:
             python_file: databricks/run_mfr.py
             source: GIT
             parameters:
-              - "poll"
+              - "sync"
               - "--mode"
               - "{{job.parameters.mode}}"
           libraries:

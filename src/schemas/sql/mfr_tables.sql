@@ -3,16 +3,18 @@
 -- ============================================================================
 -- Tropical cyclone forecast tracks for the South-West Indian Ocean, from the
 -- JSON files Météo-France La Réunion publishes for every system in its area
--- of responsibility (one file per system per forecast). Written by
+-- of responsibility: one file per system per forecast, plus track-only files
+-- (the final track, sent when a system ends and revised later). Written by
 -- src/pipelines/mfr.py. Shaped like the FMS tables (fms_tables.sql) so the
 -- same downstream code can read both.
 --
 -- Tables:
 --   - storms.mfr_storms:      one row per system (e.g. 10-20252026 = GEZANI)
---   - storms.mfr_forecasts:   one row per forecast (reference time)
+--   - storms.mfr_forecasts:   one row per forecast or track-only file
+--                             (kind 'forecast' / 'track')
 --   - storms.mfr_tracks_geo:  one row per track point, analysis + forecast
 --   - storms.mfr_files:       every source file read, whether or not it was
---                             written (the FTP poller's memory)
+--                             written (what the sync reads to skip files)
 --
 -- Each file carries the system's whole analysed track so far (data_type
 -- 'analysis', leadtime <= 0) and the forecast (data_type 'forecast',
@@ -76,6 +78,7 @@ CREATE TABLE IF NOT EXISTS storms.mfr_forecasts
 (
     disturbance_id VARCHAR NOT NULL,
     issued_time TIMESTAMP NOT NULL,
+    kind VARCHAR NOT NULL CHECK (kind IN ('forecast', 'track')),
     update_time TIMESTAMP,
     name_as_issued VARCHAR,
     product VARCHAR,
@@ -90,7 +93,7 @@ CREATE TABLE IF NOT EXISTS storms.mfr_forecasts
     late_reissue BOOLEAN NOT NULL,
     uncertainty_cone geometry(Geometry, 4326),
     ingested_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
-    CONSTRAINT mfr_forecasts_pkey PRIMARY KEY (disturbance_id, issued_time),
+    CONSTRAINT mfr_forecasts_pkey PRIMARY KEY (disturbance_id, issued_time, kind),
     CONSTRAINT mfr_forecasts_disturbance_id_fkey FOREIGN KEY (disturbance_id)
         REFERENCES storms.mfr_storms(disturbance_id)
         ON DELETE CASCADE
@@ -101,7 +104,9 @@ ALTER TABLE IF EXISTS storms.mfr_forecasts
     OWNER to {owner};
 
 COMMENT ON TABLE storms.mfr_forecasts IS
-    'RSMC La Réunion forecasts - one row per system and reference time';
+    'RSMC La Réunion forecasts and track-only files - one row per system, reference time and kind';
+COMMENT ON COLUMN storms.mfr_forecasts.kind IS
+    'forecast (the file has forecast points) or track (track-only file: the final track, sent when a system ends and revised later; the latest revision is kept)';
 COMMENT ON COLUMN storms.mfr_forecasts.issued_time IS
     'reference_time in the file (UTC): the analysis time the forecast starts from. The hour in the filename is the upload hour, not this';
 COMMENT ON COLUMN storms.mfr_forecasts.update_time IS
@@ -109,7 +114,7 @@ COMMENT ON COLUMN storms.mfr_forecasts.update_time IS
 COMMENT ON COLUMN storms.mfr_forecasts.name_as_issued IS
     'cyclone_name as in the file, e.g. GEZANI, or 10-20252026 while unnamed';
 COMMENT ON COLUMN storms.mfr_forecasts.data_source IS
-    'Where the file came from: ftp (live poll) or backfill';
+    'Where the file came from: meteofr_blob (Data Factory copy of the Météo-France SFTP), ftp, backfill or local';
 COMMENT ON COLUMN storms.mfr_forecasts.source_filename IS
     'Original filename, e.g. CMRSTRACK_SWI$10_20252026_GEZANI_2026_02_09_18Z.json';
 COMMENT ON COLUMN storms.mfr_forecasts.content_sha256 IS
@@ -123,9 +128,9 @@ COMMENT ON COLUMN storms.mfr_forecasts.n_forecast IS
 COMMENT ON COLUMN storms.mfr_forecasts.max_leadtime IS
     'Longest forecast leadtime in hours, NULL without forecast points';
 COMMENT ON COLUMN storms.mfr_forecasts.late_reissue IS
-    'True when the file was produced more than 24 h after its reference time (Météo-France re-publishes some files after the season); never used to replace an operational forecast';
+    'True for a forecast file produced more than 24 h after its reference time (Météo-France re-publishes some files long after); never replaces an operational forecast. Always false for track-only files';
 COMMENT ON COLUMN storms.mfr_forecasts.uncertainty_cone IS
-    'Météo-France uncertainty cone polygon as published (WGS84). Its half-width matches position_accuracy';
+    'Météo-France uncertainty cone polygon (WGS84), made valid with ST_MakeValid. Its half-width matches position_accuracy';
 COMMENT ON COLUMN storms.mfr_forecasts.ingested_at IS
     'When this forecast was last written (UTC)';
 
@@ -136,8 +141,8 @@ COMMENT ON COLUMN storms.mfr_forecasts.ingested_at IS
 -- [NE, SE, SW, NW] (same order as nhc/fms_tracks_geo); a sector the file
 -- leaves out is null (Météo-France omits sectors the wind does not reach),
 -- and the column is NULL when the file gives no contour at that speed.
--- Météo-France contours are 28, 34, 48 and 64 kt (no 50 kt). Winds are
--- 10-minute means.
+-- The JSON files give 28, 34, 48 and 64 kt contours (no 50 kt); the older
+-- CXML product gives 27, 34, 50 and 64 kt. Winds are 10-minute means.
 
 -- DROP TABLE IF EXISTS storms.mfr_tracks_geo CASCADE;
 
@@ -147,6 +152,7 @@ CREATE TABLE IF NOT EXISTS storms.mfr_tracks_geo
     provider VARCHAR NOT NULL CHECK (provider = 'mfr'),
     basin VARCHAR NOT NULL CHECK (basin = 'SI'),
     issued_time TIMESTAMP NOT NULL,
+    kind VARCHAR NOT NULL CHECK (kind IN ('forecast', 'track')),
     data_type VARCHAR NOT NULL CHECK (data_type IN ('analysis', 'forecast')),
     valid_time TIMESTAMP NOT NULL,
     leadtime INTEGER NOT NULL,
@@ -162,17 +168,19 @@ CREATE TABLE IF NOT EXISTS storms.mfr_tracks_geo
     motion_direction DOUBLE PRECISION,
     dvorak_final_t DOUBLE PRECISION,
     dvorak_ci DOUBLE PRECISION,
+    quadrant_radius_27 TEXT,
     quadrant_radius_28 TEXT,
     quadrant_radius_34 TEXT,
     quadrant_radius_48 TEXT,
+    quadrant_radius_50 TEXT,
     quadrant_radius_64 TEXT,
     raw_fields JSONB,
     storm_id VARCHAR,
     point_id VARCHAR NOT NULL,
     geometry geometry(Point, 4326) NOT NULL,
-    CONSTRAINT mfr_tracks_geo_unique UNIQUE (disturbance_id, issued_time, data_type, valid_time),
-    CONSTRAINT mfr_tracks_geo_forecast_fkey FOREIGN KEY (disturbance_id, issued_time)
-        REFERENCES storms.mfr_forecasts(disturbance_id, issued_time)
+    CONSTRAINT mfr_tracks_geo_unique UNIQUE (disturbance_id, issued_time, kind, data_type, valid_time),
+    CONSTRAINT mfr_tracks_geo_forecast_fkey FOREIGN KEY (disturbance_id, issued_time, kind)
+        REFERENCES storms.mfr_forecasts(disturbance_id, issued_time, kind)
         ON DELETE CASCADE
 )
 TABLESPACE pg_default;
@@ -184,8 +192,10 @@ COMMENT ON TABLE storms.mfr_tracks_geo IS
     'RSMC La Réunion track points with geometry: analysis (past) and forecast points of each forecast';
 COMMENT ON COLUMN storms.mfr_tracks_geo.data_type IS
     'analysis (observed track so far) or forecast (leadtime 0 = analysis at the reference time)';
+COMMENT ON COLUMN storms.mfr_tracks_geo.kind IS
+    'kind of the file the point comes from (see mfr_forecasts.kind)';
 COMMENT ON COLUMN storms.mfr_tracks_geo.leadtime IS
-    'Hours after issued_time; negative for earlier analysis points';
+    'Hours after issued_time; negative for earlier analysis points (track-only files can have analysis points after it)';
 COMMENT ON COLUMN storms.mfr_tracks_geo.development IS
     'Météo-France stage, e.g. disturbance, moderate tropical storm, intense tropical cyclone, inland';
 COMMENT ON COLUMN storms.mfr_tracks_geo.wind_speed IS
@@ -210,12 +220,16 @@ COMMENT ON COLUMN storms.mfr_tracks_geo.dvorak_final_t IS
     'Dvorak.final_T_number';
 COMMENT ON COLUMN storms.mfr_tracks_geo.dvorak_ci IS
     'Dvorak.current_intensity';
+COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_27 IS
+    'JSON array [NE,SE,SW,NW]: 27-knot radii by quadrant (nautical miles), CXML product only';
 COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_28 IS
     'JSON array [NE,SE,SW,NW]: 28-knot radii by quadrant (nautical miles)';
 COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_34 IS
     'JSON array [NE,SE,SW,NW]: 34-knot radii by quadrant (nautical miles)';
 COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_48 IS
     'JSON array [NE,SE,SW,NW]: 48-knot radii by quadrant (nautical miles)';
+COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_50 IS
+    'JSON array [NE,SE,SW,NW]: 50-knot radii by quadrant (nautical miles), CXML product only';
 COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_64 IS
     'JSON array [NE,SE,SW,NW]: 64-knot radii by quadrant (nautical miles)';
 COMMENT ON COLUMN storms.mfr_tracks_geo.raw_fields IS
@@ -230,19 +244,20 @@ COMMENT ON COLUMN storms.mfr_tracks_geo.geometry IS
 -- ============================================================================
 -- Table: storms.mfr_files
 -- ============================================================================
--- One row per distinct file read (name + content). The FTP poller compares
--- each listing against it, so a file is downloaded once; last_seen shows how
--- long files stay on the FTP.
+-- One row per distinct file read (source + path + content). The scheduled
+-- sync compares each listing against it, so a file is downloaded once;
+-- last_seen shows when a file was last listed at its source.
 
 -- DROP TABLE IF EXISTS storms.mfr_files CASCADE;
 
 CREATE TABLE IF NOT EXISTS storms.mfr_files
 (
-    source_filename VARCHAR NOT NULL,
-    content_sha256 CHAR(64) NOT NULL,
     source VARCHAR NOT NULL,
+    source_path VARCHAR NOT NULL,
+    content_sha256 CHAR(64) NOT NULL,
+    source_filename VARCHAR NOT NULL,
     size_bytes BIGINT,
-    ftp_modified TIMESTAMP,
+    source_modified TIMESTAMP,
     first_seen TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
     last_seen TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
     raw_blob VARCHAR,
@@ -250,7 +265,8 @@ CREATE TABLE IF NOT EXISTS storms.mfr_files
     message TEXT,
     disturbance_id VARCHAR,
     issued_time TIMESTAMP,
-    CONSTRAINT mfr_files_pkey PRIMARY KEY (source_filename, content_sha256)
+    kind VARCHAR,
+    CONSTRAINT mfr_files_pkey PRIMARY KEY (source, source_path, content_sha256)
 )
 TABLESPACE pg_default;
 
@@ -260,17 +276,21 @@ ALTER TABLE IF EXISTS storms.mfr_files
 COMMENT ON TABLE storms.mfr_files IS
     'Every RSMC La Réunion source file read, with what happened to it';
 COMMENT ON COLUMN storms.mfr_files.source IS
-    'ftp (live poll) or backfill';
+    'meteofr_blob (Data Factory copy of the Météo-France SFTP), ftp, backfill or local';
+COMMENT ON COLUMN storms.mfr_files.source_path IS
+    'Blob name or FTP filename the file was read from';
+COMMENT ON COLUMN storms.mfr_files.source_filename IS
+    'Filename, e.g. CMRSTRACK_SWI$10_20252026_GEZANI_2026_02_09_18Z.json';
 COMMENT ON COLUMN storms.mfr_files.size_bytes IS
-    'Size in bytes (from the FTP listing when it gives one)';
-COMMENT ON COLUMN storms.mfr_files.ftp_modified IS
-    'Modification time from the FTP listing (UTC), when it gives one';
+    'Size in bytes from the source listing (else of the bytes read)';
+COMMENT ON COLUMN storms.mfr_files.source_modified IS
+    'Modification time from the source listing (UTC) when first read';
 COMMENT ON COLUMN storms.mfr_files.first_seen IS
     'First time this file was read (UTC)';
 COMMENT ON COLUMN storms.mfr_files.last_seen IS
-    'Last FTP listing this file was in (UTC)';
+    'Last listing this file was in (UTC)';
 COMMENT ON COLUMN storms.mfr_files.status IS
-    'written: became the stored forecast; unchanged: same content already stored; kept_existing: a different version of a stored forecast that did not replace it (older or a late re-issue); failed: could not be read';
+    'written: became the stored forecast/track; unchanged: same content already stored; kept_existing: a different version that did not replace the stored one (older, or a late re-issue); failed: could not be read';
 COMMENT ON COLUMN storms.mfr_files.message IS
     'Why, for kept_existing and failed';
 

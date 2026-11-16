@@ -8,6 +8,7 @@ left untouched.
 Usage
 -----
     python scripts/init_db_mfr.py --mode prod
+    python scripts/init_db_mfr.py --mode dev --drop-first   # rebuild in dev
 """
 
 import argparse
@@ -26,6 +27,11 @@ CONFIG = {
 }
 
 SQL_FILES = ["mfr_tables.sql"]
+
+DROP_SQL = """
+DROP TABLE IF EXISTS storms.mfr_tracks_geo, storms.mfr_forecasts,
+    storms.mfr_storms, storms.mfr_files
+"""
 
 
 def get_default_sql_dir() -> Path:
@@ -50,10 +56,21 @@ def main():
     )
     parser.add_argument("--mode", choices=["dev", "prod"], required=True)
     parser.add_argument("--sql-dir", type=Path, default=get_default_sql_dir())
+    parser.add_argument(
+        "--drop-first",
+        action="store_true",
+        help="Drop the mfr_* tables first (dev only; to rebuild after a "
+        "schema change)",
+    )
     args = parser.parse_args()
+    if args.drop_first and args.mode != "dev":
+        parser.error("--drop-first is for dev only")
 
     engine = stratus.get_engine(args.mode, write=True)
     with engine.connect() as conn:
+        if args.drop_first:
+            print("Dropping the mfr_* tables (dev)...")
+            conn.execute(text(DROP_SQL))
         for sql_file in SQL_FILES:
             path = args.sql_dir / sql_file
             if not path.exists():

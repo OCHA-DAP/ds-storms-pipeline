@@ -11,7 +11,7 @@ Never ``sys.exit`` here: the DBX exec context treats even ``SystemExit(0)``
 as a failed task. A non-zero exit from the module raises instead.
 
 The scheduled MFR Ingest job (databricks.yml) runs
-``databricks/run_mfr.py poll --mode <mode>``.
+``databricks/run_mfr.py sync --mode <mode>``.
 """
 
 import os

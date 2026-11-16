@@ -9,6 +9,7 @@ connection that records each statement, the poller against a fake FTP.
 import ast
 import copy
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -187,12 +188,26 @@ def test_scalars_and_geometry():
 def test_unknown_contour_speed_kept_raw(caplog):
     doc = copy.deepcopy(DOC)
     contours = doc["features"][2]["properties"]["cyclone_data"]
-    contours["wind_contours"].append(_contour(50, 35, 35, 40, 45))
+    contours["wind_contours"].append(_contour(40, 35, 35, 40, 45))
     t = _parse(doc).tracks
     lt0 = t[(t.data_type == "forecast") & (t.leadtime == 0)].iloc[0]
     raw = json.loads(lt0.raw_fields)
-    assert raw["cyclone_data.wind_contours"][0]["wind_speed_kt"] == 50
-    assert "50" in caplog.text
+    assert raw["cyclone_data.wind_contours"][0]["wind_speed_kt"] == 40
+    assert "40" in caplog.text
+
+
+def test_cxml_speeds_have_columns():
+    doc = copy.deepcopy(DOC)
+    contours = doc["features"][2]["properties"]["cyclone_data"]
+    contours["wind_contours"] += [
+        _contour(27, 70, 80, 90, 85),
+        _contour(50, 25, 25, 30, 30),
+    ]
+    t = _parse(doc).tracks
+    lt0 = t[(t.data_type == "forecast") & (t.leadtime == 0)].iloc[0]
+    assert json.loads(lt0.quadrant_radius_27) == [70, 80, 90, 85]
+    assert json.loads(lt0.quadrant_radius_50) == [25, 25, 30, 30]
+    assert pd.isna(lt0.raw_fields)
 
 
 def test_unnamed_system():
@@ -207,7 +222,49 @@ def test_unnamed_system():
 def test_late_reissue_flag():
     doc = copy.deepcopy(DOC)
     doc["update_time"] = "2026-06-27T13:00:00Z"
-    assert _parse(doc).forecast["late_reissue"] is True
+    fc = _parse(doc)
+    assert fc.forecast["late_reissue"] is True
+    assert fc.forecast["kind"] == "forecast"
+    assert (fc.tracks.kind == "forecast").all()
+
+
+def _track_only(update_time="2026-02-12T09:00:00Z"):
+    """A final-track file: analysis points only, one after reference_time."""
+    doc = copy.deepcopy(DOC)
+    doc["update_time"] = update_time
+    doc["features"] = [
+        f
+        for f in doc["features"]
+        if f["properties"]["data_type"] == "analysis"
+    ]
+    doc["features"].append(
+        _point("analysis", "2026-02-09T22:00:00Z", 57.0, -15.3, 55)
+    )
+    return doc
+
+
+def test_track_only_file():
+    fc = _parse(_track_only())
+    f = fc.forecast
+    assert f["kind"] == "track"
+    assert (f["n_analysis"], f["n_forecast"], f["max_leadtime"]) == (
+        3,
+        0,
+        None,
+    )
+    assert f["late_reissue"] is False  # revisions of a final track are normal
+    assert list(fc.tracks.leadtime) == [-12, 0, 4]
+    assert (fc.tracks.kind == "track").all()
+
+
+def test_analysis_after_reference_in_a_forecast_warns(caplog):
+    doc = copy.deepcopy(DOC)
+    doc["features"].insert(
+        2, _point("analysis", "2026-02-09T21:00:00Z", 57.5, -15.2, 60)
+    )
+    fc = _parse(doc)
+    assert fc.forecast["n_analysis"] == 3
+    assert "after reference_time" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -293,24 +350,25 @@ def test_raw_blob_name():
 
 
 @pytest.mark.parametrize(
-    "old_late, new_late, old_up, new_up, replace",
+    "kind, old_late, new_late, old_up, new_up, replace",
     [
-        (False, False, 1, 2, True),  # a correction
-        (False, False, 2, 1, False),  # older version arrives later
-        (False, True, 1, 9, False),  # late re-issue never replaces
-        (True, False, 9, 1, True),  # operational replaces a late one
-        (True, True, 8, 9, True),
-        (False, False, None, 1, True),
-        (False, False, 1, None, False),
+        ("forecast", False, False, 1, 2, True),  # a correction
+        ("forecast", False, False, 2, 1, False),  # older version arrives later
+        ("forecast", False, True, 1, 9, False),  # late re-issue never replaces
+        ("forecast", True, False, 9, 1, True),  # operational replaces late
+        ("forecast", True, True, 8, 9, True),
+        ("forecast", False, False, None, 1, True),
+        ("forecast", False, False, 1, None, False),
+        ("track", False, False, 1, 9, True),  # latest revision wins
+        ("track", False, False, 9, 1, False),
     ],
 )
-def test_should_replace(old_late, new_late, old_up, new_up, replace):
+def test_should_replace(kind, old_late, new_late, old_up, new_up, replace):
     def t(h):
         return None if h is None else datetime(2026, 2, 9, h)
 
-    assert mfr.should_replace(t(old_up), old_late, t(new_up), new_late)[0] is (
-        replace
-    )
+    result = mfr.should_replace(kind, t(old_up), old_late, t(new_up), new_late)
+    assert result[0] is replace
 
 
 def test_imports_stay_light():
@@ -419,6 +477,15 @@ def test_late_reissue_does_not_replace():
     assert not any(s.startswith("DELETE") for s, _ in conn.calls)
 
 
+def test_existing_lookup_is_by_kind():
+    conn = FakeConn()
+    mfr.write_forecast(conn, _parse(_track_only()), None)
+    lookup = [
+        p for s, p in conn.calls if s.startswith("SELECT content_sha256")
+    ]
+    assert lookup[0]["kind"] == "track"
+
+
 def test_correction_replaces():
     conn = FakeConn(existing=("0" * 64, datetime(2026, 2, 9, 18, 10), False))
     assert mfr.write_forecast(conn, _parse(), None)[0] == "written"
@@ -439,11 +506,111 @@ def test_schema_has_every_column():
     forecasts = forecasts.split(")\nTABLESPACE")[0]
     for col in mfr._FORECAST_COLUMNS + ["uncertainty_cone"]:
         assert f"\n    {col} " in forecasts, col
+    files = sql.split("CREATE TABLE IF NOT EXISTS storms.mfr_files")[1]
+    files = files.split(")\nTABLESPACE")[0]
+    insert = str(mfr._RECORD_FILE).split("VALUES")[0]
+    for col in re.findall(r"\w+", insert.split("(", 1)[1]):
+        assert f"\n    {col} " in files, col
 
 
 # ---------------------------------------------------------------------------
-# FTP poll
+# Blob sync and FTP poll
 # ---------------------------------------------------------------------------
+
+
+class FakeBlob:
+    def __init__(self, name, data, modified):
+        self.name, self.size, self.last_modified = name, len(data), modified
+
+
+class FakeContainer:
+    """The few ContainerClient calls sync_blob makes; records downloads."""
+
+    def __init__(self, blobs):
+        self.blobs = blobs  # name -> bytes
+        self.downloaded = []
+
+    def list_blobs(self, name_starts_with=None):
+        when = datetime(2026, 11, 16, 13, 14)
+        return [
+            FakeBlob(n, d, when)
+            for n, d in self.blobs.items()
+            if n.startswith(name_starts_with or "")
+        ]
+
+    def get_blob_client(self, name):
+        container = self
+
+        class _Client:
+            def download_blob(self):
+                container.downloaded.append(name)
+
+                class _Stream:
+                    def readall(self):
+                        return container.blobs[name]
+
+                return _Stream()
+
+        return _Client()
+
+
+class FakeEngine:
+    """Answers the known-files query with ``known`` rows."""
+
+    def __init__(self, known_rows=()):
+        self.known_rows = list(known_rows)
+
+    def connect(self):
+        engine = self
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, stmt, params=None):
+                return iter(engine.known_rows)
+
+        return _Conn()
+
+
+def test_sync_reads_only_new_track_files():
+    prefix = mfr.SYNC_PREFIX
+    folder = f"{prefix}20252026_10_TESTA_2026_02_09_18Z/"
+    container = FakeContainer(
+        {
+            f"{prefix}{FILENAME}": _bytes(),
+            f"{folder}{FILENAME}": _bytes(),
+            f"{folder}34ktCMRS_SWI$10_20252026_TESTA.json": b"{}",
+            f"{folder}SPICYTRACKS_SWI$10_20252026_TESTA.txt": b"x",
+            "elsewhere/" + FILENAME: _bytes(),
+        }
+    )
+    known = [(f"{prefix}{FILENAME}", len(_bytes()), None)]
+    report = mfr.sync_blob(
+        "dev",
+        dry_run=True,
+        engine=FakeEngine(known),
+        container_client=container,
+    )
+    assert container.downloaded == [f"{folder}{FILENAME}"]
+    assert report["listed"] == 2
+    assert report["results"][0]["disturbance_id"] == "10-20252026"
+
+
+def test_sync_refetches_a_path_whose_size_changed():
+    path = mfr.SYNC_PREFIX + FILENAME
+    container = FakeContainer({path: _bytes()})
+    known = [(path, 5, datetime(2026, 1, 1))]
+    mfr.sync_blob(
+        "dev",
+        dry_run=True,
+        engine=FakeEngine(known),
+        container_client=container,
+    )
+    assert container.downloaded == [path]
 
 
 class FakeFTP:
@@ -535,6 +702,11 @@ def test_files_to_fetch_skips_known_and_refetches_changed():
         "CMRSTRACK_SWI$01_changed.json",
         "CMRSTRACK_SWI$01_new.json",
     ]
+    # Blob copies are rewritten every few hours: only sizes are compared.
+    known["CMRSTRACK_SWI$01_old.json"] = {(10, datetime(2025, 1, 1))}
+    assert "CMRSTRACK_SWI$01_old.json" not in mfr.files_to_fetch(
+        listing, known, use_modified=False
+    )
 
 
 def test_poll_dry_run_reads_only(ftp_env):

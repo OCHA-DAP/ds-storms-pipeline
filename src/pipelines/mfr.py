@@ -3,31 +3,40 @@
 MFR (Météo-France La Réunion / RSMC La Réunion) forecast-track ETL.
 
 Météo-France La Réunion publishes one JSON file per system per forecast
-(``CMRSTRACK_SWI$NN_SSSSSSSS_<NAME>_<YYYY_MM_DD_HH>Z.json``) on an FTP site,
-for every system in its area of responsibility. ``parse_mfr_json`` turns
-one file into rows for storms.mfr_storms, storms.mfr_forecasts and
+(``CMRSTRACK_SWI$NN_SSSSSSSS_<NAME>_<YYYY_MM_DD_HH>Z.json``), for every
+system in its area of responsibility, plus a track-only file when a system
+ends (and revised track-only files later). ``parse_mfr_json`` turns one
+file into rows for storms.mfr_storms, storms.mfr_forecasts and
 storms.mfr_tracks_geo (schema: src/schemas/sql/mfr_tables.sql);
 ``ingest_mfr_bytes`` archives the raw file to blob, writes it, and records
 it in storms.mfr_files.
 
-``poll`` is the live path (the "MFR Ingest" Databricks job): list the FTP
-directory, download only files not read before, archive and write them.
-It only lists and downloads: no command that changes anything on the
-server. The same login is used by the Mozambique cyclone monitor
-(ds-aa-moz-cyclones-monitoring), which keeps its own state and is not
-touched by this module.
+Where the files come from:
+  * ``sync`` (the scheduled "MFR Ingest" Databricks job): the dev blob
+    container ``meteofr``, which the Azure Data Factory pipeline
+    CopyMeteoFRToBlob fills from Météo-France's SFTP every 6 hours. Reading
+    the copy means this job never logs in to Météo-France itself.
+  * ``poll``: Météo-France's FTP site directly (list + download only). Not
+    scheduled: the login is the Mozambique cyclone monitor's
+    (ds-aa-moz-cyclones-monitoring), which must not be disturbed.
+  * ``ingest`` (local files) and ``backfill`` (any blob prefix).
 
-Things the file format needs care with (seen in the 2024/25 and 2025/26
+Things the file format needs care with (seen in the 2022/23 to 2026/27
 files):
   * The hour in the filename is the upload hour, not the forecast's
-    reference time (Chido's ``..._02Z.json`` is the 00Z forecast). The
-    forecast is keyed on ``reference_time`` inside the file.
-  * Météo-France re-publishes some files months after the season. A file
-    produced more than LATE_REISSUE after its reference time is stored
-    (``late_reissue``) only when no operational version of that forecast
-    exists, and never replaces one.
-  * Wind contours are 28, 34, 48 and 64 kt (no 50 kt), 10-minute winds;
-    a contour can list only some sectors.
+    reference time (Chido's ``..._02Z.json`` is the 00Z forecast). Files
+    are keyed on ``reference_time`` inside the file.
+  * A file without forecast points is a track-only file (``kind``
+    'track'): the system's final track, sent when it ends and revised up
+    to months later, sometimes with points after its reference time. It is
+    stored apart from the forecasts; the latest revision is kept.
+  * Météo-France re-publishes some forecast files long after they were
+    issued. A forecast file produced more than LATE_REISSUE after its
+    reference time is stored (``late_reissue``) only when no operational
+    version exists, and never replaces one.
+  * Wind contours are 28, 34, 48 and 64 kt in the JSON files (27/34/50/64
+    in the older CXML product), 10-minute winds; a contour can list only
+    some sectors.
 
 Keep the imports to pandas, sqlalchemy, python-dotenv, ocha-stratus and the
 standard library (tests/test_mfr.py checks), so the job needs no more than
@@ -63,8 +72,14 @@ RAW_CONTAINER = "storm"
 FILE_PREFIX = "CMRSTRACK_SWI"
 FTP_TIMEOUT_SECONDS = 60
 
-# Météo-France's wind contours (knots), in the order of the table columns.
-SPEEDS = (28, 34, 48, 64)
+# The Data Factory copy of Météo-France's SFTP (dev storage account only).
+SYNC_STAGE = "dev"
+SYNC_CONTAINER = "meteofr"
+SYNC_PREFIX = "RSMC_LaReunion/"
+
+# Wind contour speeds (knots) with a column. The JSON files give 28/34/48/64;
+# the older CXML product gives 27/34/50/64.
+SPEEDS = (27, 28, 34, 48, 50, 64)
 # File sectors in the [NE, SE, SW, NW] order of nhc/fms_tracks_geo.
 SECTORS = ("NEQ", "SEQ", "SWQ", "NWQ")
 
@@ -104,6 +119,7 @@ TRACK_COLUMNS = [
     "provider",
     "basin",
     "issued_time",
+    "kind",
     "data_type",
     "valid_time",
     "leadtime",
@@ -208,7 +224,7 @@ def _contours(contours, label: str) -> tuple[dict, list]:
     radii, other = {}, []
     for contour in contours or []:
         speed = _num(contour.get("wind_speed_kt"))
-        if speed is None or int(speed) not in SPEEDS or speed != int(speed):
+        if speed is None or speed != int(speed) or int(speed) not in SPEEDS:
             logger.warning(f"{label}: wind contour at {speed} kt kept raw")
             other.append(contour)
             continue
@@ -231,7 +247,7 @@ def _contours(contours, label: str) -> tuple[dict, list]:
 
 
 def parse_mfr_json(
-    data: bytes, filename: str | None = None, data_source: str = "ftp"
+    data: bytes, filename: str | None = None, data_source: str = "local"
 ) -> MfrForecast:
     """Parse one Météo-France track file into database rows."""
     try:
@@ -259,9 +275,6 @@ def parse_mfr_json(
         _utc(doc["update_time"], "update_time")
         if doc.get("update_time")
         else None
-    )
-    late_reissue = bool(
-        update_time is not None and update_time - issued_time > LATE_REISSUE
     )
     name_as_issued = doc.get("cyclone_name")
     name = clean_name(name_as_issued)
@@ -297,10 +310,6 @@ def parse_mfr_json(
         if data_type == "forecast" and hours < 0:
             raise MfrParseError(
                 f"{label}: forecast point before reference_time"
-            )
-        if data_type == "analysis" and hours > 0:
-            raise MfrParseError(
-                f"{label}: analysis point after reference_time"
             )
         if hours != int(hours):
             logger.warning(f"{label}: leadtime {hours} h rounded")
@@ -363,6 +372,19 @@ def parse_mfr_json(
         )
         tracks = tracks[~duplicated].reset_index(drop=True)
     is_fc = tracks["data_type"].eq("forecast")
+    kind = "forecast" if is_fc.any() else "track"
+    tracks["kind"] = kind
+    if kind == "forecast":
+        after = tracks["data_type"].eq("analysis") & tracks["leadtime"].gt(0)
+        if after.any():
+            logger.warning(
+                f"{label}: {after.sum()} analysis points after reference_time"
+            )
+    late_reissue = bool(
+        kind == "forecast"
+        and update_time is not None
+        and update_time - issued_time > LATE_REISSUE
+    )
 
     storm = {
         "disturbance_id": disturbance_id,
@@ -377,6 +399,7 @@ def parse_mfr_json(
     forecast = {
         "disturbance_id": disturbance_id,
         "issued_time": issued_time,
+        "kind": kind,
         "update_time": update_time,
         "name_as_issued": name_as_issued,
         "product": doc.get("product"),
@@ -429,6 +452,8 @@ def raw_blob_name(
 # Writing
 # ---------------------------------------------------------------------------
 
+_KEY = ("disturbance_id", "issued_time", "kind")
+
 _INSERT_STORM = text(
     """
     INSERT INTO storms.mfr_storms
@@ -446,6 +471,7 @@ _EXISTING_FORECAST = text(
     SELECT content_sha256, update_time, late_reissue
     FROM storms.mfr_forecasts
     WHERE disturbance_id = :disturbance_id AND issued_time = :issued_time
+      AND kind = :kind
     FOR UPDATE
     """
 )
@@ -454,12 +480,14 @@ _DELETE_FORECAST = text(
     """
     DELETE FROM storms.mfr_forecasts
     WHERE disturbance_id = :disturbance_id AND issued_time = :issued_time
+      AND kind = :kind
     """
 )
 
 _FORECAST_COLUMNS = [
     "disturbance_id",
     "issued_time",
+    "kind",
     "update_time",
     "name_as_issued",
     "product",
@@ -485,9 +513,10 @@ _INSERT_FORECAST = text(
 _SET_CONE = text(
     """
     UPDATE storms.mfr_forecasts
-    SET uncertainty_cone =
-        ST_SetSRID(ST_GeomFromGeoJSON(CAST(:cone AS text)), 4326)
+    SET uncertainty_cone = ST_MakeValid(
+        ST_SetSRID(ST_GeomFromGeoJSON(CAST(:cone AS text)), 4326))
     WHERE disturbance_id = :disturbance_id AND issued_time = :issued_time
+      AND kind = :kind
     """
 )
 
@@ -512,7 +541,7 @@ _NAMES_AS_ISSUED = text(
     """
     SELECT name_as_issued FROM storms.mfr_forecasts
     WHERE disturbance_id = :disturbance_id
-    ORDER BY issued_time DESC
+    ORDER BY issued_time DESC, update_time DESC NULLS LAST
     """
 )
 
@@ -526,17 +555,18 @@ _UPDATE_STORM_NAME = text(
 _RECORD_FILE = text(
     """
     INSERT INTO storms.mfr_files
-        (source_filename, content_sha256, source, size_bytes, ftp_modified,
-         raw_blob, status, message, disturbance_id, issued_time)
+        (source, source_path, content_sha256, source_filename, size_bytes,
+         source_modified, raw_blob, status, message, disturbance_id,
+         issued_time, kind)
     VALUES
-        (:source_filename, :content_sha256, :source, :size_bytes,
-         :ftp_modified, :raw_blob, :status, :message, :disturbance_id,
-         :issued_time)
-    ON CONFLICT (source_filename, content_sha256) DO UPDATE SET
+        (:source, :source_path, :content_sha256, :source_filename,
+         :size_bytes, :source_modified, :raw_blob, :status, :message,
+         :disturbance_id, :issued_time, :kind)
+    ON CONFLICT (source, source_path, content_sha256) DO UPDATE SET
         last_seen = (now() AT TIME ZONE 'utc'),
         size_bytes = COALESCE(EXCLUDED.size_bytes, storms.mfr_files.size_bytes),
-        ftp_modified = COALESCE(
-            EXCLUDED.ftp_modified, storms.mfr_files.ftp_modified),
+        source_modified = COALESCE(
+            EXCLUDED.source_modified, storms.mfr_files.source_modified),
         raw_blob = COALESCE(storms.mfr_files.raw_blob, EXCLUDED.raw_blob),
         status = CASE WHEN storms.mfr_files.status = 'failed'
                       THEN EXCLUDED.status ELSE storms.mfr_files.status END,
@@ -547,20 +577,23 @@ _RECORD_FILE = text(
 
 
 def should_replace(
+    kind: str,
     old_update: datetime | None,
     old_late: bool,
     new_update: datetime | None,
     new_late: bool,
 ) -> tuple[bool, str]:
-    """Does a new version of a stored forecast replace it?
+    """Does a new version of a stored forecast (or track) replace it?
 
-    An operational file always wins over a late re-issue, whatever their
-    order of arrival; otherwise the file produced last wins (a correction).
+    For forecasts an operational file always wins over a late re-issue,
+    whatever their order of arrival. Otherwise, and always for track-only
+    files, the file produced last wins (a correction or a revision).
     """
-    if new_late and not old_late:
-        return False, "late re-issue; the operational forecast is kept"
-    if old_late and not new_late:
-        return True, "operational forecast replaces a late re-issue"
+    if kind == "forecast":
+        if new_late and not old_late:
+            return False, "late re-issue; the operational forecast is kept"
+        if old_late and not new_late:
+            return True, "operational forecast replaces a late re-issue"
     if new_update is not None and (
         old_update is None or new_update > old_update
     ):
@@ -571,15 +604,13 @@ def should_replace(
 def write_forecast(
     conn, fc: MfrForecast, raw_blob: str | None
 ) -> tuple[str, str | None]:
-    """Write one forecast on ``conn`` unless a better version is stored.
+    """Write one file's forecast (or track) on ``conn`` unless a better
+    version is stored.
 
     Returns (status, message), status 'written', 'unchanged' or
     'kept_existing'. The caller owns the transaction.
     """
-    key = {
-        "disturbance_id": fc.forecast["disturbance_id"],
-        "issued_time": fc.forecast["issued_time"],
-    }
+    key = {k: fc.forecast[k] for k in _KEY}
     conn.execute(_INSERT_STORM, fc.storm)
     existing = conn.execute(_EXISTING_FORECAST, key).first()
     message = None
@@ -588,6 +619,7 @@ def write_forecast(
         if old_sha == fc.forecast["content_sha256"]:
             return "unchanged", None
         replace, message = should_replace(
+            fc.forecast["kind"],
             old_update,
             bool(old_late),
             fc.forecast["update_time"],
@@ -631,10 +663,11 @@ def ingest_mfr_bytes(
     filename: str,
     mode: str,
     source: str,
+    source_path: str | None = None,
     engine=None,
     archive: bool = True,
     size_bytes: int | None = None,
-    ftp_modified: datetime | None = None,
+    source_modified: datetime | None = None,
 ) -> dict:
     """Archive one file to blob, write it, and record it in mfr_files.
 
@@ -669,13 +702,14 @@ def ingest_mfr_bytes(
         conn.execute(
             _RECORD_FILE,
             {
-                "source_filename": filename,
-                "content_sha256": sha256,
                 "source": source,
-                "size_bytes": size_bytes
-                if size_bytes is not None
-                else len(data),
-                "ftp_modified": ftp_modified,
+                "source_path": source_path or filename,
+                "content_sha256": sha256,
+                "source_filename": filename,
+                "size_bytes": (
+                    size_bytes if size_bytes is not None else len(data)
+                ),
+                "source_modified": source_modified,
                 "raw_blob": raw_blob,
                 "status": status,
                 "message": message,
@@ -683,6 +717,7 @@ def ingest_mfr_bytes(
                 if fc
                 else None,
                 "issued_time": fc.forecast["issued_time"] if fc else None,
+                "kind": fc.forecast["kind"] if fc else None,
             },
         )
     result = {
@@ -692,42 +727,219 @@ def ingest_mfr_bytes(
         "raw_blob": raw_blob,
     }
     if fc is not None:
-        result.update(
-            {
-                "disturbance_id": fc.forecast["disturbance_id"],
-                "name_as_issued": fc.forecast["name_as_issued"],
-                "issued_time": fc.forecast["issued_time"].isoformat(),
-                "late_reissue": fc.forecast["late_reissue"],
-                "n_analysis": fc.forecast["n_analysis"],
-                "n_forecast": fc.forecast["n_forecast"],
-            }
-        )
+        result.update(describe(fc))
     logger.info(f"{filename}: {status}" + (f" ({message})" if message else ""))
     return result
 
 
 def describe(fc: MfrForecast) -> dict:
     """What a dry run reports for a parsed file."""
+    f = fc.forecast
     return {
-        "disturbance_id": fc.forecast["disturbance_id"],
-        "name_as_issued": fc.forecast["name_as_issued"],
-        "issued_time": fc.forecast["issued_time"].isoformat(),
+        "disturbance_id": f["disturbance_id"],
+        "kind": f["kind"],
+        "name_as_issued": f["name_as_issued"],
+        "issued_time": f["issued_time"].isoformat(),
         "update_time": (
-            fc.forecast["update_time"].isoformat()
-            if fc.forecast["update_time"]
-            else None
+            f["update_time"].isoformat() if f["update_time"] else None
         ),
-        "late_reissue": fc.forecast["late_reissue"],
-        "n_analysis": fc.forecast["n_analysis"],
-        "n_forecast": fc.forecast["n_forecast"],
-        "max_leadtime": fc.forecast["max_leadtime"],
+        "late_reissue": f["late_reissue"],
+        "n_analysis": f["n_analysis"],
+        "n_forecast": f["n_forecast"],
+        "max_leadtime": f["max_leadtime"],
         "has_cone": fc.uncertainty_cone is not None,
     }
 
 
 # ---------------------------------------------------------------------------
-# FTP poll
+# Fetching new files (blob copy or FTP)
 # ---------------------------------------------------------------------------
+
+_KNOWN_FILES = text(
+    """
+    SELECT source_path, size_bytes, source_modified
+    FROM storms.mfr_files WHERE source = :source
+    """
+)
+
+_TOUCH_FILES = text(
+    """
+    UPDATE storms.mfr_files SET last_seen = (now() AT TIME ZONE 'utc')
+    WHERE source = :source AND source_path = ANY(:paths)
+    """
+)
+
+
+def _is_track_file(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return name.startswith(FILE_PREFIX) and name.endswith(".json")
+
+
+def files_to_fetch(
+    listing: dict[str, dict],
+    known: dict[str, set],
+    use_modified: bool = True,
+) -> list[str]:
+    """Track files not read before, oldest first.
+
+    ``listing`` maps a path to {'size', 'modified', 'type'}; ``known`` maps
+    a path already read to the set of (size, modified) seen for it. A known
+    path is fetched again only if the listing shows a size (or, with
+    ``use_modified``, a modification time) not seen for it. The blob copy
+    is rewritten every few hours, so its times are not compared.
+    """
+    todo = []
+    for path, entry in listing.items():
+        if entry.get("type", "file") != "file" or not _is_track_file(path):
+            continue
+        seen = known.get(path)
+        if seen is None:
+            todo.append(path)
+            continue
+        if entry.get("size") is None:
+            continue
+        if use_modified:
+            if (entry["size"], entry.get("modified")) not in seen:
+                todo.append(path)
+        elif entry["size"] not in {size for size, _ in seen}:
+            todo.append(path)
+    return sorted(
+        todo, key=lambda p: (listing[p].get("modified") or datetime.min, p)
+    )
+
+
+def _known(engine, source: str) -> dict[str, set]:
+    known: dict[str, set] = {}
+    if engine is None:
+        return known
+    with engine.connect() as conn:
+        for path, size, modified in conn.execute(
+            _KNOWN_FILES, {"source": source}
+        ):
+            known.setdefault(path, set()).add((size, modified))
+    return known
+
+
+def _ingest_downloaded(
+    downloaded: dict[str, bytes],
+    listing: dict[str, dict],
+    known: dict[str, set],
+    mode: str,
+    source: str,
+    engine,
+    dry_run: bool,
+    archive: bool,
+) -> dict:
+    results, failed = [], []
+    for path, data in downloaded.items():
+        entry = listing[path]
+        filename = path.rsplit("/", 1)[-1]
+        if dry_run:
+            try:
+                fc = parse_mfr_json(data, filename, data_source=source)
+                results.append({"filename": filename, **describe(fc)})
+            except MfrParseError as exc:
+                failed.append({"filename": filename, "error": str(exc)})
+            continue
+        try:
+            result = ingest_mfr_bytes(
+                data,
+                filename,
+                mode,
+                source=source,
+                source_path=path,
+                engine=engine,
+                archive=archive,
+                size_bytes=entry.get("size"),
+                source_modified=entry.get("modified"),
+            )
+        except Exception as exc:  # noqa: BLE001 — report, carry on
+            logger.exception(f"{path}: ingest failed")
+            failed.append({"filename": filename, "error": repr(exc)})
+            continue
+        results.append(result)
+        if result["status"] == "failed":
+            failed.append({"filename": filename, "error": result["message"]})
+
+    seen_paths = [p for p in listing if p in known and _is_track_file(p)]
+    if engine is not None and seen_paths and not dry_run:
+        with engine.begin() as conn:
+            conn.execute(_TOUCH_FILES, {"source": source, "paths": seen_paths})
+
+    counts = _status_counts(results)
+    logger.info(
+        f"{source} {mode}: listed {len(listing)}, fetched {len(downloaded)}, "
+        f"{counts}, {len(failed)} failed"
+    )
+    return {
+        "mode": mode,
+        "source": source,
+        "dry_run": dry_run,
+        "listed": len(listing),
+        "fetched": len(downloaded),
+        "counts": counts,
+        "results": results,
+        "failed": failed,
+    }
+
+
+def _naive_utc(ts) -> datetime | None:
+    if ts is None:
+        return None
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(None)
+    return ts.to_pydatetime()
+
+
+def sync_blob(
+    mode: str,
+    dry_run: bool = False,
+    archive: bool = True,
+    engine=None,
+    container_client=None,
+    stage: str = SYNC_STAGE,
+    container: str = SYNC_CONTAINER,
+    prefix: str = SYNC_PREFIX,
+) -> dict:
+    """Ingest every track file in the Data Factory copy not read before.
+
+    Files sit both in per-forecast folders and at the prefix root; each
+    path is read once (the same content under two paths is 'unchanged'
+    the second time).
+    """
+    if engine is None and not dry_run:
+        engine = stratus.get_engine(stage=mode, write=True)
+    if container_client is None:
+        container_client = stratus.get_container_client(
+            container_name=container, stage=stage
+        )
+    listing = {}
+    for blob in container_client.list_blobs(name_starts_with=prefix):
+        if _is_track_file(blob.name):
+            listing[blob.name] = {
+                "size": blob.size,
+                "modified": _naive_utc(blob.last_modified),
+                "type": "file",
+            }
+    logger.info(f"{len(listing)} track files under {container}/{prefix}")
+    known = _known(engine, "meteofr_blob")
+    todo = files_to_fetch(listing, known, use_modified=False)
+    logger.info(f"{len(todo)} new track files to read")
+    downloaded = {
+        path: container_client.get_blob_client(path).download_blob().readall()
+        for path in todo
+    }
+    return _ingest_downloaded(
+        downloaded,
+        listing,
+        known,
+        mode,
+        "meteofr_blob",
+        engine,
+        dry_run,
+        archive,
+    )
 
 
 def _parse_mlsd_time(value: str | None) -> datetime | None:
@@ -765,48 +977,6 @@ def list_ftp_directory(ftp) -> dict[str, dict]:
         }
 
 
-_KNOWN_FTP_FILES = text(
-    """
-    SELECT source_filename, size_bytes, ftp_modified
-    FROM storms.mfr_files WHERE source = 'ftp'
-    """
-)
-
-_TOUCH_FTP_FILES = text(
-    """
-    UPDATE storms.mfr_files SET last_seen = (now() AT TIME ZONE 'utc')
-    WHERE source = 'ftp' AND source_filename = ANY(:names)
-    """
-)
-
-
-def files_to_fetch(
-    listing: dict[str, dict], known: dict[str, set]
-) -> list[str]:
-    """Track files not read before, oldest first.
-
-    A name already read is fetched again only if the listing shows a size
-    or modification time not seen for it (Météo-France replaced the file).
-    """
-    todo = []
-    for name, entry in listing.items():
-        if entry.get("type", "file") != "file":
-            continue
-        if not (name.startswith(FILE_PREFIX) and name.endswith(".json")):
-            continue
-        seen = known.get(name)
-        if seen is None:
-            todo.append(name)
-            continue
-        if entry.get("size") is None:
-            continue
-        if (entry["size"], entry.get("modified")) not in seen:
-            todo.append(name)
-    return sorted(
-        todo, key=lambda n: (listing[n].get("modified") or datetime.min, n)
-    )
-
-
 def _ftp_config() -> dict:
     keys = {
         "host": "FTP_HOST",
@@ -830,12 +1000,13 @@ def poll_ftp(
 ) -> dict:
     """List the FTP directory and ingest every track file not read before.
 
-    All new files are downloaded first and the FTP session closed before
-    anything is written, so the session stays short.
+    Not scheduled (see the module docstring). All new files are downloaded
+    first and the session closed before anything is written.
     """
     config = _ftp_config()
     if engine is None and not dry_run:
         engine = stratus.get_engine(stage=mode, write=True)
+    known = _known(engine, "ftp")
 
     ftp = ftp_factory(config["host"], timeout=FTP_TIMEOUT_SECONDS)
     downloaded = {}
@@ -843,25 +1014,12 @@ def poll_ftp(
         ftp.login(config["user"], config["password"])
         ftp.cwd(config["directory"])
         listing = list_ftp_directory(ftp)
-        track_names = sorted(
-            n
-            for n, e in listing.items()
-            if n.startswith(FILE_PREFIX) and e.get("type", "file") == "file"
-        )
-        others = sorted(set(listing) - set(track_names))
+        others = sorted(n for n in listing if not _is_track_file(n))
         logger.info(
-            f"FTP listing: {len(listing)} entries, {len(track_names)} track "
-            f"files; others: {others[:20]}"
+            f"FTP listing: {len(listing)} entries; others: {others[:20]}"
             + (" ..." if len(others) > 20 else "")
         )
-        known: dict[str, set] = {}
-        if engine is not None:
-            with engine.connect() as conn:
-                for name, size, modified in conn.execute(_KNOWN_FTP_FILES):
-                    known.setdefault(name, set()).add((size, modified))
-        todo = files_to_fetch(listing, known)
-        logger.info(f"{len(todo)} new track files to fetch")
-        for name in todo:
+        for name in files_to_fetch(listing, known):
             buffer = io.BytesIO()
             ftp.retrbinary(f"RETR {name}", buffer.write)
             downloaded[name] = buffer.getvalue()
@@ -870,61 +1028,9 @@ def poll_ftp(
             ftp.quit()
         except Exception:  # noqa: BLE001 — closing anyway
             ftp.close()
-
-    results, failed = [], []
-    for name, data in downloaded.items():
-        entry = listing[name]
-        if dry_run:
-            try:
-                fc = parse_mfr_json(data, name)
-                results.append({"filename": name, **describe(fc)})
-            except MfrParseError as exc:
-                failed.append({"filename": name, "error": str(exc)})
-            continue
-        try:
-            result = ingest_mfr_bytes(
-                data,
-                name,
-                mode,
-                source="ftp",
-                engine=engine,
-                archive=archive,
-                size_bytes=entry.get("size"),
-                ftp_modified=entry.get("modified"),
-            )
-        except Exception as exc:  # noqa: BLE001 — report, carry on
-            logger.exception(f"{name}: ingest failed")
-            failed.append({"filename": name, "error": repr(exc)})
-            continue
-        results.append(result)
-        if result["status"] == "failed":
-            failed.append({"filename": name, "error": result["message"]})
-
-    seen_names = [n for n in track_names if n in known]
-    if engine is not None and seen_names and not dry_run:
-        with engine.begin() as conn:
-            conn.execute(_TOUCH_FTP_FILES, {"names": seen_names})
-
-    report = {
-        "mode": mode,
-        "dry_run": dry_run,
-        "listed": len(listing),
-        "track_files": len(track_names),
-        "fetched": len(downloaded),
-        "results": results,
-        "failed": failed,
-    }
-    counts = _status_counts(results)
-    logger.info(
-        f"Poll {mode}: fetched {len(downloaded)}, "
-        f"{counts}, {len(failed)} failed"
+    return _ingest_downloaded(
+        downloaded, listing, known, mode, "ftp", engine, dry_run, archive
     )
-    return report
-
-
-# ---------------------------------------------------------------------------
-# Backfill from files already held elsewhere
-# ---------------------------------------------------------------------------
 
 
 def backfill_blobs(
@@ -952,45 +1058,17 @@ def backfill_blobs(
             if name.lower().endswith(".json") and name not in names:
                 names.append(name)
     logger.info(f"{len(names)} JSON files under {prefixes}")
-
-    engine = None if dry_run else stratus.get_engine(stage=mode, write=True)
-    results, failed = [], []
-    for name in names:
-        data = stratus.load_blob_data(
+    listing = {name: {"type": "file"} for name in names}
+    downloaded = {
+        name: stratus.load_blob_data(
             name, stage=blob_stage, container_name=container
         )
-        filename = name.rsplit("/", 1)[-1]
-        if dry_run:
-            try:
-                results.append(
-                    {"filename": filename, **describe(parse_mfr_json(data))}
-                )
-            except MfrParseError as exc:
-                failed.append({"filename": filename, "error": str(exc)})
-            continue
-        result = ingest_mfr_bytes(
-            data,
-            filename,
-            mode,
-            source="backfill",
-            engine=engine,
-            archive=archive,
-        )
-        results.append(result)
-        if result["status"] == "failed":
-            failed.append({"filename": filename, "error": result["message"]})
-    counts = _status_counts(results)
-    logger.info(
-        f"Backfill {mode}: {len(names)} files, {counts}, "
-        f"{len(failed)} failed"
-    )
-    return {
-        "mode": mode,
-        "dry_run": dry_run,
-        "files": len(names),
-        "results": results,
-        "failed": failed,
+        for name in names
     }
+    engine = None if dry_run else stratus.get_engine(stage=mode, write=True)
+    return _ingest_downloaded(
+        downloaded, listing, {}, mode, "backfill", engine, dry_run, archive
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -999,7 +1077,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    poll = sub.add_parser("poll", help="Ingest new files from the FTP site")
+    sub.add_parser(
+        "sync", help="Ingest new files from the Data Factory blob copy"
+    )
+    sub.add_parser("poll", help="Ingest new files from the FTP site")
 
     ingest = sub.add_parser("ingest", help="Ingest local files")
     ingest.add_argument("paths", nargs="+")
@@ -1011,7 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     backfill.add_argument("--container", default="projects")
 
-    for p in (poll, ingest, backfill):
+    for p in sub.choices.values():
         p.add_argument("--mode", choices=["dev", "prod"], default="dev")
         p.add_argument(
             "--dry-run",
@@ -1023,38 +1104,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     archive = not args.no_archive
 
-    if args.command == "poll":
+    if args.command == "sync":
+        result = sync_blob(args.mode, dry_run=args.dry_run, archive=archive)
+    elif args.command == "poll":
         result = poll_ftp(args.mode, dry_run=args.dry_run, archive=archive)
     elif args.command == "ingest":
+        listing, downloaded = {}, {}
+        for path in args.paths:
+            with open(path, "rb") as f:
+                name = os.path.basename(path)
+                downloaded[name] = f.read()
+                listing[name] = {"type": "file"}
         engine = (
             None
             if args.dry_run
             else stratus.get_engine(stage=args.mode, write=True)
         )
-        results, failed = [], []
-        for path in args.paths:
-            with open(path, "rb") as f:
-                data = f.read()
-            filename = os.path.basename(path)
-            if args.dry_run:
-                try:
-                    fc = parse_mfr_json(data, filename)
-                    results.append({"filename": filename, **describe(fc)})
-                except MfrParseError as exc:
-                    failed.append({"filename": filename, "error": str(exc)})
-                continue
-            res = ingest_mfr_bytes(
-                data,
-                filename,
-                args.mode,
-                source="backfill",
-                engine=engine,
-                archive=archive,
-            )
-            results.append(res)
-            if res["status"] == "failed":
-                failed.append({"filename": filename, "error": res["message"]})
-        result = {"mode": args.mode, "results": results, "failed": failed}
+        result = _ingest_downloaded(
+            downloaded,
+            listing,
+            {},
+            args.mode,
+            "local",
+            engine,
+            args.dry_run,
+            archive,
+        )
     else:
         result = backfill_blobs(
             args.blob_prefix,
