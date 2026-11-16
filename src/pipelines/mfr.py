@@ -53,6 +53,7 @@ import math
 import os
 import re
 import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -249,11 +250,172 @@ def _contours(contours, label: str) -> tuple[dict, list]:
 def parse_mfr_json(
     data: bytes, filename: str | None = None, data_source: str = "local"
 ) -> MfrForecast:
-    """Parse one Météo-France track file into database rows."""
+    """Parse one Météo-France JSON track file into database rows."""
     try:
         doc = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MfrParseError(f"Not JSON: {exc}") from exc
+    return _parse_doc(doc, data, filename, data_source)
+
+
+def parse_mfr_file(
+    data: bytes, filename: str | None = None, data_source: str = "local"
+) -> MfrForecast:
+    """JSON or CXML, by content."""
+    if data.lstrip()[:1] == b"<":
+        return parse_mfr_cxml(data, filename, data_source)
+    return parse_mfr_json(data, filename, data_source)
+
+
+# CXML (cxml.1.1, the older Météo-France product): element paths under
+# cycloneData, mapped onto the JSON product's property names so both go
+# through _parse_doc.
+_CXML_SCALARS = {
+    "development": "development",
+    "minimumPressure/pressure": "minimum_pressure",
+    "maximumWind/speed": "maximum_wind.wind_speed_kt",
+    "maximumWind/gusts": "maximum_wind.wind_speed_gust_kt",
+    "maximumWind/radius": "maximum_wind.radius",
+    "lastClosedIsobar/pressure": "last_closed_isobar.pressure",
+    "lastClosedIsobar/radius": "last_closed_isobar.radius",
+    "stormMotion/speed": "storm_motion.speed_kt",
+    "stormMotion/directionToward": "storm_motion.direction_toward",
+    "Dvorak/finalTnumber": "Dvorak.final_T_number",
+    "Dvorak/currentIntensity": "Dvorak.current_intensity",
+}
+_CXML_FILENAME_RE = re.compile(r"F(\d{8})_(\d{1,2})_")
+
+
+def _nest(target: dict, dotted: str, value) -> None:
+    *parents, leaf = dotted.split(".")
+    for key in parents:
+        target = target.setdefault(key, {})
+    target[leaf] = value
+
+
+def _cxml_number(el, label: str, what: str) -> float:
+    value = _num(el.text if el is not None else None)
+    if value is None:
+        raise MfrParseError(f"{label}: no readable {what}")
+    return value
+
+
+def parse_mfr_cxml(
+    data: bytes, filename: str | None = None, data_source: str = "local"
+) -> MfrForecast:
+    """Parse one Météo-France CXML forecast (cxml.1.1) into database rows.
+
+    Each file is one forecast: fix hour 0 is the analysis at the reference
+    time (no earlier track), then forecast fixes. Elements are mapped onto
+    the JSON product's names; anything else in cycloneData goes to
+    raw_fields. Only ``<data type="forecast">`` is read.
+    """
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise MfrParseError(f"Not XML: {exc}") from exc
+    datas = [d for d in root.findall("data") if d.get("type") == "forecast"]
+    if len(datas) != 1:
+        raise MfrParseError(f"{len(datas)} <data type='forecast'> elements")
+    disturbances = datas[0].findall("disturbance")
+    if len(disturbances) != 1:
+        raise MfrParseError(f"{len(disturbances)} <disturbance> elements")
+    dist = disturbances[0]
+    label = filename or "cxml"
+
+    cyclone_id = (dist.findtext("localID") or "").strip()
+    if not cyclone_id:
+        match = _CXML_FILENAME_RE.search(filename or "")
+        number = dist.findtext("cycloneNumber")
+        if not match or not number:
+            raise MfrParseError(f"{label}: no localID")
+        cyclone_id = f"SWI${int(number):02d}/{match.group(1)}"
+    fixes = dist.findall("fix")
+    if not fixes:
+        raise MfrParseError(f"{label}: no fixes")
+
+    features, reference_time = [], None
+    for fix in fixes:
+        hour = _num(fix.get("hour"))
+        valid = fix.findtext("validTime")
+        if hour is None or not valid:
+            raise MfrParseError(f"{label}: fix without hour or validTime")
+        lat_el, lon_el = fix.find("latitude"), fix.find("longitude")
+        lat = _cxml_number(lat_el, label, "latitude")
+        lon = _cxml_number(lon_el, label, "longitude")
+        if (lat_el.get("units") or "").strip().endswith("S"):
+            lat = -lat
+        if (lon_el.get("units") or "").strip().endswith("W"):
+            lon = -lon
+        if hour == 0:
+            reference_time = valid
+        props = {"data_type": "forecast", "time": valid, "hour": hour}
+        accuracy = fix.find("accuracy")
+        if accuracy is not None:
+            props["position_accuracy"] = accuracy.text
+        cyclone = {}
+        data_el = fix.find("cycloneData")
+        consumed = set()
+        if data_el is not None:
+            for path, name in _CXML_SCALARS.items():
+                el = data_el.find(path)
+                if el is not None:
+                    _nest(cyclone, name, (el.text or "").strip() or None)
+                    consumed.add(path.split("/")[0])
+            contours = []
+            for wind in data_el.findall("windContours/windSpeed"):
+                contours.append(
+                    {
+                        "wind_speed_kt": (wind.text or "").strip(),
+                        "radius": [
+                            {"sector": r.get("sector"), "value": r.text}
+                            for r in wind.findall("radius")
+                        ],
+                    }
+                )
+            if contours:
+                cyclone["wind_contours"] = contours
+            consumed.add("windContours")
+            # Anything else (e.g. systemDepth, Dvorak/pastChange) is kept.
+            for child in data_el:
+                if child.tag not in consumed:
+                    cyclone[child.tag] = (child.text or "").strip() or None
+                for grandchild in child:
+                    path = f"{child.tag}/{grandchild.tag}"
+                    if child.tag != "windContours" and path not in (
+                        _CXML_SCALARS
+                    ):
+                        _nest(
+                            cyclone,
+                            f"{child.tag}_extra.{grandchild.tag}",
+                            (grandchild.text or "").strip() or None,
+                        )
+        props["cyclone_data"] = cyclone
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": props,
+            }
+        )
+    if reference_time is None:
+        raise MfrParseError(f"{label}: no hour-0 fix")
+    doc = {
+        "product": root.findtext("header/product"),
+        "update_time": root.findtext("header/creationTime"),
+        "production_center": root.findtext("header/productionCenter"),
+        "cyclone_name": dist.findtext("cycloneName"),
+        "cyclone_id": cyclone_id,
+        "reference_time": reference_time,
+        "features": features,
+    }
+    return _parse_doc(doc, data, filename, data_source)
+
+
+def _parse_doc(
+    doc, data: bytes, filename: str | None, data_source: str
+) -> MfrForecast:
+    """Rows from a parsed document (JSON product layout)."""
     if not isinstance(doc, dict) or not isinstance(doc.get("features"), list):
         raise MfrParseError("No 'features' list")
 
@@ -676,7 +838,7 @@ def ingest_mfr_bytes(
     sha256 = hashlib.sha256(data).hexdigest()
     fc, error = None, None
     try:
-        fc = parse_mfr_json(data, filename, data_source=source)
+        fc = parse_mfr_file(data, filename, data_source=source)
     except MfrParseError as exc:
         error = str(exc)
         logger.error(f"{filename}: {error}")
@@ -688,7 +850,11 @@ def ingest_mfr_bytes(
             raw_blob,
             stage=mode,
             container_name=RAW_CONTAINER,
-            content_type="application/json",
+            content_type=(
+                "application/xml"
+                if data.lstrip()[:1] == b"<"
+                else "application/json"
+            ),
         )
         logger.info(f"Archived {filename} to {RAW_CONTAINER}/{raw_blob}")
 
@@ -836,7 +1002,7 @@ def _ingest_downloaded(
         filename = path.rsplit("/", 1)[-1]
         if dry_run:
             try:
-                fc = parse_mfr_json(data, filename, data_source=source)
+                fc = parse_mfr_file(data, filename, data_source=source)
                 results.append({"filename": filename, **describe(fc)})
             except MfrParseError as exc:
                 failed.append({"filename": filename, "error": str(exc)})
@@ -1055,9 +1221,12 @@ def backfill_blobs(
                 container_name=container,
             )
         ):
-            if name.lower().endswith(".json") and name not in names:
+            if (
+                name.lower().endswith((".json", ".cxml", ".xml"))
+                and name not in names
+            ):
                 names.append(name)
-    logger.info(f"{len(names)} JSON files under {prefixes}")
+    logger.info(f"{len(names)} JSON/CXML files under {prefixes}")
     listing = {name: {"type": "file"} for name in names}
     downloaded = {
         name: stratus.load_blob_data(

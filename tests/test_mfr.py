@@ -738,3 +738,88 @@ def test_poll_needs_ftp_settings(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(RuntimeError, match="FTP_HOST"):
         mfr.poll_ftp("dev", dry_run=True, ftp_factory=FakeFTP({}))
+
+
+# ---------------------------------------------------------------------------
+# CXML (older product)
+# ---------------------------------------------------------------------------
+
+CXML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<cxml>
+ <header>
+  <product>Cyclone Forecast</product>
+  <productionCenter>METEO-FRANCE</productionCenter>
+  <creationTime>2024-02-23T05:49:04Z</creationTime>
+ </header>
+ <data origin="Officielle" type="forecast">
+  <disturbance>
+   <cycloneName>TESTB</cycloneName>
+   <cycloneNumber>7</cycloneNumber>
+   <localID>SWI$07/20232024</localID>
+   <basin>SWI</basin>
+   <fix hour="0">
+    <validTime>2024-02-23T06:00:00Z</validTime>
+    <latitude units="deg S">23.5</latitude>
+    <longitude units="deg E">58.1</longitude>
+    <accuracy units="nm">20</accuracy>
+    <cycloneData>
+     <development>severe tropical storm</development>
+     <systemDepth>deep</systemDepth>
+     <minimumPressure><pressure units="hPa">988</pressure></minimumPressure>
+     <maximumWind>
+      <speed units="kt">50</speed><gusts units="kt">70</gusts>
+      <radius units="nm">25</radius>
+     </maximumWind>
+     <Dvorak><finalTnumber>3.5</finalTnumber><pastChange>W0.5</pastChange></Dvorak>
+     <windContours>
+      <windSpeed units="kt">50<radius sector="NWQ" units="nm">0</radius><radius sector="NEQ" units="nm">30</radius><radius sector="SEQ" units="nm">35</radius><radius sector="SWQ" units="nm">35</radius></windSpeed>
+      <windSpeed units="kt">27<radius sector="NWQ" units="nm">65</radius><radius sector="NEQ" units="nm">110</radius><radius sector="SEQ" units="nm">220</radius><radius sector="SWQ" units="nm">200</radius></windSpeed>
+     </windContours>
+    </cycloneData>
+   </fix>
+   <fix hour="12">
+    <validTime>2024-02-23T18:00:00Z</validTime>
+    <latitude units="deg S">24.1</latitude>
+    <longitude units="deg E">57.7</longitude>
+    <accuracy units="nm">21</accuracy>
+    <cycloneData>
+     <maximumWind><speed units="kt">40</speed></maximumWind>
+    </cycloneData>
+   </fix>
+  </disturbance>
+ </data>
+</cxml>
+"""
+
+
+def test_cxml_parses_into_the_same_rows():
+    fc = mfr.parse_mfr_file(CXML, "F20232024_07_2024022306.x.TESTB.cxml")
+    assert fc.storm["disturbance_id"] == "07-20232024"
+    assert fc.storm["storm_id"] == "testb_si_2024"
+    f = fc.forecast
+    assert f["issued_time"] == datetime(2024, 2, 23, 6)
+    assert f["update_time"] == datetime(2024, 2, 23, 5, 49, 4)
+    assert (f["kind"], f["n_analysis"], f["n_forecast"]) == ("forecast", 0, 2)
+    t = fc.tracks
+    lt0 = t[t.leadtime == 0].iloc[0]
+    assert lt0.geometry == "POINT (58.1 -23.5)"
+    assert (lt0.wind_speed, lt0.gust_speed, lt0.pressure) == (50, 70, 988)
+    assert lt0.max_wind_radius == 25 and lt0.position_accuracy == 20
+    assert lt0.dvorak_final_t == 3.5
+    assert json.loads(lt0.quadrant_radius_50) == [30, 35, 35, 0]
+    assert json.loads(lt0.quadrant_radius_27) == [110, 220, 200, 65]
+    raw = json.loads(lt0.raw_fields)
+    assert raw["cyclone_data.systemDepth"] == "deep"
+    assert raw["cyclone_data.Dvorak_extra.pastChange"] == "W0.5"
+    assert t[t.leadtime == 12].iloc[0].wind_speed == 40
+
+
+def test_cxml_without_hour_0_fails():
+    with pytest.raises(mfr.MfrParseError):
+        mfr.parse_mfr_cxml(CXML.replace(b'hour="0"', b'hour="6"'), "x.cxml")
+
+
+def test_cxml_id_from_filename_when_no_local_id():
+    data = CXML.replace(b"<localID>SWI$07/20232024</localID>", b"")
+    fc = mfr.parse_mfr_cxml(data, "F20232024_07_2024022306.x.TESTB.cxml")
+    assert fc.storm["cyclone_id"] == "SWI$07/20232024"
