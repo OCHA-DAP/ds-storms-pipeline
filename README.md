@@ -266,6 +266,14 @@ failing the file (non-finite numbers kept as text in `raw_fields`, NUL
 characters dropped), and any structure the parsers don't expect fails only
 that file (archived, recorded `failed`, retried with `--retry-failed`).
 
+The CXML forecast archive for 2010/11–2023/24 (5,678 files, 162 systems;
+from Drive) is staged in dev blob `projects`, prefix
+`ds-storms-pipeline/raw/mfr/backfill_staging/cxml_20102011_20232024/`, and
+loaded with `databricks/mfr_backfill_cxml_{dev,prod}.json`. Those forecasts
+have no uncertainty cone, and before 2020/21 they carry wind radii only at
+hour 0, not at forecast lead times. Several versions of the same forecast
+are common (corrections); 22 files were produced more than 24 h late.
+
 ## Database schema
 
 All tables live in the `storms` schema. Geometries are EPSG:4326.
