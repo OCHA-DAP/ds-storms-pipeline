@@ -994,6 +994,21 @@ def test_same_time_twins_keep_the_named_version(old_named, new_named):
         assert replace is new_named
 
 
+def test_cxml_partial_mapped_element_is_kept_raw():
+    data = CXML.replace(
+        b"<Dvorak><finalTnumber>3.5</finalTnumber><pastChange>",
+        b"<Dvorak><pastChange>",
+    )
+    assert data != CXML
+    fc = mfr.parse_mfr_file(data, "F20232024_07_2024022306.x.TESTB.cxml")
+    lt0 = fc.tracks[fc.tracks.leadtime == 0].iloc[0]
+    assert pd.isna(lt0.dvorak_final_t)
+    assert (
+        json.loads(lt0.raw_fields)["cyclone_data.Dvorak_extra.pastChange"]
+        == "W0.5"
+    )
+
+
 def test_cxml_without_hour_0_fails():
     with pytest.raises(mfr.MfrParseError):
         mfr.parse_mfr_cxml(CXML.replace(b'hour="0"', b'hour="6"'), "x.cxml")

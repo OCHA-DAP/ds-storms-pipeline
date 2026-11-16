@@ -460,13 +460,15 @@ def parse_mfr_cxml(
                 ).strip() or None
         cyclone = {}
         data_el = fix.find("cycloneData")
-        consumed = set()
+        # Mapped elements count as read even when empty or partial (e.g. a
+        # <Dvorak> with only pastChange); their other children go to _extra.
+        consumed = {path.split("/")[0] for path in _CXML_SCALARS}
+        consumed.add("windContours")
         if data_el is not None:
             for path, name in _CXML_SCALARS.items():
                 el = data_el.find(path)
                 if el is not None:
                     _nest(cyclone, name, (el.text or "").strip() or None)
-                    consumed.add(path.split("/")[0])
             contours = []
             for wind in data_el.findall("windContours/windSpeed"):
                 contours.append(
@@ -480,7 +482,6 @@ def parse_mfr_cxml(
                 )
             if contours:
                 cyclone["wind_contours"] = contours
-            consumed.add("windContours")
             # Anything else (e.g. systemDepth, Dvorak/pastChange) is kept.
             for child in data_el:
                 if child.tag not in consumed:
