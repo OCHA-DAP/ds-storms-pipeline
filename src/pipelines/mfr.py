@@ -185,7 +185,7 @@ def _num(value) -> float | None:
         return None
     try:
         value = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return value if math.isfinite(value) else None
 
@@ -222,10 +222,20 @@ def _json_safe(value):
     if isinstance(value, str):
         return value.replace("\x00", "")
     if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
+        return {
+            str(k).replace("\x00", ""): _json_safe(v) for k, v in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _text(value) -> str | None:
+    """A file-level string for a VARCHAR column: None stays None, anything
+    else becomes text without NUL characters."""
+    if value is None:
+        return None
+    return str(value).replace("\x00", "")
 
 
 def _wrap_longitude(lon: float) -> float:
@@ -287,7 +297,13 @@ def parse_mfr_file(
         return parse_mfr_json(data, filename, data_source)
     except MfrParseError:
         raise
-    except (AttributeError, TypeError, KeyError, ValueError) as exc:
+    except (
+        AttributeError,
+        TypeError,
+        KeyError,
+        ValueError,
+        OverflowError,
+    ) as exc:
         raise MfrParseError(f"Malformed file: {exc!r}") from exc
 
 
@@ -496,7 +512,7 @@ def _parse_doc(
         if doc.get("update_time")
         else None
     )
-    name_as_issued = doc.get("cyclone_name")
+    name_as_issued = _text(doc.get("cyclone_name"))
     name = clean_name(name_as_issued)
     storm_id = make_storm_id(name, season)
     label = f"{disturbance_id} {issued_time:%Y-%m-%dT%H:%MZ}"
@@ -630,8 +646,8 @@ def _parse_doc(
         "kind": kind,
         "update_time": update_time,
         "name_as_issued": name_as_issued,
-        "product": doc.get("product"),
-        "production_center": doc.get("production_center"),
+        "product": _text(doc.get("product")),
+        "production_center": _text(doc.get("production_center")),
         "data_source": data_source,
         "source_filename": filename,
         "content_sha256": hashlib.sha256(data).hexdigest(),

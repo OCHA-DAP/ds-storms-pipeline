@@ -976,3 +976,20 @@ def test_cxml_refuses_unexpected_units_and_signs(old, new):
     assert data != CXML
     with pytest.raises(mfr.MfrParseError):
         mfr.parse_mfr_file(data, "F20232024_07_2024022306.x.TESTB.cxml")
+
+
+def test_odd_file_level_values_are_cleaned_or_fail_cleanly():
+    doc = copy.deepcopy(DOC)
+    doc["cyclone_name"] = "TES\x00TA"
+    doc["product"] = {"odd": True}
+    doc["features"][3]["properties"]["k\x00ey"] = 1
+    fc = _parse(doc)
+    assert fc.forecast["name_as_issued"] == "TESTA"
+    assert fc.forecast["product"] == "{'odd': True}"
+    assert "key" in json.loads(fc.tracks.raw_fields.dropna().iloc[0])
+    doc = copy.deepcopy(DOC)
+    doc["features"][3]["properties"]["cyclone_data"]["maximum_wind"][
+        "wind_speed_kt"
+    ] = 10**400
+    fc = mfr.parse_mfr_file(_bytes(doc), FILENAME)  # stored as NULL + raw
+    assert fc.tracks[fc.tracks.leadtime == 12].wind_speed.isna().all()

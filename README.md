@@ -261,9 +261,10 @@ replaces one; a newer operational version (a correction) does. Equal update
 times fall back to the content hash, so the outcome never depends on reading
 order. Wind contours are 28/34/48/64 kt in the JSON files (27/34/50/64 in the
 older CXML product, which `parse_mfr_cxml` reads into the same rows, refusing
-files in other units), 10-minute winds. One odd value never stops a file:
-non-finite numbers and NUL characters are made safe in `raw_fields`, and any
-unexpected structure fails only that file (archived, recorded `failed`).
+files in other units), 10-minute winds. Odd values are made safe rather than
+failing the file (non-finite numbers kept as text in `raw_fields`, NUL
+characters dropped), and any structure the parsers don't expect fails only
+that file (archived, recorded `failed`, retried with `--retry-failed`).
 
 ## Database schema
 
