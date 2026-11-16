@@ -85,7 +85,10 @@ CREATE TABLE IF NOT EXISTS storms.ibtracs_tracks_geo
     usa_quadrant_radius_50 TEXT,
     usa_quadrant_radius_64 TEXT,
     geometry geometry(Point, 4326) NOT NULL,
-    CONSTRAINT ibtracs_tracks_geo_unique UNIQUE (sid, storm_id, valid_time),
+    -- Keyed on sid alone: storm_id is NULL for unnamed storms, and NULLs never
+    -- conflict, so (sid, storm_id, valid_time) let every run append another
+    -- copy of them. See scripts/migrations/2026_11_ibtracs_tracks_unique.py.
+    CONSTRAINT ibtracs_tracks_geo_unique UNIQUE (sid, valid_time),
     CONSTRAINT foreign_key_sid FOREIGN KEY (sid)
         REFERENCES storms.ibtracs_storms(sid)
         ON DELETE CASCADE

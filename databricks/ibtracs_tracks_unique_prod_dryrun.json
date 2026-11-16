@@ -1,0 +1,51 @@
+{
+  "run_name": "[ops] IBTrACS tracks dedupe + (sid, valid_time) key (prod, dry run)",
+  "git_source": {
+    "git_url": "https://github.com/OCHA-DAP/ds-storms-pipeline.git",
+    "git_provider": "gitHub",
+    "git_branch": "main"
+  },
+  "tasks": [
+    {
+      "task_key": "migrate",
+      "spark_python_task": {
+        "python_file": "scripts/migrations/2026_11_ibtracs_tracks_unique.py",
+        "source": "GIT",
+        "parameters": [
+          "--mode",
+          "prod",
+          "--dry-run"
+        ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        }
+      ],
+      "timeout_seconds": 3600
+    }
+  ],
+  "run_as": {
+    "user_name": "adm.tdowning@global.un.org"
+  },
+  "email_notifications": {
+    "on_failure": [
+      "tristan.downing@un.org"
+    ]
+  }
+}
