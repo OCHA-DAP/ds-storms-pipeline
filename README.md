@@ -315,12 +315,13 @@ there is one, spread over quadrants with the median asymmetry and nested
 34 ⊇ 48 ⊇ 64. Fitted at Réunion's current practice: at the same wind it drew
 smaller 48 kt radii in 2003/04–2009/10 and larger 48/64 kt radii in
 2010/11–2015/16, and its central pressure was lower before 2010/11, so the
-pressure term uses each era's pressure moved to today's. Season-by-season check on 2016/17–2022/23 (each
-season modelled by a fit without it, all radii modelled, against Réunion's
-own): median storm/country exposure ratio 1.00 / 0.96 / 1.01 at 34 / 48 /
-64 kt, rank correlation 0.83 / 0.97 / 0.95. The biggest storms come out
-smaller at 34 kt (total 0.77; Madagascar 0.67) and near misses of small
-islands become hits (Mauritius total 1.58). One-off setup (tables, admin
+pressure term uses each era's pressure moved to today's. Season-by-season check on 2016/17–2022/23 (each season modelled by a fit
+without it, against Réunion's own radii where it gave them): median
+storm/country exposure ratio 1.00 / 1.00 / 1.01 at 34 / 48 / 64 kt, rank
+correlation 0.82 / 0.96 / 0.95, and the five largest storms 0.60 / 1.06 /
+1.07. So 48 and 64 kt hold up in the tail, but modelled 34 kt radii make
+the biggest storms about 40% too small; 34 kt is fully modelled before
+2010/11. Near misses of Mauritius become hits (34 kt total 1.58). One-off setup (tables, admin
 population, history):
 `databricks jobs submit --json @databricks/swio_setup_{dev,prod}.json`.
 
