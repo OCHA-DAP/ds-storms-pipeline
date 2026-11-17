@@ -16,9 +16,11 @@ Historical, one track per system:
                       France shared; Réunion's 48 kt radii from 2003/04, its
                       34 and 64 kt radii from 2010/11)
   later seasons       the system's final track (track-only file), else the
-                      analysis points of its forecasts, else IBTrACS
+                      analysis points of its forecasts (topped up from
+                      IBTrACS where IBTrACS runs on past them), else IBTrACS
                       (Réunion's position, wind and radii; IBTrACS's "R50"
-                      for Réunion is its 48 kt radius)
+                      for Réunion is its 48 kt radius). Systems still active
+                      are left out.
 
 Choices, on purpose:
   * Réunion's own thresholds and winds: 34/48/64 kt, 10-minute means. No
@@ -73,6 +75,9 @@ SCENARIO_STEP_DEG = 10
 # The scheduled run looks back this far for forecasts not yet processed (the
 # table also holds the 2010/11-2023/24 archive, which it leaves alone).
 REALTIME_LOOKBACK = pd.Timedelta(days=5)
+# ...or ingested in that window, if issued in the last REALTIME_MAX_AGE (a
+# late or corrected file; never the archive backfill).
+REALTIME_MAX_AGE = pd.Timedelta(days=30)
 
 BESTTRACK_BLOB = (
     "ds-storms-pipeline/raw/mfr/drive_copies/"
@@ -84,6 +89,19 @@ FIRST_SEASON = 1985
 # A swath wider than this (degrees of longitude) is a geometry failure, not
 # a storm: lens 0.6.2 Mercator buffers turned three storms globe-sized.
 MAX_SWATH_LON_SPAN = 120.0
+
+# History: a system with no final track whose last forecast is more recent
+# than this is still active and left out until it ends.
+ACTIVE_HOLD = pd.Timedelta(days=3)
+# A forecast-only track is topped up from IBTrACS when IBTrACS has 34 kt
+# points more than this after the last Météo-France analysis.
+IBTRACS_TAIL_GAP = pd.Timedelta(hours=12)
+# An IBTrACS storm closer than this to a Météo-France system at a common
+# time is the same system (unnamed in one of them), not a new one.
+SAME_SYSTEM_KM = 300.0
+# The best track's longest gap within a system is 54 h; more means two
+# systems were merged.
+MAX_BESTTRACK_GAP = pd.Timedelta(hours=96)
 
 NM_TO_M = 1852.0
 _GEOD = Geod(ellps="WGS84")
@@ -151,6 +169,10 @@ def read_besttrack(raw: bytes) -> pd.DataFrame:
     df["storm_id"] = df.disturbance_id.map(storm_ids)
     if df.duplicated(["disturbance_id", "valid_time"]).any():
         raise ValueError("best track: a system has two points at one time")
+    gaps = df.sort_values("valid_time").groupby("disturbance_id").valid_time.apply(
+        lambda t: t.diff().max())
+    if (gaps > MAX_BESTTRACK_GAP).any():
+        raise ValueError(f"best track: gaps over {MAX_BESTTRACK_GAP} in {sorted(gaps[gaps > MAX_BESTTRACK_GAP].index)}")
     return df.sort_values(["disturbance_id", "valid_time"]).reset_index(drop=True)
 
 
@@ -297,14 +319,24 @@ def load_forecast_points(engine, disturbance_id: str, issued_time) -> pd.DataFra
     return _mfr_radii(df)
 
 
+_RAW_RADII = ["quadrant_radius_34", "quadrant_radius_48", "quadrant_radius_50", "quadrant_radius_64"]
+
+
 def latest_per_time(df: pd.DataFrame) -> pd.DataFrame:
     """One point per valid_time: the latest forecast's, and within a forecast
-    its analysis point over its leadtime-0 forecast point."""
+    its analysis point over its leadtime-0 forecast point. If that point has
+    no wind radii at all, it takes them from the latest point for that time
+    that has (98% of past analysis points carry them)."""
     df = df.assign(_rank=(df["data_type"] == "analysis").astype(int))
-    return (df.sort_values(["valid_time", "issued_time", "_rank"])
-              .drop_duplicates("valid_time", keep="last")
-              .drop(columns="_rank")
-              .reset_index(drop=True))
+    df = df.sort_values(["valid_time", "issued_time", "_rank"])
+    out = df.drop_duplicates("valid_time", keep="last").set_index("valid_time")
+    cols = [c for c in _RAW_RADII if c in df.columns]
+    if cols:
+        has = df[cols].notna().any(axis=1)
+        donors = df[has].drop_duplicates("valid_time", keep="last").set_index("valid_time")[cols]
+        bare = out.index[~out[cols].notna().any(axis=1)].intersection(donors.index)
+        out.loc[bare, cols] = donors.loc[bare, cols]
+    return out.reset_index().drop(columns="_rank")
 
 
 def load_observed_points(engine, disturbance_id: str, upto) -> pd.DataFrame:
@@ -369,6 +401,14 @@ def process_mfr_forecast(
 
     if not scenarios:
         return
+    if not np.isfinite(fc_pts["position_accuracy"].to_numpy(float)).any():
+        # No uncertainty to shift by: 36 copies of the forecast would say
+        # nothing. Points with a value missing among others stay in place.
+        logger.warning(f"{disturbance_id} {issued_time}: no position_accuracy; no scenarios")
+        replace_rows(engine, "mfr_tracks_scenario_envelope", None, key_it)
+        replace_rows(engine, "mfr_tracks_scenario_exposure", None, key_it)
+        _mark_done(engine, disturbance_id, issued_time, "scenarios")
+        return
     exps, envelope = [], {k: [] for k in SPEEDS}
     bearings = list(range(0, 360, SCENARIO_STEP_DEG))
     for brg in bearings:
@@ -417,9 +457,11 @@ def _mark_done(engine, disturbance_id: str, issued_time, stage: str) -> None:
 
 def pending_forecasts(
     engine, disturbance_id=None, issued_time=None, since=None, overwrite=False,
-    last_stage="scenarios",
+    last_stage="scenarios", ingested_since=None, oldest=None,
 ) -> pd.DataFrame:
-    """Forecasts (kind 'forecast') not yet processed up to ``last_stage``.
+    """Forecasts (kind 'forecast') not yet processed up to ``last_stage``:
+    issued since ``since``, or ingested since ``ingested_since`` and issued
+    since ``oldest``.
 
     A forecast ingested again after it was processed (a corrected file
     replaces its points) is processed again.
@@ -432,7 +474,11 @@ def pending_forecasts(
     if issued_time is not None:
         filters.append("f.issued_time = :t")
         params["t"] = issued_time
-    if since is not None:
+    if since is not None and ingested_since is not None:
+        filters.append("(f.issued_time >= :since OR "
+                       "(f.ingested_at >= :ingested_since AND f.issued_time >= :oldest))")
+        params.update(since=since, ingested_since=ingested_since, oldest=oldest)
+    elif since is not None:
         filters.append("f.issued_time >= :since")
         params["since"] = since
     if not overwrite:
@@ -457,25 +503,38 @@ def run_swio_realtime(
     scenarios: bool = True,
 ) -> list[tuple]:
     """Process every recent Météo-France forecast not yet fully processed (or
-    the one asked for), in issue order. Without ``since`` or a forecast named,
-    only forecasts issued in the last REALTIME_LOOKBACK are considered."""
+    the one asked for), in issue order. Without ``since`` or a forecast named:
+    forecasts issued in the last REALTIME_LOOKBACK, or ingested then and
+    issued in the last REALTIME_MAX_AGE. One forecast failing doesn't stop
+    the others; the run raises at the end if any failed."""
     engine = stratus.get_engine(stage=mode, write=True)
+    ingested_since = oldest = None
     if since is None and disturbance_id is None and issued_time is None:
-        since = pd.Timestamp.now(tz="UTC").tz_localize(None) - REALTIME_LOOKBACK
+        now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+        since = ingested_since = now - REALTIME_LOOKBACK
+        oldest = now - REALTIME_MAX_AGE
     todo = pending_forecasts(
         engine, disturbance_id, issued_time, since, overwrite,
         last_stage="scenarios" if scenarios else "exposure",
+        ingested_since=ingested_since, oldest=oldest,
     )
     if todo.empty:
         logger.info("No Météo-France forecasts to process.")
         return []
     logger.info(f"{len(todo)} Météo-France forecast(s) to process")
     ctx = ExposureContext(SWIO_ISO3S, stage=mode, admin_levels=ADMIN_LEVELS)
-    done = []
+    done, failed = [], []
     for row in todo.itertuples():
         logger.info(f"SWIO {row.disturbance_id} {row.issued_time}")
-        process_mfr_forecast(engine, ctx, row.disturbance_id, row.issued_time, scenarios=scenarios)
+        try:
+            process_mfr_forecast(engine, ctx, row.disturbance_id, row.issued_time, scenarios=scenarios)
+        except Exception as exc:  # noqa: BLE001 — the rest still run
+            logger.exception(f"SWIO {row.disturbance_id} {row.issued_time} failed")
+            failed.append((row.disturbance_id, str(row.issued_time), repr(exc)))
+            continue
         done.append((row.disturbance_id, row.issued_time))
+    if failed:
+        raise RuntimeError(f"{len(failed)} of {len(todo)} forecasts failed: {failed[:5]}")
     return done
 
 
@@ -489,9 +548,9 @@ def load_besttrack(stage: str = "dev") -> pd.DataFrame:
 
 
 def load_mfr_history(engine, first_season: int) -> dict:
-    """{disturbance_id: (points, track_source)} for seasons after the best
-    track: the latest final track (kind 'track') where there is one, else the
-    analysis points of the system's forecasts."""
+    """{disturbance_id: (points, track_source, last_issued)} for seasons after
+    the best track: the latest final track (kind 'track') where there is one,
+    else the analysis points of the system's forecasts."""
     first = max(first_season, BESTTRACK_LAST_SEASON + 1)
     sql = f"""
         SELECT {_POINT_COLS}, s.storm_id
@@ -512,16 +571,16 @@ def load_mfr_history(engine, first_season: int) -> dict:
             source = "mfr_forecasts"
         pts = _mfr_radii(pts.drop_duplicates("valid_time", keep="last"))
         pts["season"] = season_of_disturbance(did)
-        out[did] = (pts, source)
+        out[did] = (pts, source, g["issued_time"].max())
     return out
 
 
-def load_ibtracs_history(engine, first_season: int, exclude_storm_ids) -> dict:
-    """{sid: (points, 'ibtracs')} for named systems after the best track that
-    Météo-France data doesn't cover (e.g. the Feb-Oct 2025 gap): Réunion's
-    rows of IBTrACS, deduplicated on (sid, valid_time) — unnamed and renamed
-    storms have repeated rows in ibtracs_tracks_geo — and keeping the rows
-    whose storm_id is the storm's current one."""
+def load_ibtracs_history(engine, first_season: int) -> dict:
+    """{sid: points} for named storms after the best track: Réunion's rows of
+    IBTrACS, deduplicated on (sid, valid_time) — unnamed and renamed storms
+    have repeated rows in ibtracs_tracks_geo — keeping the rows whose
+    storm_id is the storm's current one. IBTrACS's Réunion "R50" is
+    Réunion's 48 kt radius; it has no 64 kt radius."""
     first = max(first_season, BESTTRACK_LAST_SEASON + 1)
     df = _read(engine, """
         SELECT DISTINCT ON (g.sid, g.valid_time)
@@ -532,35 +591,100 @@ def load_ibtracs_history(engine, first_season: int, exclude_storm_ids) -> dict:
         WHERE g.basin = 'SI' AND g.provider = 'reunion' AND s.season >= :season_end
           AND s.storm_id IS NOT NULL AND g.storm_id = s.storm_id
         ORDER BY g.sid, g.valid_time""", {"season_end": first + 1})
-    exclude = set(exclude_storm_ids)
     out = {}
     for sid, g in df.groupby("sid"):
-        if g.storm_id.iloc[0] in exclude or not (g.wind >= SPEEDS[0]).any():
-            continue
-        # IBTrACS's Réunion "R50" is Réunion's 48 kt radius.
         pts = radii_columns(g, {34: "quadrant_radius_34", 48: "quadrant_radius_50",
                                 64: "quadrant_radius_64"})
         pts["season"] = int(g.season.iloc[0]) - 1
         pts["disturbance_id"] = sid
-        out[sid] = (pts, "ibtracs")
+        out[sid] = pts.reset_index(drop=True)
     return out
 
 
-def history_tracks(engine, stage: str, first_season: int = FIRST_SEASON, ibtracs_engine=None) -> dict:
+def combine_with_ibtracs(mf: pd.DataFrame, ib: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """(points, track_source) for a forecast-only Météo-France track whose
+    storm IBTrACS also has.
+
+    Forecasts stop before a system ends (and some ran into the Feb-Oct 2025
+    gap): where IBTrACS has 34 kt points more than IBTRACS_TAIL_GAP after the
+    last Météo-France analysis, its later points are appended. Where the
+    forecasts never reach 34 kt and IBTrACS does, IBTrACS is used instead.
+    """
+    ib34 = ib[ib["wind"] >= SPEEDS[0]]
+    if ib34.empty:
+        return mf, "mfr_forecasts"
+    if not (mf["wind"] >= SPEEDS[0]).any():
+        return ib, "ibtracs"
+    last = mf["valid_time"].max()
+    if ib34["valid_time"].max() > last + IBTRACS_TAIL_GAP:
+        tail = ib[ib["valid_time"] > last]
+        return pd.concat([mf, tail], ignore_index=True), "mfr_forecasts_ibtracs"
+    return mf, "mfr_forecasts"
+
+
+def same_system(pts: pd.DataFrame, others: list) -> bool:
+    """Does the track come within SAME_SYSTEM_KM of any of ``others`` at a
+    common time?"""
+    a = pts[["valid_time", "lon", "lat"]]
+    for o in others:
+        m = a.merge(o[["valid_time", "lon", "lat"]], on="valid_time")
+        if m.empty:
+            continue
+        _, _, d = _GEOD.inv(m.lon_x.to_numpy(float), m.lat_x.to_numpy(float),
+                            m.lon_y.to_numpy(float), m.lat_y.to_numpy(float))
+        if (np.asarray(d) / 1000.0 <= SAME_SYSTEM_KM).any():
+            return True
+    return False
+
+
+def history_tracks(engine, stage: str, first_season: int = FIRST_SEASON, ibtracs_engine=None,
+                   now=None) -> dict:
     """{key: (points, track_source, storm_id, season)}, one track per system
     with any point at 34 kt or more. IBTrACS is read with ``ibtracs_engine``
-    (the IBTrACS tables are kept current in prod only)."""
+    (the IBTrACS tables are kept current in prod only).
+
+    Systems still active (no final track, a forecast within ACTIVE_HOLD) are
+    left out. IBTrACS storms enter only where Météo-France has nothing for
+    them: neither the same storm_id nor a track within SAME_SYSTEM_KM at a
+    common time.
+    """
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None) if now is None else now
     tracks = {}
     bt = load_besttrack(stage)
     bt = bt[(bt.season >= first_season) & (bt.season <= BESTTRACK_LAST_SEASON)]
     for did, g in bt.groupby("disturbance_id"):
         tracks[did] = (g, "besttrack", g.storm_id.iloc[0], int(g.season.iloc[0]))
-    for did, (g, src) in load_mfr_history(engine, first_season).items():
-        tracks[did] = (g, src, g.storm_id.dropna().iloc[-1] if g.storm_id.notna().any() else None,
-                       season_of_disturbance(did))
-    have = {v[2] for v in tracks.values() if v[2]}
-    for sid, (g, src) in load_ibtracs_history(ibtracs_engine or engine, first_season, have).items():
-        tracks[sid] = (g, src, g.storm_id.iloc[0], int(g.season.iloc[0]))
+    mfr = load_mfr_history(engine, first_season)
+    if not mfr:
+        raise RuntimeError(
+            "no Météo-France systems after the best track in storms.mfr_*: "
+            "load them first (mfr_init_backfill / mfr_backfill_cxml)")
+    ib = load_ibtracs_history(ibtracs_engine or engine, first_season)
+    ib_by_storm = {g.storm_id.iloc[0]: sid for sid, g in ib.items()}
+    used = set()
+    for did, (g, src, last_issued) in mfr.items():
+        named = g.storm_id.dropna()
+        storm_id = named.iloc[-1] if len(named) else None
+        sid = ib_by_storm.get(storm_id)
+        if sid is not None:
+            used.add(sid)
+        if src == "mfr_forecasts" and now - last_issued < ACTIVE_HOLD:
+            logger.info(f"{did}: still active, left out of the history")
+            continue
+        if src == "mfr_forecasts" and sid is not None:
+            g, src = combine_with_ibtracs(g, ib[sid])
+        tracks[did] = (g, src, storm_id, season_of_disturbance(did))
+    mfr_pts = [g for g, _, _ in mfr.values()]
+    for sid, g in ib.items():
+        if sid in used or not (g["wind"] >= SPEEDS[0]).any():
+            continue
+        if now - g["valid_time"].max() < ACTIVE_HOLD:
+            continue
+        if same_system(g, mfr_pts):
+            logger.warning(f"{sid} ({g.storm_id.iloc[0]}): a Météo-France system at the same "
+                           "place and time already covers it; not added")
+            continue
+        tracks[sid] = (g, "ibtracs", g.storm_id.iloc[0], int(g.season.iloc[0]))
     return {k: v for k, v in tracks.items() if (v[0]["wind"] >= SPEEDS[0]).any()}
 
 
@@ -670,7 +794,11 @@ def run_swio_admin_population(mode: str = "dev", out_dir: str | None = None) -> 
 
 
 def _ts(value):
-    return None if value is None else pd.Timestamp(value).tz_localize(None)
+    """Naive UTC timestamp (the database's convention) from a CLI value."""
+    if value is None:
+        return None
+    t = pd.Timestamp(value)
+    return t.tz_convert("UTC").tz_localize(None) if t.tzinfo is not None else t
 
 
 def main(argv=None) -> None:

@@ -26,7 +26,8 @@ def main():
             bt = swio.read_besttrack(f.read())
     else:
         bt = swio.load_besttrack("dev")
-    coef, shares = swio_radii.fit(bt)
+    coef, shares, dp_shift = swio_radii.fit(bt)
+    print(f"DP_ERA_SHIFT = np.array([{', '.join(f'{x:.6f}' for x in dp_shift)}])")
     print("COEF = {")
     for (k, m), b in sorted(coef.items()):
         print(f"    ({k}, {m!r}): np.array([{', '.join(f'{x:.6f}' for x in b)}]),")

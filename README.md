@@ -301,17 +301,21 @@ forecast-only swath, and 36 scenarios moving every forecast point by its
 History: Réunion's best track for 1985/86–2022/23 (the file Météo-France
 shared, dev blob `projects`,
 `ds-storms-pipeline/raw/mfr/drive_copies/data_cyclone_SWIO_19851986_to_20222023.csv`);
-after that the system's final track, else its forecasts' analysis points,
+after that the system's final track, else its forecasts' analysis points
+(topped up from IBTrACS where IBTrACS runs on more than 12 h past them),
 else IBTrACS (Réunion's columns, read from prod; used for the Feb–Oct 2025
-storms with no Météo-France copy). The best track has Réunion's 48 kt radii
+storms with no Météo-France copy). Systems still active are left out until
+they end. The best track has Réunion's 48 kt radii
 from 2003/04 and its 34/64 kt radii from 2010/11. Where Réunion's wind
 reaches a threshold but it gives no radius (all earlier radii, and gaps
 later, often overland), the radius is modelled (`src/pipelines/swio_radii.py`,
 refit with `scripts/fit_swio_radii.py`): log mean radius from wind,
 latitude, central pressure and region, and from Réunion's 48 kt radius where
 there is one, spread over quadrants with the median asymmetry and nested
-34 ⊇ 48 ⊇ 64. Fitted at Réunion's current practice: it drew larger 48/64 kt
-radii in 2010/11–2015/16. Season-by-season check on 2016/17–2022/23 (each
+34 ⊇ 48 ⊇ 64. Fitted at Réunion's current practice: at the same wind it drew
+smaller 48 kt radii in 2003/04–2009/10 and larger 48/64 kt radii in
+2010/11–2015/16, and its central pressure was lower before 2010/11, so the
+pressure term uses each era's pressure moved to today's. Season-by-season check on 2016/17–2022/23 (each
 season modelled by a fit without it, all radii modelled, against Réunion's
 own): median storm/country exposure ratio 1.00 / 0.96 / 1.01 at 34 / 48 /
 64 kt, rank correlation 0.83 / 0.97 / 0.95. The biggest storms come out

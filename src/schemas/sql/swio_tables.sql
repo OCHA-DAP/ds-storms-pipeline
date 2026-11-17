@@ -12,8 +12,9 @@
 --     storms.mfr_processing_completion       (per storm + issuance markers)
 --
 --   Historical, one track per system from Réunion's best track (1985/86 to
---   2022/23), else its final track, else its forecasts' analysis points,
---   else IBTrACS (Réunion's columns):
+--   2022/23), else its final track, else its forecasts' analysis points
+--   (topped up from IBTrACS where IBTrACS runs on past them), else IBTrACS
+--   (Réunion's columns):
 --     storms.swio_hist_wind_buffers + storms.swio_hist_wind_exposure
 --
 -- Plus storms.swio_admin_population: total population of each admin unit as
@@ -185,7 +186,8 @@ CREATE TABLE IF NOT EXISTS storms.swio_hist_wind_buffers
     storm_id       VARCHAR,
     season         SMALLINT NOT NULL,
     track_source   VARCHAR  NOT NULL
-        CHECK (track_source IN ('besttrack', 'mfr_track', 'mfr_forecasts', 'ibtracs')),
+        CHECK (track_source IN ('besttrack', 'mfr_track', 'mfr_forecasts',
+                                'mfr_forecasts_ibtracs', 'ibtracs')),
     wind_speed_kt  SMALLINT NOT NULL CHECK (wind_speed_kt IN (34, 48, 64)),
     n_points       SMALLINT NOT NULL,
     n_modelled     SMALLINT NOT NULL,

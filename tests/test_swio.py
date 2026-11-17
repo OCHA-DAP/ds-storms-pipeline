@@ -220,3 +220,136 @@ def test_shift_points_moves_by_position_accuracy():
     assert s.geometry.y.iloc[0] == pytest.approx(-20.0 + 111.12 / 110.6, rel=0.01)
     assert s.geometry.y.iloc[1] == pytest.approx(-20.0)
     assert s.geometry.y.iloc[2] == pytest.approx(-20.0)
+
+
+# --- review fixes -----------------------------------------------------------
+
+
+def test_model_e_only_at_48_kt_or_more():
+    weak = _pts(wind=[35.0])
+    # a 48 kt radius on a 35 kt point (inconsistent input) must not switch to E
+    assert modelled_mean(weak, 34, r48=np.array([20.0]))[0] == pytest.approx(modelled_mean(weak, 34)[0])
+    strong = _pts(wind=[70.0])
+    assert modelled_mean(strong, 34, r48=np.array([20.0]))[0] != pytest.approx(modelled_mean(strong, 34)[0])
+
+
+def test_older_pressure_is_moved_to_current_practice():
+    now = _pts(wind=[70.0], mslp=[960.0])
+    old = now.assign(season=[1995])
+    current = now.assign(season=[2020])
+    assert modelled_mean(current, 34)[0] == pytest.approx(modelled_mean(now, 34)[0])
+    # the same pressure meant a weaker storm-size signal before 2010/11
+    assert modelled_mean(old, 34)[0] < modelled_mean(now, 34)[0]
+
+
+def test_latest_per_time_takes_radii_from_an_earlier_point():
+    t0 = pd.Timestamp("2026-01-01 00:00")
+    df = pd.DataFrame({
+        "valid_time": [t0, t0],
+        "issued_time": [t0, t0 + pd.Timedelta(hours=6)],
+        "data_type": ["analysis", "analysis"],
+        "wind": [50.0, 55.0],
+        "quadrant_radius_34": [json.dumps([60, 60, 60, 60]), None],
+        "quadrant_radius_48": [None, None],
+        "quadrant_radius_50": [None, None],
+        "quadrant_radius_64": [None, None],
+    })
+    out = swio.latest_per_time(df)
+    assert len(out) == 1 and out.wind.iloc[0] == 55.0  # the latest analysis
+    assert json.loads(out.quadrant_radius_34.iloc[0]) == [60, 60, 60, 60]
+
+
+def _hist(times, winds, lon=55.0):
+    df = pd.DataFrame({"valid_time": pd.to_datetime(times), "wind": winds, "lon": lon, "lat": -20.0,
+                       "mslp": 990.0, "season": 2024})
+    for k in SPEEDS:
+        for q in QUADS:
+            df[f"r{k}_{q}"] = np.nan
+    return df
+
+
+def test_combine_with_ibtracs_tops_up_a_truncated_track():
+    mf = _hist(["2025-02-16 00:00", "2025-02-16 06:00"], [60, 55])
+    ib = _hist(["2025-02-16 00:00", "2025-02-16 06:00", "2025-02-17 00:00", "2025-02-18 00:00"],
+               [60, 55, 50, 40])
+    pts, src = swio.combine_with_ibtracs(mf, ib)
+    assert src == "mfr_forecasts_ibtracs"
+    assert pts.valid_time.tolist() == list(pd.to_datetime(
+        ["2025-02-16 00:00", "2025-02-16 06:00", "2025-02-17 00:00", "2025-02-18 00:00"]))
+
+
+def test_combine_with_ibtracs_keeps_a_complete_track_and_replaces_a_weak_one():
+    mf = _hist(["2025-02-16 00:00", "2025-02-16 06:00"], [60, 55])
+    ib = _hist(["2025-02-16 00:00", "2025-02-16 12:00"], [60, 40])
+    assert swio.combine_with_ibtracs(mf, ib)[1] == "mfr_forecasts"
+    weak = _hist(["2025-02-16 00:00"], [30])
+    assert swio.combine_with_ibtracs(weak, ib)[1] == "ibtracs"
+
+
+def test_same_system_by_place_and_time():
+    a = _hist(["2025-02-16 00:00"], [40], lon=55.0)
+    near = _hist(["2025-02-16 00:00"], [40], lon=56.0)
+    far = _hist(["2025-02-16 00:00"], [40], lon=70.0)
+    later = _hist(["2025-02-20 00:00"], [40], lon=55.0)
+    assert swio.same_system(a, [far, near]) and not swio.same_system(a, [far, later])
+
+
+def test_read_besttrack_refuses_merged_systems():
+    text = (HEADER + "\n"
+            + _bt_line("AAA", 3, 1, 1, 2012, 0, 20.0, 50.0, 40, 990) + "\n"
+            + _bt_line("AAA", 3, 10, 1, 2012, 0, 21.0, 51.0, 40, 990) + "\n").encode()
+    with pytest.raises(ValueError, match="gaps"):
+        swio.read_besttrack(text)
+
+
+def test_cli_timestamps_are_utc():
+    assert swio._ts("2026-02-01T22:00+04:00") == pd.Timestamp("2026-02-01 18:00")
+    assert swio._ts("2026-02-01T22") == pd.Timestamp("2026-02-01 22:00")
+    assert swio._ts(None) is None
+
+
+def test_realtime_one_failure_does_not_stop_the_rest(monkeypatch):
+    todo = pd.DataFrame({"disturbance_id": ["01-20262027", "02-20262027"],
+                         "issued_time": pd.to_datetime(["2026-11-01", "2026-11-02"])})
+    seen = []
+
+    def process(engine, ctx, did, it, scenarios=True):
+        seen.append(did)
+        if did == "01-20262027":
+            raise ValueError("bad forecast")
+
+    monkeypatch.setattr(swio.stratus, "get_engine", lambda **k: object())
+    monkeypatch.setattr(swio, "pending_forecasts", lambda *a, **k: todo)
+    monkeypatch.setattr(swio, "ExposureContext", lambda *a, **k: None)
+    monkeypatch.setattr(swio, "process_mfr_forecast", process)
+    with pytest.raises(RuntimeError, match="1 of 2 forecasts failed"):
+        swio.run_swio_realtime("dev")
+    assert seen == ["01-20262027", "02-20262027"]
+
+
+def test_pending_forecasts_also_takes_late_arrivals():
+    class Eng:
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    captured = {}
+
+    def fake_read(engine, sql, params):
+        captured["sql"], captured["params"] = " ".join(sql.split()), params
+        return pd.DataFrame(columns=["disturbance_id", "issued_time"])
+
+    import src.pipelines.swio as m
+    orig = m._read
+    m._read = fake_read
+    try:
+        t = pd.Timestamp("2026-11-10")
+        swio.pending_forecasts(Eng(), since=t, ingested_since=t, oldest=t - pd.Timedelta(days=25))
+    finally:
+        m._read = orig
+    assert "f.ingested_at >= :ingested_since AND f.issued_time >= :oldest" in captured["sql"]
