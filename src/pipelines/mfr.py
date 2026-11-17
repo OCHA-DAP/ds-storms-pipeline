@@ -857,6 +857,17 @@ _UPDATE_STORM_NAME = text(
     """
 )
 
+# Every point of the system gets the system's storm_id, including those of
+# forecasts issued before it was named (the name as issued stays in
+# mfr_forecasts.name_as_issued).
+_UPDATE_TRACK_STORM_IDS = text(
+    """
+    UPDATE storms.mfr_tracks_geo SET storm_id = :storm_id
+    WHERE disturbance_id = :disturbance_id
+      AND storm_id IS DISTINCT FROM :storm_id
+    """
+)
+
 _RECORD_FILE = text(
     """
     INSERT INTO storms.mfr_files
@@ -984,13 +995,15 @@ def write_forecast(
         _NAMES_AS_ISSUED, {"disturbance_id": fc.storm["disturbance_id"]}
     ).scalars()
     name = next((n for n in map(clean_name, names) if n), None)
+    naming = {
+        "disturbance_id": fc.storm["disturbance_id"],
+        "name": name,
+        "storm_id": make_storm_id(name, fc.storm["season"]),
+    }
+    conn.execute(_UPDATE_STORM_NAME, naming)
     conn.execute(
-        _UPDATE_STORM_NAME,
-        {
-            "disturbance_id": fc.storm["disturbance_id"],
-            "name": name,
-            "storm_id": make_storm_id(name, fc.storm["season"]),
-        },
+        _UPDATE_TRACK_STORM_IDS,
+        {k: naming[k] for k in ("disturbance_id", "storm_id")},
     )
     return "written", message
 
@@ -1184,8 +1197,16 @@ def _known(engine, source: str, retry_failed: bool = False) -> dict[str, dict]:
     return known
 
 
+def _fetch(item) -> bytes:
+    """Bytes, a zero-argument download function, or the exception an earlier
+    download raised."""
+    if isinstance(item, BaseException):
+        raise item
+    return item() if callable(item) else item
+
+
 def _ingest_downloaded(
-    downloaded: dict[str, bytes],
+    downloaded: dict,
     listing: dict[str, dict],
     known: dict[str, set],
     mode: str,
@@ -1194,10 +1215,20 @@ def _ingest_downloaded(
     dry_run: bool,
     archive: bool,
 ) -> dict:
+    """``downloaded``: path -> bytes, or a function returning them (called
+    here, one file at a time), or the exception its download raised. A file
+    that can't be downloaded fails alone; it isn't recorded, so the next run
+    tries it again."""
     results, failed = [], []
-    for path, data in downloaded.items():
+    for path, item in downloaded.items():
         entry = listing[path]
         filename = path.rsplit("/", 1)[-1]
+        try:
+            data = _fetch(item)
+        except Exception as exc:  # noqa: BLE001 — report, carry on
+            logger.exception(f"{path}: download failed")
+            failed.append({"filename": filename, "error": f"download failed: {exc!r}"})
+            continue
         sha256 = hashlib.sha256(data).hexdigest()
         if sha256 in known.get(path, {}).get("shas", ()):
             # Same content as already read from this path (a rewrite).
@@ -1313,7 +1344,7 @@ def sync_blob(
     todo = files_to_fetch(listing, known)
     logger.info(f"{len(todo)} new or changed track files to read")
     downloaded = {
-        path: container_client.get_blob_client(path).download_blob().readall()
+        path: (lambda p=path: container_client.get_blob_client(p).download_blob().readall())
         for path in todo
     }
     return _ingest_downloaded(
@@ -1408,8 +1439,13 @@ def poll_ftp(
         )
         for name in files_to_fetch(listing, known):
             buffer = io.BytesIO()
-            ftp.retrbinary(f"RETR {name}", buffer.write)
-            downloaded[name] = buffer.getvalue()
+            try:
+                ftp.retrbinary(f"RETR {name}", buffer.write)
+                downloaded[name] = buffer.getvalue()
+            except ftplib.error_perm as exc:
+                # One file the server refuses fails alone; a lost
+                # connection still ends the session.
+                downloaded[name] = exc
     finally:
         try:
             ftp.quit()
@@ -1447,8 +1483,10 @@ def backfill_blobs(
     logger.info(f"{len(names)} JSON/CXML files under {prefixes}")
     listing = {name: {"type": "file"} for name in names}
     downloaded = {
-        name: stratus.load_blob_data(
-            name, stage=blob_stage, container_name=container
+        name: (
+            lambda n=name: stratus.load_blob_data(
+                n, stage=blob_stage, container_name=container
+            )
         )
         for name in names
     }

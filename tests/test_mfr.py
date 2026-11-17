@@ -462,6 +462,11 @@ def test_write_new_forecast():
             "storm_id": "testa_si_2026",
         }
     ]
+    # every point of the system, including earlier unnamed forecasts
+    retag = [
+        p for s, p in conn.calls if s.startswith("UPDATE storms.mfr_tracks_geo SET storm_id")
+    ]
+    assert retag == [{"disturbance_id": "10-20252026", "storm_id": "testa_si_2026"}]
 
 
 def test_same_content_is_unchanged():
@@ -1099,3 +1104,77 @@ def test_odd_file_level_values_are_cleaned_or_fail_cleanly():
     ] = 10**400
     fc = mfr.parse_mfr_file(_bytes(doc), FILENAME)  # stored as NULL + raw
     assert fc.tracks[fc.tracks.leadtime == 12].wind_speed.isna().all()
+
+
+def test_sync_download_failure_fails_only_that_file():
+    prefix = mfr.SYNC_PREFIX
+    good, bad = f"{prefix}{FILENAME}", f"{prefix}a/{FILENAME}"
+    container = FakeContainer({good: _bytes(), bad: _bytes()})
+    real = container.get_blob_client
+
+    def flaky(name):
+        if name == bad:
+            raise OSError("blob vanished")
+        return real(name)
+
+    container.get_blob_client = flaky
+    report = mfr.sync_blob(
+        "dev", dry_run=True, engine=FakeEngine(), container_client=container
+    )
+    assert [r["disturbance_id"] for r in report["results"]] == ["10-20252026"]
+    assert len(report["failed"]) == 1
+    assert report["failed"][0]["error"].startswith("download failed")
+
+
+def test_backfill_download_failure_fails_only_that_file(monkeypatch):
+    names = ["p/" + FILENAME, "p/b/" + FILENAME]
+    monkeypatch.setattr(mfr.stratus, "list_container_blobs", lambda **k: names)
+
+    def load(name, **kwargs):
+        if name == names[1]:
+            raise OSError("blob vanished")
+        return _bytes()
+
+    monkeypatch.setattr(mfr.stratus, "load_blob_data", load)
+    report = mfr.backfill_blobs(["p/"], "dev", dry_run=True)
+    assert len(report["results"]) == 1 and len(report["failed"]) == 1
+
+
+def test_ftp_refused_file_fails_alone(monkeypatch):
+    monkeypatch.setattr(
+        mfr, "_ftp_config",
+        lambda: {"host": "h", "user": "u", "password": "p", "directory": "d"},
+    )
+    other = FILENAME.replace("TESTA", "TESTB")
+
+    class FTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def login(self, *a):
+            pass
+
+        def cwd(self, *a):
+            pass
+
+        def mlsd(self, *a, **k):
+            for n in (FILENAME, other):
+                yield n, {"type": "file", "size": "1", "modify": "20261116131400"}
+
+        def nlst(self, *a):
+            return [FILENAME, other]
+
+        def retrbinary(self, cmd, cb):
+            if cmd.endswith(other):
+                raise mfr.ftplib.error_perm("550 gone")
+            cb(_bytes())
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(mfr, "list_ftp_directory", lambda ftp: {
+        FILENAME: {"type": "file", "size": 1, "modified": None},
+        other: {"type": "file", "size": 1, "modified": None},
+    })
+    report = mfr.poll_ftp("dev", dry_run=True, engine=FakeEngine(), ftp_factory=FTP)
+    assert len(report["results"]) == 1 and len(report["failed"]) == 1

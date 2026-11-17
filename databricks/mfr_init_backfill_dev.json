@@ -13,8 +13,7 @@
         "source": "GIT",
         "parameters": [
           "--mode",
-          "dev",
-          "--drop-first"
+          "dev"
         ]
       },
       "new_cluster": {

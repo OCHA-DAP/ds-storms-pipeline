@@ -237,7 +237,7 @@ COMMENT ON COLUMN storms.mfr_tracks_geo.quadrant_radius_64 IS
 COMMENT ON COLUMN storms.mfr_tracks_geo.raw_fields IS
     'Every other point property with a value, keyed by its path in the file';
 COMMENT ON COLUMN storms.mfr_tracks_geo.storm_id IS
-    'storm_id implied by this forecast''s name, NULL while unnamed';
+    'The system''s storm_id (as in mfr_storms), on every point once the system is named, including forecasts issued before; NULL while unnamed';
 COMMENT ON COLUMN storms.mfr_tracks_geo.point_id IS
     'Unique identifier (UUID) for this track point';
 COMMENT ON COLUMN storms.mfr_tracks_geo.geometry IS
