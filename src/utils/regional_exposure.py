@@ -183,14 +183,18 @@ def compute_unit_population(ctx: ExposureContext) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def replace_rows(engine, table: str, df: pd.DataFrame, key: dict) -> None:
+def replace_rows(engine, table: str, df: pd.DataFrame, key: dict, conn=None) -> None:
     """Delete every row of ``table`` matching ``key`` and insert ``df``, in one
-    transaction (an upsert alone would leave stale units behind)."""
+    transaction (an upsert alone would leave stale units behind); inside
+    ``conn``'s transaction when given."""
+    if conn is None:
+        with engine.begin() as c:
+            replace_rows(engine, table, df, key, conn=c)
+        return
     where = " AND ".join(f"{c} = :{c}" for c in key)
-    with engine.begin() as conn:
-        conn.execute(text(f"DELETE FROM storms.{table} WHERE {where}"), key)
-        if df is not None and not df.empty:
-            df = pd.DataFrame(df)  # plain frame: geometry goes in as WKT
-            if "geometry" in df.columns:
-                df["geometry"] = [None if g is None or g.is_empty else g.wkt for g in df["geometry"]]
-            df.to_sql(table, conn, schema="storms", if_exists="append", index=False)
+    conn.execute(text(f"DELETE FROM storms.{table} WHERE {where}"), key)
+    if df is not None and not df.empty:
+        df = pd.DataFrame(df)  # plain frame: geometry goes in as WKT
+        if "geometry" in df.columns:
+            df["geometry"] = [None if g is None or g.is_empty else g.wkt for g in df["geometry"]]
+        df.to_sql(table, conn, schema="storms", if_exists="append", index=False)

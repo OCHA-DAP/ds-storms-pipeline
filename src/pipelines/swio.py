@@ -625,9 +625,12 @@ def run_swio_history(
         buf = history_buffers(key, pts, source, storm_id, season)
         exp = compute_exposure(buf[["disturbance_id", "wind_speed_kt", "geometry"]], ctx)
         if engine is not None:
-            replace_rows(engine, "swio_hist_wind_buffers", buf, {"disturbance_id": key})
-            replace_rows(engine, "swio_hist_wind_exposure", exp if not exp.empty else None,
-                         {"disturbance_id": key})
+            # One transaction per system: a resumed run skips systems that
+            # have buffers, so they must never be written without exposure.
+            with engine.begin() as conn:
+                replace_rows(engine, "swio_hist_wind_buffers", buf, {"disturbance_id": key}, conn=conn)
+                replace_rows(engine, "swio_hist_wind_exposure", exp if not exp.empty else None,
+                             {"disturbance_id": key}, conn=conn)
         else:
             buf_parts.append(buf)
             if not exp.empty:
