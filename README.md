@@ -292,7 +292,8 @@ uv run python -m src.pipelines.swio realtime --mode dev
 uv run python -m src.pipelines.swio history --mode dev --overwrite
 ```
 
-Realtime: the `swio` task of `mfr_ingest` runs after `sync`. Per forecast:
+Realtime: the `swio` task of `mfr_ingest` runs after `sync`, even when
+`sync` failed on some file (for the forecasts that did load). Per forecast:
 the forecast swath (leadtime 0–120 h), the observed swath (analysis points of
 every forecast so far; a later forecast's analysis of a time wins), the
 forecast-only swath, and 36 scenarios moving every forecast point by its
@@ -305,17 +306,24 @@ after that the system's final track, else its forecasts' analysis points
 (topped up from IBTrACS where IBTrACS runs on more than 12 h past them),
 else IBTrACS (Réunion's columns, read from prod; used for the Feb–Oct 2025
 storms with no Météo-France copy). Systems still active are left out until
-they end. The best track has Réunion's 48 kt radii
+they end. The `swio_history` task of `mfr_ingest` rebuilds the seasons after
+the best track on every run (`history --overwrite --first-season 2023`), so
+a system comes in once it has ended and is redone when its final track or
+IBTrACS's track arrives or changes; it stops if the IBTrACS read is empty.
+Data before 1998/99 is less reliable: the table keeps it, but leave it out
+of return periods. The best track has Réunion's 48 kt radii
 from 2003/04 and its 34/64 kt radii from 2010/11. Where Réunion's wind
 reaches a threshold but it gives no radius (all earlier radii, and gaps
 later, often overland), the radius is modelled (`src/pipelines/swio_radii.py`,
 refit with `scripts/fit_swio_radii.py`): log mean radius from wind,
 latitude, central pressure and region, and from Réunion's 48 kt radius where
 there is one, spread over quadrants with the median asymmetry and nested
-34 ⊇ 48 ⊇ 64. Fitted at Réunion's current practice: at the same wind it drew
-smaller 48 kt radii in 2003/04–2009/10 and larger 48/64 kt radii in
-2010/11–2015/16, and its central pressure was lower before 2010/11, so the
-pressure term uses each era's pressure moved to today's. Season-by-season check on 2016/17–2022/23 (each season modelled by a fit
+34 ⊇ 48 ⊇ 64. Fitted at Réunion's current (2016/17 on) radii: at the same
+wind its 48 kt radii were smaller in 2003/04–2009/10, and its 48/64 kt radii
+about 1.2× larger in 2010/11–2015/16, which may be bigger storms rather than
+practice (if so, the radii modelled for that era's few gaps are too small).
+Réunion has given a higher central pressure at the same wind since 2010/11,
+so the pressure term moves each earlier era's pressure to today's. Season-by-season check on 2016/17–2022/23 (each season modelled by a fit
 without it, against Réunion's own radii where it gave them): median
 storm/country exposure ratio 1.00 / 1.00 / 1.01 at 34 / 48 / 64 kt, rank
 correlation 0.82 / 0.96 / 0.95, and the five largest storms 0.60 / 1.06 /
@@ -410,7 +418,7 @@ All at `wind_speed_kt` ∈ {34, 48, 64} (Réunion's 10-minute winds); exposure t
 | `mfr_tracks_obsv_buffers` / `_exposure` | `(disturbance_id, valid_time, wind_speed_kt[, ...])` | Observed swath up to `valid_time` (= the forecast's `issued_time`). |
 | `mfr_tracks_scenario_exposure` / `_envelope` | `(disturbance_id, issued_time, [shift_deg,] wind_speed_kt, ...)` | 36 tracks moved by `position_accuracy` (admin 0 only); envelope = their union with the forecast-only swath. |
 | `mfr_processing_completion` | `(disturbance_id, issued_time, stage)` | `buffers`, `exposure`, `scenarios`; redone if the forecast is re-ingested later. |
-| `swio_hist_wind_buffers` / `_exposure` | `(disturbance_id, wind_speed_kt[, admin_level, pcode])` | One track per system since 1985/86. `track_source` ∈ besttrack / mfr_track / mfr_forecasts / ibtracs (keyed by IBTrACS `sid` then); `season` = start year; `n_points` / `n_modelled` = points at the threshold and those with a modelled radius. |
+| `swio_hist_wind_buffers` / `_exposure` | `(disturbance_id, wind_speed_kt[, admin_level, pcode])` | One track per system since 1985/86 (leave seasons before 1998/99 out of return periods). `track_source` ∈ besttrack / mfr_track / mfr_forecasts / mfr_forecasts_ibtracs / ibtracs (keyed by IBTrACS `sid` then); `season` = start year; `n_points` / `n_modelled` = points at the threshold and those with a modelled radius. |
 | `swio_admin_population` | `(admin_level, iso3, pcode)` | Population of each sea-extended unit (denominator). |
 
 ### Shared

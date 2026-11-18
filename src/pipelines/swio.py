@@ -644,22 +644,32 @@ def history_tracks(engine, stage: str, first_season: int = FIRST_SEASON, ibtracs
     (the IBTrACS tables are kept current in prod only).
 
     Systems still active (no final track, a forecast within ACTIVE_HOLD) are
-    left out. IBTrACS storms enter only where Météo-France has nothing for
-    them: neither the same storm_id nor a track within SAME_SYSTEM_KM at a
-    common time.
+    left out; the scheduled job's history step (``--overwrite`` from the
+    first season after the best track) adds them once they end and redoes a
+    system when its track changes. IBTrACS storms enter only where
+    Météo-France has nothing for them: neither the same storm_id nor a track
+    within SAME_SYSTEM_KM at a common time. Raises if the Météo-France or
+    IBTrACS read is empty.
     """
     now = pd.Timestamp.now(tz="UTC").tz_localize(None) if now is None else now
     tracks = {}
-    bt = load_besttrack(stage)
-    bt = bt[(bt.season >= first_season) & (bt.season <= BESTTRACK_LAST_SEASON)]
-    for did, g in bt.groupby("disturbance_id"):
-        tracks[did] = (g, "besttrack", g.storm_id.iloc[0], int(g.season.iloc[0]))
+    if first_season <= BESTTRACK_LAST_SEASON:
+        bt = load_besttrack(stage)
+        bt = bt[(bt.season >= first_season) & (bt.season <= BESTTRACK_LAST_SEASON)]
+        for did, g in bt.groupby("disturbance_id"):
+            tracks[did] = (g, "besttrack", g.storm_id.iloc[0], int(g.season.iloc[0]))
     mfr = load_mfr_history(engine, first_season)
     if not mfr:
         raise RuntimeError(
             "no Météo-France systems after the best track in storms.mfr_*: "
             "load them first (mfr_init_backfill / mfr_backfill_cxml)")
     ib = load_ibtracs_history(ibtracs_engine or engine, first_season)
+    if not ib:
+        # An empty read (the IBTrACS tables being reloaded) would drop the
+        # storms only IBTrACS has and cut the IBTrACS tails off others.
+        raise RuntimeError(
+            f"no IBTrACS storms for seasons >= {max(first_season, BESTTRACK_LAST_SEASON + 1)} "
+            "in storms.ibtracs_*: not building the history without them")
     ib_by_storm = {g.storm_id.iloc[0]: sid for sid, g in ib.items()}
     used = set()
     for did, (g, src, last_issued) in mfr.items():

@@ -294,6 +294,22 @@ def test_same_system_by_place_and_time():
     assert swio.same_system(a, [far, near]) and not swio.same_system(a, [far, later])
 
 
+def test_history_refuses_an_empty_ibtracs_read(monkeypatch):
+    mf = _hist(["2024-02-16 00:00", "2024-02-16 06:00"], [60, 55]).assign(storm_id="x")
+    def no_besttrack(stage):
+        raise AssertionError("seasons after the best track don't need it")
+    monkeypatch.setattr(swio, "load_besttrack", no_besttrack)
+    monkeypatch.setattr(swio, "load_mfr_history",
+                        lambda engine, first: {"05-20232024": (mf, "mfr_track", pd.Timestamp("2024-02-16"))})
+    monkeypatch.setattr(swio, "load_ibtracs_history", lambda engine, first: {})
+    with pytest.raises(RuntimeError, match="IBTrACS"):
+        swio.history_tracks(None, "dev", 2023, now=pd.Timestamp("2026-11-18"))
+    ib = {"2024046S10050": _hist(["2024-02-16 00:00"], [40], lon=90.0).assign(storm_id="y")}
+    monkeypatch.setattr(swio, "load_ibtracs_history", lambda engine, first: ib)
+    out = swio.history_tracks(None, "dev", 2023, now=pd.Timestamp("2026-11-18"))
+    assert set(out) == {"05-20232024", "2024046S10050"}
+
+
 def test_read_besttrack_refuses_merged_systems():
     text = (HEADER + "\n"
             + _bt_line("AAA", 3, 1, 1, 2012, 0, 20.0, 50.0, 40, 990) + "\n"
