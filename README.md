@@ -314,7 +314,7 @@ Data before 1998/99 is less reliable: the table keeps it, but leave it out
 of return periods. The best track has Réunion's 48 kt radii
 from 2003/04 and its 34/64 kt radii from 2010/11. Where Réunion's wind
 reaches a threshold but it gives no radius (all earlier radii, and gaps
-later, often overland), the radius is modelled (`src/pipelines/swio_radii.py`,
+later, over land and at sea), the radius is modelled (`src/pipelines/swio_radii.py`,
 refit with `scripts/fit_swio_radii.py`): log mean radius from wind,
 latitude, central pressure and region, and from Réunion's 48 kt radius where
 there is one, spread over quadrants with the median asymmetry and nested
@@ -418,7 +418,7 @@ All at `wind_speed_kt` ∈ {34, 48, 64} (Réunion's 10-minute winds); exposure t
 | `mfr_tracks_obsv_buffers` / `_exposure` | `(disturbance_id, valid_time, wind_speed_kt[, ...])` | Observed swath up to `valid_time` (= the forecast's `issued_time`). |
 | `mfr_tracks_scenario_exposure` / `_envelope` | `(disturbance_id, issued_time, [shift_deg,] wind_speed_kt, ...)` | 36 tracks moved by `position_accuracy` (admin 0 only); envelope = their union with the forecast-only swath. |
 | `mfr_processing_completion` | `(disturbance_id, issued_time, stage)` | `buffers`, `exposure`, `scenarios`; redone if the forecast is re-ingested later. |
-| `swio_hist_wind_buffers` / `_exposure` | `(disturbance_id, wind_speed_kt[, admin_level, pcode])` | One track per system since 1985/86 (leave seasons before 1998/99 out of return periods). `track_source` ∈ besttrack / mfr_track / mfr_forecasts / mfr_forecasts_ibtracs / ibtracs (keyed by IBTrACS `sid` then); `season` = start year; `n_points` / `n_modelled` = points at the threshold and those with a modelled radius. |
+| `swio_hist_wind_buffers` / `_exposure` | `(disturbance_id, wind_speed_kt[, admin_level, pcode])` | One track per system since 1985/86 (leave seasons before 1998/99 out of return periods). `track_source` ∈ besttrack / mfr_track / mfr_forecasts / mfr_forecasts_ibtracs / ibtracs (keyed by IBTrACS `sid` when Météo-France has no system for it); `season` = start year; `n_points` / `n_modelled` = points at the threshold and those with a modelled radius. |
 | `swio_admin_population` | `(admin_level, iso3, pcode)` | Population of each sea-extended unit (denominator). |
 
 ### Shared

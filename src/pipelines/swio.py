@@ -733,51 +733,66 @@ def run_swio_history(
     if keys:
         tracks = {k: v for k, v in tracks.items() if k in set(keys)}
     engine = None if out_dir else stratus.get_engine(stage=mode, write=True)
-    if engine is not None and overwrite and not keys:
-        # A system can change key (an IBTrACS fallback replaced by a
-        # Météo-France track): a full refresh drops keys no longer produced.
-        current = sorted(tracks)
-        for table in ("swio_hist_wind_exposure", "swio_hist_wind_buffers"):
-            with engine.begin() as conn:
-                n = conn.execute(
-                    text(f"DELETE FROM storms.{table} WHERE NOT (disturbance_id = ANY(:k)) "
-                         "AND disturbance_id IN (SELECT disturbance_id FROM storms.swio_hist_wind_buffers "
-                         "WHERE season >= :first)"),
-                    {"k": current, "first": first_season},
-                ).rowcount
-            if n:
-                logger.info(f"{table}: removed {n} rows of systems no longer in the history")
+    full = overwrite and not keys
     if engine is not None and not overwrite:
         with engine.connect() as conn:
             done = {r[0] for r in conn.execute(text(
                 "SELECT DISTINCT disturbance_id FROM storms.swio_hist_wind_buffers"))}
         tracks = {k: v for k, v in tracks.items() if k not in done}
     logger.info(f"{len(tracks)} SWIO systems to process (season >= {first_season})")
-    ctx = ExposureContext(SWIO_ISO3S, stage=mode, admin_levels=ADMIN_LEVELS)
-    buf_parts, exp_parts = [], []
+    ctx = ExposureContext(SWIO_ISO3S, stage=mode, admin_levels=ADMIN_LEVELS) if tracks else None
+    buf_parts, exp_parts, failed = [], [], []
     for i, (key, (pts, source, storm_id, season)) in enumerate(sorted(tracks.items())):
-        buf = history_buffers(key, pts, source, storm_id, season)
-        exp = compute_exposure(buf[["disturbance_id", "wind_speed_kt", "geometry"]], ctx)
-        if engine is not None:
-            # One transaction per system: a resumed run skips systems that
-            # have buffers, so they must never be written without exposure.
-            with engine.begin() as conn:
-                replace_rows(engine, "swio_hist_wind_buffers", buf, {"disturbance_id": key}, conn=conn)
-                replace_rows(engine, "swio_hist_wind_exposure", exp if not exp.empty else None,
-                             {"disturbance_id": key}, conn=conn)
-        else:
-            buf_parts.append(buf)
-            if not exp.empty:
-                exp_parts.append(exp)
+        try:
+            buf = history_buffers(key, pts, source, storm_id, season)
+            exp = compute_exposure(buf[["disturbance_id", "wind_speed_kt", "geometry"]], ctx)
+            if engine is not None:
+                # One transaction per system: a resumed run skips systems that
+                # have buffers, so they must never be written without exposure.
+                with engine.begin() as conn:
+                    replace_rows(engine, "swio_hist_wind_buffers", buf, {"disturbance_id": key}, conn=conn)
+                    replace_rows(engine, "swio_hist_wind_exposure", exp if not exp.empty else None,
+                                 {"disturbance_id": key}, conn=conn)
+            else:
+                buf_parts.append(buf)
+                if not exp.empty:
+                    exp_parts.append(exp)
+        except Exception:
+            logger.exception(f"{key}: history failed; its stored rows are left as they were")
+            failed.append(key)
         if (i + 1) % 25 == 0:
             logger.info(f"history: {i + 1}/{len(tracks)} systems")
-    if out_dir:
+    if engine is not None and full:
+        if failed:
+            logger.warning("some systems failed: systems no longer in the history are kept this run")
+        else:
+            _drop_stale_history(engine, sorted(tracks), first_season)
+    if out_dir and buf_parts:
         os.makedirs(out_dir, exist_ok=True)
         gpd.GeoDataFrame(pd.concat(buf_parts, ignore_index=True), crs="EPSG:4326").to_parquet(
             os.path.join(out_dir, "swio_hist_wind_buffers.parquet"))
         if exp_parts:
             pd.concat(exp_parts, ignore_index=True).to_parquet(
                 os.path.join(out_dir, "swio_hist_wind_exposure.parquet"))
+    if failed:
+        raise RuntimeError(f"history failed for {len(failed)} of {len(tracks)} systems: {failed}")
+
+
+def _drop_stale_history(engine, current: list, first_season: int) -> None:
+    """Remove systems of seasons >= first_season that the history no longer
+    produces: one whose key changed (an IBTrACS stand-in replaced by a
+    Météo-France system), or one active again. Run after the rebuild, so a
+    storm is never missing under both keys."""
+    for table in ("swio_hist_wind_exposure", "swio_hist_wind_buffers"):
+        with engine.begin() as conn:
+            n = conn.execute(
+                text(f"DELETE FROM storms.{table} WHERE NOT (disturbance_id = ANY(:k)) "
+                     "AND disturbance_id IN (SELECT disturbance_id FROM storms.swio_hist_wind_buffers "
+                     "WHERE season >= :first)"),
+                {"k": current, "first": first_season},
+            ).rowcount
+        if n:
+            logger.info(f"{table}: removed {n} rows of systems no longer in the history")
 
 
 def run_swio_admin_population(mode: str = "dev", out_dir: str | None = None) -> pd.DataFrame:

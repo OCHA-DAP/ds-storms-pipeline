@@ -310,6 +310,38 @@ def test_history_refuses_an_empty_ibtracs_read(monkeypatch):
     assert set(out) == {"05-20232024", "2024046S10050"}
 
 
+def test_history_one_failure_keeps_the_rest_and_the_stale_keys(monkeypatch):
+    tracks = {k: (None, "mfr_track", None, 2024) for k in ("01-20242025", "02-20242025", "03-20242025")}
+    written, dropped = [], []
+
+    def buffers(key, *a):
+        if key == "02-20242025":
+            raise ValueError("bad swath")
+        return pd.DataFrame({"disturbance_id": [key], "wind_speed_kt": [34], "geometry": [None]})
+
+    class Engine:
+        def begin(self):
+            import contextlib
+            return contextlib.nullcontext(None)
+
+    monkeypatch.setattr(swio.stratus, "get_engine", lambda **k: Engine())
+    monkeypatch.setattr(swio, "history_tracks", lambda *a, **k: dict(tracks))
+    monkeypatch.setattr(swio, "ExposureContext", lambda *a, **k: None)
+    monkeypatch.setattr(swio, "history_buffers", buffers)
+    monkeypatch.setattr(swio, "compute_exposure", lambda b, ctx: pd.DataFrame())
+    monkeypatch.setattr(swio, "replace_rows", lambda e, table, df, key, conn=None: written.append(
+        (table, key["disturbance_id"])))
+    monkeypatch.setattr(swio, "_drop_stale_history", lambda *a: dropped.append(a))
+    with pytest.raises(RuntimeError, match="02-20242025"):
+        swio.run_swio_history("dev", 2023, overwrite=True)
+    assert {k for t, k in written if t == "swio_hist_wind_buffers"} == {"01-20242025", "03-20242025"}
+    assert dropped == []  # a failed system may be a renamed key: keep the old one this run
+    tracks.pop("02-20242025")
+    written.clear()
+    swio.run_swio_history("dev", 2023, overwrite=True)
+    assert dropped and dropped[0][1:] == (["01-20242025", "03-20242025"], 2023)
+
+
 def test_read_besttrack_refuses_merged_systems():
     text = (HEADER + "\n"
             + _bt_line("AAA", 3, 1, 1, 2012, 0, 20.0, 50.0, 40, 990) + "\n"

@@ -11,7 +11,8 @@
 #                           run_pipeline.py ecmwf
 #   • mfr_ingest          — 6-hourly Météo-France La Réunion forecast-track
 #                           sync from the meteofr blob, databricks/run_mfr.py sync,
-#                           then swaths + exposure, databricks/run_swio.py realtime
+#                           then swaths + exposure, databricks/run_swio.py realtime,
+#                           then the history since 2023/24, run_swio.py history
 #
 # The jobs stay separate in the Workflows UI (own DAG / schedule /
 # compute). "One bundle" just means one databricks.yml deploys them all.

@@ -11,7 +11,8 @@ Never ``sys.exit`` here: the DBX exec context treats even ``SystemExit(0)``
 as a failed task. A non-zero exit from the module raises instead.
 
 The scheduled MFR Ingest job (databricks.yml) runs
-``databricks/run_swio.py realtime --mode <mode>`` after its sync task.
+``databricks/run_swio.py realtime --mode <mode>`` after its sync task, then
+``history --mode <mode> --overwrite --first-season 2023``.
 """
 
 import os
