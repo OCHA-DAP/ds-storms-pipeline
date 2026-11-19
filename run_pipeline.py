@@ -517,6 +517,14 @@ def main():
         "--no-scenarios", action="store_true",
         help="Skip the 36 uncertainty-shifted tracks",
     )
+    fms_sp_parser.add_argument(
+        "--then-run-job", metavar="JOB_ID", default="",
+        help=(
+            "Start this Databricks job (fire and forget) if the run processed "
+            "at least one forecast. For a job that polls for new forecasts on "
+            "a schedule, so its alert runs only when there is something new"
+        ),
+    )
 
     sp_history_parser = subparsers.add_parser(
         "sp-history",
@@ -826,7 +834,7 @@ def main():
                 all_episodes=args.all_episodes,
             )
     elif args.pipeline == "fms-sp":
-        run_fms_realtime(
+        done = run_fms_realtime(
             mode=args.mode,
             disturbance_id=args.disturbance_id,
             issued_time=_parse_it(args.issued_time),
@@ -834,6 +842,16 @@ def main():
             overwrite=args.overwrite,
             scenarios=not args.no_scenarios,
         )
+        if args.then_run_job.strip() and done:
+            # Same contract as databricks/trigger_job.py: queue the run and
+            # return; a failure to start it never fails this run.
+            try:
+                from databricks.sdk import WorkspaceClient
+
+                run = WorkspaceClient().jobs.run_now(job_id=int(args.then_run_job))
+                logging.getLogger(__name__).info(f"Started job {args.then_run_job} (run {getattr(run, 'run_id', None)})")
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning(f"Could not start job {args.then_run_job}: {exc!r}")
     elif args.pipeline == "sp-history":
         run_sp_history(
             mode=args.mode,
