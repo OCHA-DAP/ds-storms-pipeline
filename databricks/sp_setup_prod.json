@@ -5,19 +5,6 @@
     "git_provider": "gitHub",
     "git_branch": "main"
   },
-  "job_clusters": [
-    {
-      "job_cluster_key": "sp_setup",
-      "new_cluster": {
-        "policy_id": "0017962FF5D1E3B9",
-        "apply_policy_default_values": true,
-        "spark_version": "18.2.x-scala2.13",
-        "node_type_id": "Standard_DS4_v2",
-        "num_workers": 0,
-        "data_security_mode": "SINGLE_USER"
-      }
-    }
-  ],
   "tasks": [
     {
       "task_key": "init_db",
@@ -29,7 +16,6 @@
           "prod"
         ]
       },
-      "job_cluster_key": "sp_setup",
       "libraries": [
         {
           "pypi": {
@@ -92,7 +78,15 @@
           }
         }
       ],
-      "timeout_seconds": 1800
+      "timeout_seconds": 1800,
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      }
     },
     {
       "task_key": "admin_population",
@@ -105,7 +99,6 @@
           "prod"
         ]
       },
-      "job_cluster_key": "sp_setup",
       "libraries": [
         {
           "pypi": {
@@ -173,7 +166,15 @@
         {
           "task_key": "init_db"
         }
-      ]
+      ],
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      }
     },
     {
       "task_key": "history",
@@ -186,7 +187,6 @@
           "prod"
         ]
       },
-      "job_cluster_key": "sp_setup",
       "libraries": [
         {
           "pypi": {
@@ -254,7 +254,15 @@
         {
           "task_key": "init_db"
         }
-      ]
+      ],
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      }
     },
     {
       "task_key": "fms_archive",
@@ -267,7 +275,6 @@
           "prod"
         ]
       },
-      "job_cluster_key": "sp_setup",
       "libraries": [
         {
           "pypi": {
@@ -335,7 +342,15 @@
         {
           "task_key": "init_db"
         }
-      ]
+      ],
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      }
     }
   ],
   "run_as": {
