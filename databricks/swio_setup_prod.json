@@ -5,23 +5,9 @@
     "git_provider": "gitHub",
     "git_branch": "main"
   },
-  "job_clusters": [
-    {
-      "job_cluster_key": "swio_setup",
-      "new_cluster": {
-        "policy_id": "0017962FF5D1E3B9",
-        "apply_policy_default_values": true,
-        "spark_version": "18.2.x-scala2.13",
-        "node_type_id": "Standard_DS4_v2",
-        "num_workers": 0,
-        "data_security_mode": "SINGLE_USER"
-      }
-    }
-  ],
   "tasks": [
     {
       "task_key": "init_tables",
-      "job_cluster_key": "swio_setup",
       "spark_python_task": {
         "python_file": "scripts/init_db_swio.py",
         "source": "GIT",
@@ -29,6 +15,14 @@
           "--mode",
           "prod"
         ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
       },
       "libraries": [
         {
@@ -81,7 +75,6 @@
           "task_key": "init_tables"
         }
       ],
-      "job_cluster_key": "swio_setup",
       "spark_python_task": {
         "python_file": "databricks/run_swio.py",
         "source": "GIT",
@@ -90,6 +83,14 @@
           "--mode",
           "prod"
         ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
       },
       "libraries": [
         {
@@ -142,7 +143,6 @@
           "task_key": "admin_population"
         }
       ],
-      "job_cluster_key": "swio_setup",
       "spark_python_task": {
         "python_file": "databricks/run_swio.py",
         "source": "GIT",
@@ -156,6 +156,14 @@
           "--ibtracs-stage",
           "prod"
         ]
+      },
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
       },
       "libraries": [
         {
