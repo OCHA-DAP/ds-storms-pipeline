@@ -274,6 +274,65 @@ have no uncertainty cone, and before 2020/21 they carry wind radii only at
 hour 0, not at forecast lead times. Several versions of the same forecast
 are common (corrections); 22 files were produced more than 24 h late.
 
+### SWIO (RSMC La Réunion) — swaths and exposure
+
+`src/pipelines/swio.py` turns the `mfr_*` tables into wind swaths and
+population exposure at Réunion's own thresholds, 34/48/64 kt (10-minute
+winds; the older product's "50 kt" radius and IBTrACS's Réunion "R50" are the
+same 48 kt radius). Swaths are geodesic; admin units are FieldMaps admin 0/1
+extended 500 m into the sea (`src/utils/regional_exposure.py`, the South
+Pacific method).
+
+```bash
+uv run python scripts/init_db_swio.py --mode dev
+uv run python -m src.pipelines.swio admin-population --mode dev
+# New forecasts of the last 5 days (or --disturbance-id / --issued-time / --since)
+uv run python -m src.pipelines.swio realtime --mode dev
+# History, one track per system; --out-dir writes parquet instead
+uv run python -m src.pipelines.swio history --mode dev --overwrite
+```
+
+Realtime: the `swio` task of `mfr_ingest` runs after `sync`, even when
+`sync` failed on some file (for the forecasts that did load). Per forecast:
+the forecast swath (leadtime 0–120 h), the observed swath (analysis points of
+every forecast so far; a later forecast's analysis of a time wins), the
+forecast-only swath, and 36 scenarios moving every forecast point by its
+`position_accuracy` towards one compass bearing.
+
+History: Réunion's best track for 1985/86–2022/23 (the file Météo-France
+shared, dev blob `projects`,
+`ds-storms-pipeline/raw/mfr/drive_copies/data_cyclone_SWIO_19851986_to_20222023.csv`);
+after that the system's final track, else its forecasts' analysis points
+(topped up from IBTrACS where IBTrACS runs on more than 12 h past them),
+else IBTrACS (Réunion's columns, read from prod; used for the Feb–Oct 2025
+storms with no Météo-France copy). Systems still active are left out until
+they end. The `swio_history` task of `mfr_ingest` rebuilds the seasons after
+the best track on every run (`history --overwrite --first-season 2023`), so
+a system comes in once it has ended and is redone when its final track or
+IBTrACS's track arrives or changes; it stops if the IBTrACS read is empty.
+Data before 1998/99 is less reliable: the table keeps it, but leave it out
+of return periods. The best track has Réunion's 48 kt radii
+from 2003/04 and its 34/64 kt radii from 2010/11. Where Réunion's wind
+reaches a threshold but it gives no radius (all earlier radii, and gaps
+later, over land and at sea), the radius is modelled (`src/pipelines/swio_radii.py`,
+refit with `scripts/fit_swio_radii.py`): log mean radius from wind,
+latitude, central pressure and region, and from Réunion's 48 kt radius where
+there is one, spread over quadrants with the median asymmetry and nested
+34 ⊇ 48 ⊇ 64. Fitted at Réunion's current (2016/17 on) radii: at the same
+wind its 48 kt radii were smaller in 2003/04–2009/10, and its 48/64 kt radii
+about 1.2× larger in 2010/11–2015/16, which may be bigger storms rather than
+practice (if so, the radii modelled for that era's few gaps are too small).
+Réunion has given a higher central pressure at the same wind since 2010/11,
+so the pressure term moves each earlier era's pressure to today's. Season-by-season check on 2016/17–2022/23 (each season modelled by a fit
+without it, against Réunion's own radii where it gave them): median
+storm/country exposure ratio 1.00 / 1.00 / 1.01 at 34 / 48 / 64 kt, rank
+correlation 0.82 / 0.96 / 0.95, and the five largest storms 0.60 / 1.06 /
+1.07. So 48 and 64 kt hold up in the tail, but modelled 34 kt radii make
+the biggest storms about 40% too small; 34 kt is fully modelled before
+2010/11. Near misses of Mauritius become hits (34 kt total 1.58). One-off setup (tables, admin
+population, history):
+`databricks jobs submit --json @databricks/swio_setup_{dev,prod}.json`.
+
 ## Database schema
 
 All tables live in the `storms` schema. Geometries are EPSG:4326.
@@ -348,6 +407,19 @@ Same key tuple in both: `(issued_time, wind_threshold_kt, percentage, atcf_id, a
 | `mfr_forecasts` | `(disturbance_id, issued_time, kind)` | One row per forecast (`kind = 'forecast'`) or final track (`'track'`): `update_time`, `late_reissue`, `content_sha256`, `raw_blob`, `n_analysis`, `n_forecast`, `max_leadtime`, `uncertainty_cone` (polygon). Deleting a row cascades to its track points. |
 | `mfr_tracks_geo` | `(disturbance_id, issued_time, kind, data_type, valid_time)` | Analysis points (the track so far; `leadtime` <= 0 in forecast files, a few hours past the reference time in some final tracks) and forecast points (0–120 h). `quadrant_radius_{27,28,34,48,50,64}` JSON `[NE,SE,SW,NW]` in nm (a sector Météo-France leaves out is null), `position_accuracy` (nm, = cone half-width), `development`, Dvorak, motion; `raw_fields` (JSONB) for anything else. `storm_id` is the system's, on every point once it is named (forecasts issued before naming included). |
 | `mfr_files` | `(source, source_path, content_sha256)` | Every file read (`meteofr_blob`, `ftp`, `backfill`, `local`), its `raw_blob` and what happened to it (`written`, `unchanged`, `kept_existing`, `failed`). `last_seen` = last listing it was in. |
+
+### SWIO swaths and exposure (`swio_tables.sql`)
+
+All at `wind_speed_kt` ∈ {34, 48, 64} (Réunion's 10-minute winds); exposure tables have `admin_level`, `iso3`, `pcode`, `pop_exposed` on sea-extended units.
+
+| Table | Key | Notes |
+|---|---|---|
+| `mfr_tracks_{fcast,fcastonly}_buffers` / `_exposure` | `(disturbance_id, issued_time, wind_speed_kt[, admin_level, pcode])` | Forecast swath (leadtime 0–120 h); forecast-only = forecast minus observed. |
+| `mfr_tracks_obsv_buffers` / `_exposure` | `(disturbance_id, valid_time, wind_speed_kt[, ...])` | Observed swath up to `valid_time` (= the forecast's `issued_time`). |
+| `mfr_tracks_scenario_exposure` / `_envelope` | `(disturbance_id, issued_time, [shift_deg,] wind_speed_kt, ...)` | 36 tracks moved by `position_accuracy` (admin 0 only); envelope = their union with the forecast-only swath. |
+| `mfr_processing_completion` | `(disturbance_id, issued_time, stage)` | `buffers`, `exposure`, `scenarios`; redone if the forecast is re-ingested later. |
+| `swio_hist_wind_buffers` / `_exposure` | `(disturbance_id, wind_speed_kt[, admin_level, pcode])` | One track per system since 1985/86 (leave seasons before 1998/99 out of return periods). `track_source` ∈ besttrack / mfr_track / mfr_forecasts / mfr_forecasts_ibtracs / ibtracs (keyed by IBTrACS `sid` when Météo-France has no system for it); `season` = start year; `n_points` / `n_modelled` = points at the threshold and those with a modelled radius. |
+| `swio_admin_population` | `(admin_level, iso3, pcode)` | Population of each sea-extended unit (denominator). |
 
 ### Shared
 

@@ -10,7 +10,9 @@
 #   • ecmwf_pipeline      — daily ECMWF forecast-track ETL (single task),
 #                           run_pipeline.py ecmwf
 #   • mfr_ingest          — 6-hourly Météo-France La Réunion forecast-track
-#                           sync from the meteofr blob, databricks/run_mfr.py sync
+#                           sync from the meteofr blob, databricks/run_mfr.py sync,
+#                           then swaths + exposure, databricks/run_swio.py realtime,
+#                           then the history since 2023/24, run_swio.py history
 #
 # The jobs stay separate in the Workflows UI (own DAG / schedule /
 # compute). "One bundle" just means one databricks.yml deploys them all.
@@ -548,7 +550,7 @@ resources:
     # ===================================================================
     mfr_ingest:
       name: MFR Ingest (RSMC La Réunion)
-      description: "Load Météo-France La Réunion tropical cyclone forecast tracks (South-West Indian Ocean) from the meteofr blob copy into storms.mfr_*"
+      description: "Load Météo-France La Réunion tropical cyclone forecast tracks (South-West Indian Ocean) from the meteofr blob copy into storms.mfr_*, then compute their wind swaths and population exposure"
       permissions:
         - group_name: dsci
           level: CAN_MANAGE
@@ -569,7 +571,7 @@ resources:
         type: dataset-ingest
         hazard: tropical-cyclone
         kb: storms-pipeline
-        output_schema: storms.mfr_storms,storms.mfr_forecasts,storms.mfr_tracks_geo,storms.mfr_files
+        output_schema: storms.mfr_storms,storms.mfr_forecasts,storms.mfr_tracks_geo,storms.mfr_files,storms.mfr_tracks_*,storms.mfr_processing_completion,storms.swio_hist_wind_*
 
       email_notifications:
         on_failure:
@@ -606,6 +608,70 @@ resources:
           libraries:
             - pypi: { package: "ocha-stratus==0.1.7" }
             - pypi: { package: "python-dotenv" }
+          # The tasks after this one run whatever its result, and a job's
+          # result follows its last task: this task emails its own failure.
+          email_notifications:
+            on_failure:
+              - tristan.downing@un.org
+        # Swaths, exposure and uncertainty scenarios for every forecast the
+        # sync brought in (src/pipelines/swio.py: forecasts of the last 5
+        # days not yet processed; nothing to do off-season). Runs even when
+        # sync failed on some file, for the forecasts that did load.
+        - task_key: swio
+          depends_on:
+            - task_key: sync
+          run_if: ALL_DONE
+          job_cluster_key: mfr_cluster
+          timeout_seconds: 5400
+          spark_python_task:
+            python_file: databricks/run_swio.py
+            source: GIT
+            parameters:
+              - "realtime"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+          email_notifications:
+            on_failure:
+              - tristan.downing@un.org
+          libraries:
+            - pypi: { package: "ocha-stratus==0.1.7" }
+            - pypi: { package: "ocha-lens==0.7.0" }
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
+            - pypi: { package: "geoalchemy2==0.18.0" }
+        # History (swio_hist_wind_*): rebuilds the seasons after Réunion's
+        # best track (it ends in 2022/23; those seasons never change), so a
+        # system comes in once it has ended, and is redone when its final
+        # track or IBTrACS's track arrives or changes (~35 systems, a few
+        # minutes). Earlier seasons come from the one-off setup spec.
+        - task_key: swio_history
+          depends_on:
+            - task_key: swio
+          run_if: ALL_DONE
+          job_cluster_key: mfr_cluster
+          timeout_seconds: 3600
+          spark_python_task:
+            python_file: databricks/run_swio.py
+            source: GIT
+            parameters:
+              - "history"
+              - "--mode"
+              - "{{job.parameters.mode}}"
+              - "--overwrite"
+              - "--first-season"
+              - "2023"
+          libraries:
+            - pypi: { package: "ocha-stratus==0.1.7" }
+            - pypi: { package: "ocha-lens==0.7.0" }
+            - pypi: { package: "python-dotenv" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "rasterio" }
+            - pypi: { package: "rioxarray" }
+            - pypi: { package: "exactextract" }
+            - pypi: { package: "geoalchemy2==0.18.0" }
 
 targets:
   dev:

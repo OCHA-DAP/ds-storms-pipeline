@@ -1,0 +1,213 @@
+{
+  "run_name": "[ops] SWIO swaths/exposure setup: tables, admin population, history 1985/86 on (dev)",
+  "git_source": {
+    "git_url": "https://github.com/OCHA-DAP/ds-storms-pipeline.git",
+    "git_provider": "gitHub",
+    "git_branch": "main"
+  },
+  "job_clusters": [
+    {
+      "job_cluster_key": "swio_setup",
+      "new_cluster": {
+        "policy_id": "0017962FF5D1E3B9",
+        "apply_policy_default_values": true,
+        "spark_version": "18.2.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 0,
+        "data_security_mode": "SINGLE_USER"
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "init_tables",
+      "job_cluster_key": "swio_setup",
+      "spark_python_task": {
+        "python_file": "scripts/init_db_swio.py",
+        "source": "GIT",
+        "parameters": [
+          "--mode",
+          "dev"
+        ]
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus==0.1.7"
+          }
+        },
+        {
+          "pypi": {
+            "package": "ocha-lens==0.7.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geopandas"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rasterio"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rioxarray"
+          }
+        },
+        {
+          "pypi": {
+            "package": "exactextract"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geoalchemy2==0.18.0"
+          }
+        }
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "task_key": "admin_population",
+      "depends_on": [
+        {
+          "task_key": "init_tables"
+        }
+      ],
+      "job_cluster_key": "swio_setup",
+      "spark_python_task": {
+        "python_file": "databricks/run_swio.py",
+        "source": "GIT",
+        "parameters": [
+          "admin-population",
+          "--mode",
+          "dev"
+        ]
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus==0.1.7"
+          }
+        },
+        {
+          "pypi": {
+            "package": "ocha-lens==0.7.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geopandas"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rasterio"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rioxarray"
+          }
+        },
+        {
+          "pypi": {
+            "package": "exactextract"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geoalchemy2==0.18.0"
+          }
+        }
+      ],
+      "timeout_seconds": 3600
+    },
+    {
+      "task_key": "history",
+      "depends_on": [
+        {
+          "task_key": "admin_population"
+        }
+      ],
+      "job_cluster_key": "swio_setup",
+      "spark_python_task": {
+        "python_file": "databricks/run_swio.py",
+        "source": "GIT",
+        "parameters": [
+          "history",
+          "--mode",
+          "dev",
+          "--overwrite",
+          "--blob-stage",
+          "dev",
+          "--ibtracs-stage",
+          "prod"
+        ]
+      },
+      "libraries": [
+        {
+          "pypi": {
+            "package": "ocha-stratus==0.1.7"
+          }
+        },
+        {
+          "pypi": {
+            "package": "ocha-lens==0.7.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "python-dotenv"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geopandas"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rasterio"
+          }
+        },
+        {
+          "pypi": {
+            "package": "rioxarray"
+          }
+        },
+        {
+          "pypi": {
+            "package": "exactextract"
+          }
+        },
+        {
+          "pypi": {
+            "package": "geoalchemy2==0.18.0"
+          }
+        }
+      ],
+      "timeout_seconds": 10800
+    }
+  ],
+  "run_as": {
+    "user_name": "adm.tdowning@global.un.org"
+  },
+  "email_notifications": {
+    "on_failure": [
+      "tristan.downing@un.org"
+    ]
+  }
+}
